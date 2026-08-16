@@ -99,6 +99,9 @@ const api = {
 
   activity: (limit?: number): Promise<ActivityItem[]> => ipcRenderer.invoke('activity:list', limit),
   onActivity: (fn: (item: ActivityItem) => void) => on('activity:item', fn),
+  /** An agent finished a turn, with the last thing it said. */
+  onFinished: (fn: (r: { id: string; text: string | null; at: number }) => void) =>
+    on('agent:finished', fn),
 
   askList: (): Promise<Question[]> => ipcRenderer.invoke('ask:list'),
   askAnswer: (qid: string, answer: string) => ipcRenderer.invoke('ask:answer', qid, answer),

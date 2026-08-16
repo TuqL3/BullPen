@@ -107,6 +107,57 @@ export function readCtx(path: string): Ctx | null {
 }
 
 /**
+ * What the agent last said, in one line.
+ *
+ * Finishing a turn is the only moment the human can be told anything, and
+ * "idle" alone says a turn ended, not what came of it. The last assistant text
+ * is the closest thing to a report that exists without asking the model to
+ * write one.
+ *
+ * Tool calls are skipped: an assistant record whose content is all tool_use is
+ * the agent working, not the agent answering.
+ */
+export function lastAssistantText(path: string, max = 240): string | null {
+  let fd: number | null = null
+  try {
+    const size = statSync(path).size
+    if (size === 0) return null
+    const start = Math.max(0, size - TAIL_BYTES)
+    const buf = Buffer.alloc(size - start)
+    fd = openSync(path, 'r')
+    readSync(fd, buf, 0, size - start, start)
+
+    const lines = buf.toString('utf8').split('\n')
+    for (let i = lines.length - 1; i >= (start === 0 ? 0 : 1); i--) {
+      let entry: { type?: string; message?: { content?: unknown } }
+      try {
+        entry = JSON.parse(lines[i])
+      } catch {
+        continue
+      }
+      if (entry.type !== 'assistant') continue
+      const content = entry.message?.content
+      const parts = Array.isArray(content) ? content : []
+      const text = parts
+        .filter((b): b is { type: string; text: string } => {
+          const p = b as { type?: string; text?: unknown }
+          return p?.type === 'text' && typeof p.text === 'string'
+        })
+        .map((b) => b.text.trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+      if (text) return text.length > max ? `${text.slice(0, max)}…` : text
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) closeSync(fd)
+  }
+}
+
+/**
  * Environment variables that must not reach a spawned agent.
  *
  * Bullpen may itself be launched from inside a Claude Code session, and the

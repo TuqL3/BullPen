@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Avatar } from '../Avatar'
 import { CtxMeter } from '../App'
 import { LABEL, MONO } from '../theme'
@@ -30,6 +30,23 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
   const [brief, setBrief] = useState('')
   const [owner, setOwner] = useState('decide')
   const [project, setProject] = useState('')
+  const [done, setDone] = useState<{ id: string; text: string | null; at: number }[]>([])
+
+  // What came back. Nothing else in the app says a task ended: status goes to
+  // idle and that is the whole signal, which reads as nothing having happened.
+  useEffect(() => {
+    window.bullpen
+      .activity(60)
+      .then((items) =>
+        setDone(
+          items
+            .filter((i) => i.kind === 'done')
+            .map((i) => ({ id: i.actor, text: i.text.replace(/^\S+ finished — ?/, ''), at: i.ts }))
+            .slice(0, 6)
+        )
+      )
+    return window.bullpen.onFinished((r) => setDone((d) => [r, ...d].slice(0, 6)))
+  }, [])
   const [sent, setSent] = useState('')
   const god = agents.find((a) => a.role === 'god')
 
@@ -114,6 +131,25 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
           the project has nobody free, it hires someone rather than doing the work itself.
         </p>
       </div>
+
+      {done.length > 0 && (
+        <div style={S.results}>
+          <div style={{ ...LABEL, color: 'var(--ink)', marginBottom: 6 }}>came back</div>
+          {done.map((d, i) => (
+            <div key={`${d.id}-${d.at}-${i}`} style={S.result}>
+              <span style={{ ...LABEL, color: 'var(--ok)', flex: '0 0 92px' }}>{d.id}</span>
+              <span style={{ flex: 1, color: 'var(--muted)', wordBreak: 'break-word' }}>
+                {d.text || 'finished a turn'}
+              </span>
+              <span style={{ ...LABEL, color: 'var(--faint)' }}>{since(d.at)} ago</span>
+            </div>
+          ))}
+          <p style={S.note}>
+            The last thing each agent said when it stopped working. Bullpen does not ask them to
+            report — this is what they actually finished on.
+          </p>
+        </div>
+      )}
 
       {costs.length > 0 && (
         <div style={S.spend}>
@@ -223,6 +259,19 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--accent)',
     cursor: 'pointer',
     font: `11px ${MONO}`
+  },
+  results: {
+    padding: '10px 12px',
+    marginBottom: 12,
+    background: 'var(--panel)',
+    border: '1px solid var(--line)'
+  },
+  result: {
+    display: 'flex',
+    gap: 10,
+    padding: '5px 0',
+    borderTop: '1px solid var(--line)',
+    fontSize: 12
   },
   spend: {
     padding: '10px 12px',

@@ -13,6 +13,7 @@ const KIND_COLOR: Record<string, string> = {
   steer: 'var(--accent-ink)',
   trigger: 'var(--accent-ink)',
   approval: 'var(--danger)',
+  done: 'var(--ok)',
   dead: 'var(--danger)'
 }
 

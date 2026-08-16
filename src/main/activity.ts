@@ -10,6 +10,8 @@ export type ActivityKind =
   | 'steer'
   | 'trigger'
   | 'approval'
+  /** An agent finished a turn it was working on, and what it said. */
+  | 'done'
   | 'dead'
 
 export type Activity = {

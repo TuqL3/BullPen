@@ -8,7 +8,7 @@ import { changes as gitChanges, diff as gitDiff } from './git.ts'
 import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
-import { readCtx, type Ctx } from './ctx.ts'
+import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
 import {
   GOD_ID,
   GOD_NAME,
@@ -173,6 +173,35 @@ function nextHireName(project: string): string {
 
 /** The roster as the renderer last published it - what Michael reads too. */
 let lastFloor: FloorAgent[] = []
+
+/** Agents seen working, so a Stop hook can be told from a turn that mattered. */
+const working = new Set<string>()
+
+/**
+ * Say that an agent finished, and what it said.
+ *
+ * The transcript is written after the Stop hook, so an immediate read finds the
+ * previous turn. Retry a couple of times and take the first answer rather than
+ * polling every agent forever.
+ */
+function reportFinished(id: string): void {
+  const path = approvals.transcriptOf(id)
+  const at = Date.now()
+  const say = (text: string | null): void => {
+    activity.push('done', id, text ? `${id} finished — ${text}` : `${id} finished a turn`)
+    send('agent:finished', { id, text, at })
+  }
+  if (!path) return say(null)
+  const first = lastAssistantText(path)
+  if (first) return say(first)
+  let tries = 0
+  const retry = (): void => {
+    const text = lastAssistantText(path)
+    if (text || ++tries >= 3) return say(text)
+    setTimeout(retry, 1500).unref?.()
+  }
+  setTimeout(retry, 1200).unref?.()
+}
 
 /** Where Michael lives: whatever the operator chose, else the default. */
 const currentGodCwd = (): string => readConfig(BULLPEN_HOME).godCwd ?? godCwd(BULLPEN_HOME)
@@ -375,8 +404,16 @@ function wire(): void {
 
   approvals.on('status', (id: string, status: string) => {
     send('agent:status', id, status)
+    if (status === 'working') working.add(id)
     // A turn just ended, so the transcript now holds its token counts.
-    if (status === 'idle') pushCtxSoon(id)
+    if (status === 'idle') {
+      pushCtxSoon(id)
+      // Only for an agent that was actually working: the Stop hook also fires
+      // for turns nobody was waiting on, and "finished" should mean finished
+      // something. The report is what it last said - the closest thing to one
+      // that exists without asking the model to write it.
+      if (working.delete(id)) reportFinished(id)
+    }
   })
   approvals.on('transcript', (id: string) => pushCtxSoon(id))
   approvals.on('steer-queued', (id: string, note: string, depth: number) =>
