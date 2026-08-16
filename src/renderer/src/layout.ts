@@ -1,54 +1,44 @@
 /**
  * Which panels are on screen, where, and how big.
  *
- * Two bands stacked vertically, each a row of panels. A panel that is wide and
- * short - the office floor, a file list - costs the work above it nothing when
- * it sits in the bottom band, where a column of the same panel would take a
- * third of the window's width for something that needs none of it.
- *
- * Not a general layout tree: a tree buys arbitrary nesting and costs split
- * ratios, drop zones on four edges per node, and a recursive renderer. Two
- * bands answer "put the floor underneath" without any of that.
+ * Columns left to right; each column a stack top to bottom. That is one nesting
+ * level, not a general layout tree: it is enough for "the work tree above the
+ * office floor, both beside the editor", and it costs no recursive renderer, no
+ * per-node split ratios and no drop zones on four edges of every node.
  */
-export const PANELS = ['roster', 'command', 'code', 'floor'] as const
+export const PANELS = ['roster', 'command', 'editor', 'tree', 'floor'] as const
 export type PanelId = (typeof PANELS)[number]
-export type Band = 'top' | 'bottom'
 
 export type Layout = {
-  /** Left to right within each band. Every visible panel is in exactly one. */
-  top: PanelId[]
-  bottom: PanelId[]
-  /** Switched off. Which band it came from is remembered while hidden. */
+  /** Left to right; each column top to bottom. No column is ever empty. */
+  columns: PanelId[][]
+  /** Switched off. Its place in the columns is kept while it is hidden. */
   hidden: PanelId[]
-  /** Relative width inside a band. Only ratios matter, not the units. */
-  weight: Record<PanelId, number>
-  /** Share of the window height the bottom band takes, 10-80. */
-  bottomPct: number
+  /** Relative column widths, aligned to `columns`. Only ratios matter. */
+  colWeight: number[]
+  /** Relative height inside its column. Ignored for a column of one. */
+  rowWeight: Record<PanelId, number>
 }
 
 export const PANEL_TITLE: Record<PanelId, string> = {
   roster: 'roster',
   command: 'command center',
-  code: 'code',
+  editor: 'file · vim',
+  tree: 'work tree',
   floor: 'office floor'
 }
 
-export const MIN_BOTTOM = 10
-export const MAX_BOTTOM = 80
-
-/**
- * The work sits on top; the floor and the file list sit under it, where being
- * wide and short is what they want anyway.
- */
 export const DEFAULT_LAYOUT: Layout = {
-  top: ['roster', 'command'],
-  bottom: ['code', 'floor'],
+  columns: [['roster'], ['command'], ['editor'], ['tree', 'floor']],
   hidden: [],
-  weight: { roster: 0.22, command: 1, code: 1.4, floor: 1 },
-  bottomPct: 40
+  colWeight: [0.62, 2, 2, 1.25],
+  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, floor: 1 }
 }
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
+
+/** Smallest share a panel may be dragged to and still have a grip to drag back. */
+const MIN_SHARE = 0.08
 
 /**
  * Accept whatever was persisted without trusting it. A config written by an
@@ -58,23 +48,40 @@ const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.m
 export function normalise(raw: unknown): Layout {
   const l = (raw ?? {}) as Partial<Layout>
   const seen = new Set<PanelId>()
-  const band = (v: unknown): PanelId[] => {
-    const out: PanelId[] = []
-    for (const p of Array.isArray(v) ? v : []) {
+  const columns: PanelId[][] = []
+  for (const col of Array.isArray(l.columns) ? l.columns : []) {
+    const stack: PanelId[] = []
+    for (const p of Array.isArray(col) ? col : []) {
       if (PANELS.includes(p as PanelId) && !seen.has(p as PanelId)) {
         seen.add(p as PanelId)
-        out.push(p as PanelId)
+        stack.push(p as PanelId)
       }
     }
-    return out
+    if (stack.length) columns.push(stack)
   }
-  const top = band(l.top)
-  const bottom = band(l.bottom)
-  // A panel the persisted layout never mentions goes back where it started,
-  // rather than vanishing with no toggle able to bring it back.
+  // A panel the config never mentions goes back where it started rather than
+  // vanishing with no toggle able to bring it back.
   for (const p of PANELS) {
     if (seen.has(p)) continue
-    ;(DEFAULT_LAYOUT.bottom.includes(p) ? bottom : top).push(p)
+    const home = DEFAULT_LAYOUT.columns.findIndex((c) => c.includes(p))
+    if (columns[home]) columns[home].push(p)
+    else columns.push([p])
+  }
+  if (columns.length === 0) columns.push([...PANELS])
+
+  const colWeight = columns.map((_, i) => {
+    const w = (Array.isArray(l.colWeight) ? l.colWeight : [])[i]
+    if (typeof w === 'number' && Number.isFinite(w) && w > 0.02) return w
+    // No stored width for this column: fall back to the default at the same
+    // position, so a config that only records the arrangement still opens with
+    // a roster-width roster rather than four equal quarters.
+    return DEFAULT_LAYOUT.colWeight[i] ?? 1
+  })
+
+  const rowWeight = { ...DEFAULT_LAYOUT.rowWeight }
+  for (const p of PANELS) {
+    const w = (l.rowWeight ?? {})[p]
+    if (typeof w === 'number' && Number.isFinite(w) && w > 0.02) rowWeight[p] = w
   }
 
   const hidden = [
@@ -85,58 +92,64 @@ export function normalise(raw: unknown): Layout {
     )
   ]
 
-  const weight = { ...DEFAULT_LAYOUT.weight }
-  for (const p of PANELS) {
-    const w = (l.weight ?? {})[p]
-    // Zero or negative would collapse a panel with no handle left to drag back.
-    if (typeof w === 'number' && Number.isFinite(w) && w > 0.02) weight[p] = w
-  }
-
   return {
-    top,
-    bottom,
-    // Hiding everything leaves a window with nothing in it; the toggles are in
-    // the titlebar, but there would be no reason left to trust that.
+    columns,
+    // Hiding everything leaves a window with nothing in it. The toggles are in
+    // the titlebar, but there would be no reason left to believe that.
     hidden: hidden.length === PANELS.length ? [] : hidden,
-    weight,
-    bottomPct: clamp(
-      typeof l.bottomPct === 'number' && Number.isFinite(l.bottomPct)
-        ? l.bottomPct
-        : DEFAULT_LAYOUT.bottomPct,
-      MIN_BOTTOM,
-      MAX_BOTTOM
-    )
+    colWeight,
+    rowWeight
   }
 }
 
-export const bandOf = (l: Layout, id: PanelId): Band => (l.bottom.includes(id) ? 'bottom' : 'top')
+/** Columns with every hidden panel removed, and empty columns dropped. */
+export function visible(l: Layout): { panels: PanelId[]; weight: number }[] {
+  const out: { panels: PanelId[]; weight: number }[] = []
+  l.columns.forEach((col, i) => {
+    const panels = col.filter((p) => !l.hidden.includes(p))
+    if (panels.length) out.push({ panels, weight: l.colWeight[i] ?? 1 })
+  })
+  return out
+}
 
-export const visible = (l: Layout, b: Band): PanelId[] =>
-  l[b].filter((p) => !l.hidden.includes(p))
+const without = (columns: PanelId[][], id: PanelId): PanelId[][] =>
+  columns.map((c) => c.filter((p) => p !== id))
+
+/** Drop empty columns and keep the weights aligned to what is left. */
+function compact(l: Layout, columns: PanelId[][]): Layout {
+  const keep = columns.map((c, i) => ({ c, w: l.colWeight[i] ?? 1 })).filter((x) => x.c.length)
+  return { ...l, columns: keep.map((x) => x.c), colWeight: keep.map((x) => x.w) }
+}
 
 /**
- * Move `dragged` so it sits where `target` sits. Dropping onto a panel in the
- * other band moves it between bands, which is the only way a panel changes band.
+ * Move `dragged` next to `target`, above it or below it.
+ *
+ * Above and below rather than a single "swap": the whole point of the last
+ * column is that two panels stack in it, and that needs a way to say which one
+ * goes on top.
  */
-export function move(l: Layout, dragged: PanelId, target: PanelId): Layout {
+export function moveTo(l: Layout, dragged: PanelId, target: PanelId, side: 'above' | 'below'): Layout {
   if (dragged === target) return l
-  const to = bandOf(l, target)
-  const top = l.top.filter((p) => p !== dragged)
-  const bottom = l.bottom.filter((p) => p !== dragged)
-  const dest = to === 'top' ? top : bottom
-  const at = dest.indexOf(target)
-  if (at === -1) return l
-  dest.splice(at, 0, dragged)
-  return { ...l, top, bottom }
+  const col = l.columns.findIndex((c) => c.includes(target))
+  if (col === -1) return l
+  const columns = without(l.columns, dragged)
+  const at = columns[col].indexOf(target)
+  columns[col].splice(side === 'above' ? at : at + 1, 0, dragged)
+  return compact(l, columns)
 }
 
-/** Move a panel to the end of a band. The only way into an empty band. */
-export function moveToBand(l: Layout, dragged: PanelId, to: Band): Layout {
-  if (bandOf(l, dragged) === to && l[to].at(-1) === dragged) return l
-  const top = l.top.filter((p) => p !== dragged)
-  const bottom = l.bottom.filter((p) => p !== dragged)
-  ;(to === 'top' ? top : bottom).push(dragged)
-  return { ...l, top, bottom }
+/** Lift `dragged` into a column of its own at `index`. */
+export function moveToNewColumn(l: Layout, dragged: PanelId, index: number): Layout {
+  const from = l.columns.findIndex((c) => c.includes(dragged))
+  // Already alone in the column it would land in: nothing to do, and doing it
+  // anyway would renumber every weight for no change.
+  if (from !== -1 && l.columns[from].length === 1 && (from === index || from === index - 1)) return l
+  const columns = without(l.columns, dragged)
+  const at = clamp(index, 0, columns.length)
+  columns.splice(at, 0, [dragged])
+  const colWeight = [...l.colWeight]
+  colWeight.splice(at, 0, 1)
+  return compact({ ...l, colWeight }, columns)
 }
 
 export const toggle = (l: Layout, id: PanelId): Layout => ({
@@ -145,17 +158,25 @@ export const toggle = (l: Layout, id: PanelId): Layout => ({
 })
 
 /**
- * Drag a divider: `delta` is the fraction of the band's width the boundary
- * moved. The pair keeps its combined weight, so panels further along the row do
- * not shift while you are dragging one edge.
+ * Drag the divider between two columns. `delta` is the fraction of the window
+ * width the boundary moved; the pair keeps its combined weight so columns
+ * further along do not shift while one edge is being dragged.
  */
-export function resize(l: Layout, left: PanelId, right: PanelId, delta: number): Layout {
-  const total = l.weight[left] + l.weight[right]
-  const nextLeft = clamp(l.weight[left] + delta * total, total * 0.08, total * 0.92)
-  return { ...l, weight: { ...l.weight, [left]: nextLeft, [right]: total - nextLeft } }
+export function resizeColumns(l: Layout, left: number, delta: number): Layout {
+  const a = l.colWeight[left]
+  const b = l.colWeight[left + 1]
+  if (a === undefined || b === undefined) return l
+  const total = a + b
+  const next = clamp(a + delta * total, total * MIN_SHARE, total * (1 - MIN_SHARE))
+  const colWeight = [...l.colWeight]
+  colWeight[left] = next
+  colWeight[left + 1] = total - next
+  return { ...l, colWeight }
 }
 
-export const setBottomPct = (l: Layout, pct: number): Layout => ({
-  ...l,
-  bottomPct: clamp(pct, MIN_BOTTOM, MAX_BOTTOM)
-})
+/** The same, vertically, between two panels stacked in one column. */
+export function resizeRows(l: Layout, above: PanelId, below: PanelId, delta: number): Layout {
+  const total = l.rowWeight[above] + l.rowWeight[below]
+  const next = clamp(l.rowWeight[above] + delta * total, total * MIN_SHARE, total * (1 - MIN_SHARE))
+  return { ...l, rowWeight: { ...l.rowWeight, [above]: next, [below]: total - next } }
+}

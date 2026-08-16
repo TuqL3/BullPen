@@ -6,30 +6,59 @@ import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
 import { python } from '@codemirror/lang-python'
-import { vim } from '@replit/codemirror-vim'
+import { Vim, getCM, vim } from '@replit/codemirror-vim'
 import { LABEL, MONO } from './theme'
 import type { Agent } from './store'
 import type { CodeEdit, CodeEntry } from '../../preload/index'
 
+export type OpenFile = {
+  agentId: string
+  root: string
+  path: string
+  text: string
+  truncated: boolean
+  binary: boolean
+}
+
 /**
- * The agent's workspace: what it has written lately, the directory it lives in,
- * and an editor for whatever you open.
+ * Ask main for a file, in the form the editor panel wants it.
  *
- * Two ways in, because they answer different questions. "Recently touched" is
- * for watching an agent work - it comes from the PostToolUse hook, so it is
- * what the agent actually wrote, not what happens to be newest on disk. The
- * tree is for the file you already know the name of.
+ * Lives here rather than in either panel because the tree opens files and the
+ * editor displays them, and they are separate panels the operator can put in
+ * different columns.
  */
-export function Code({ agent }: { agent: Agent | null }) {
+export async function openFile(agent: Agent, path: string): Promise<OpenFile | string> {
+  const res = await window.bullpen.codeRead(agent.cwd, path)
+  if (res.error) return res.error
+  return {
+    agentId: agent.id,
+    root: agent.cwd,
+    path,
+    text: res.text ?? '',
+    truncated: !!res.truncated,
+    binary: !!res.binary
+  }
+}
+
+/**
+ * What the agent has written lately, and the directory it works in.
+ *
+ * Two lists because they answer different questions. "Recently touched" comes
+ * from the PostToolUse hook, so it is what the agent actually wrote, not what
+ * happens to be newest on disk. The tree is for the file you already know.
+ */
+export function WorkTree({
+  agent,
+  openPath,
+  onOpen
+}: {
+  agent: Agent | null
+  openPath: string | null
+  onOpen: (path: string) => void
+}) {
   const [edits, setEdits] = useState<CodeEdit[]>([])
-  const [openPath, setOpenPath] = useState<string | null>(null)
-  const [doc, setDoc] = useState<{ text: string; truncated: boolean; binary: boolean } | null>(null)
-  const [note, setNote] = useState('')
-  const [dirty, setDirty] = useState(false)
   const [showTree, setShowTree] = useState(true)
   const [showRecent, setShowRecent] = useState(true)
-
-  const root = agent?.cwd ?? ''
 
   const refreshEdits = (): void => {
     if (!agent) return setEdits([])
@@ -44,85 +73,72 @@ export function Code({ agent }: { agent: Agent | null }) {
     })
   }, [agent?.id])
 
-  // Switching agents must not leave another agent's file on screen.
-  useEffect(() => {
-    setOpenPath(null)
-    setDoc(null)
-    setNote('')
-  }, [agent?.id])
-
-  const open = async (path: string): Promise<void> => {
-    if (!root) return
-    const res = await window.bullpen.codeRead(root, path)
-    if (res.error) {
-      setNote(res.error)
-      return
-    }
-    setOpenPath(path)
-    setDoc({ text: res.text ?? '', truncated: !!res.truncated, binary: !!res.binary })
-    setDirty(false)
-    setNote(res.truncated ? 'Showing the first 1 MB — saving would truncate the file.' : '')
-  }
-
-  const save = async (text: string): Promise<void> => {
-    if (!root || !openPath || doc?.truncated) return
-    const res = await window.bullpen.codeWrite(root, openPath, text)
-    setNote(res.error ?? `saved ${openPath}`)
-    if (!res.error) setDirty(false)
-  }
-
   if (!agent) return <div style={S.empty}>Pick an agent to see what it is working on.</div>
 
   return (
-    <div style={S.wrap}>
-      <div style={S.side}>
-        <Section
-          title="recently touched"
-          open={showRecent}
-          onToggle={() => setShowRecent(!showRecent)}
-        >
-          {edits.length === 0 ? (
-            <div style={S.hint}>Nothing yet — this fills in as {agent.name} writes files.</div>
-          ) : (
-            edits.map((e) => (
-              <button
-                key={e.path}
-                style={{ ...S.row, ...(openPath === e.path ? S.rowActive : null) }}
-                title={e.path}
-                onClick={() => open(rel(root, e.path))}
-              >
-                <span style={S.rowName}>{base(e.path)}</span>
-                <span style={S.rowMeta}>{ago(e.ts)}</span>
-              </button>
-            ))
-          )}
-        </Section>
-
-        <Section title="files" open={showTree} onToggle={() => setShowTree(!showTree)}>
-          <Tree root={root} onOpen={open} openPath={openPath} />
-        </Section>
-      </div>
-
-      <div style={S.main}>
-        <div style={S.bar}>
-          <span style={{ ...LABEL, color: 'var(--ink)' }}>{openPath ?? 'no file open'}</span>
-          {dirty && <span style={{ ...LABEL, color: 'var(--warn)' }}>unsaved</span>}
-          <span style={{ flex: 1 }} />
-          <span style={{ ...LABEL, color: 'var(--faint)' }}>vim · :w saves</span>
-        </div>
-        {note && <div style={S.note}>{note}</div>}
-        {!openPath && <div style={S.empty}>Open a file from the left.</div>}
-        {openPath && doc?.binary && <div style={S.empty}>{openPath} is binary.</div>}
-        {openPath && doc && !doc.binary && (
-          <Editor
-            key={`${agent.id}:${openPath}`}
-            path={openPath}
-            text={doc.text}
-            onChange={() => setDirty(true)}
-            onSave={save}
-          />
+    <div style={S.side}>
+      <Section title="recently touched" open={showRecent} onToggle={() => setShowRecent(!showRecent)}>
+        {edits.length === 0 ? (
+          <div style={S.hint}>Nothing yet — this fills in as {agent.name} writes files.</div>
+        ) : (
+          edits.map((e) => (
+            <button
+              key={e.path}
+              style={{ ...S.row, ...(openPath === rel(agent.cwd, e.path) ? S.rowActive : null) }}
+              title={e.path}
+              onClick={() => onOpen(rel(agent.cwd, e.path))}
+            >
+              <span style={S.rowName}>{base(e.path)}</span>
+              <span style={S.rowMeta}>{ago(e.ts)}</span>
+            </button>
+          ))
         )}
+      </Section>
+
+      <Section title="files" open={showTree} onToggle={() => setShowTree(!showTree)}>
+        <Tree key={agent.id} root={agent.cwd} onOpen={onOpen} openPath={openPath} />
+      </Section>
+    </div>
+  )
+}
+
+/** The editor, and nothing else - the file list is its own panel. */
+export function FilePanel({
+  file,
+  onSave,
+  note
+}: {
+  file: OpenFile | null
+  onSave: (text: string) => void
+  note: string
+}) {
+  const [dirty, setDirty] = useState(false)
+
+  useEffect(() => setDirty(false), [file?.agentId, file?.path])
+
+  return (
+    <div style={S.main}>
+      <div style={S.bar}>
+        <span style={{ ...LABEL, color: 'var(--ink)' }}>{file?.path ?? 'no file open'}</span>
+        {dirty && <span style={{ ...LABEL, color: 'var(--warn)' }}>unsaved</span>}
+        <span style={{ flex: 1 }} />
+        <span style={{ ...LABEL, color: 'var(--faint)' }}>vim · :w saves</span>
       </div>
+      {note && <div style={S.note}>{note}</div>}
+      {!file && <div style={S.empty}>Open a file from the work tree.</div>}
+      {file?.binary && <div style={S.empty}>{file.path} is binary.</div>}
+      {file && !file.binary && (
+        <Editor
+          key={`${file.agentId}:${file.path}`}
+          path={file.path}
+          text={file.text}
+          onChange={() => setDirty(true)}
+          onSave={(text) => {
+            onSave(text)
+            setDirty(false)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -230,8 +246,8 @@ function langFor(path: string): Extension[] {
 /**
  * CodeMirror with vim keybindings.
  *
- * `vim()` must come before the rest: it installs its own keymap and expects to
- * win over the defaults it shadows.
+ * `vim()` comes first: it installs its own keymap and expects to win over the
+ * defaults it shadows.
  */
 function Editor({
   path,
@@ -245,8 +261,8 @@ function Editor({
   onSave: (text: string) => void
 }) {
   const host = useRef<HTMLDivElement>(null)
-  // Kept in a ref so the :w handler always writes the current buffer rather
-  // than the text this effect closed over when the file was opened.
+  // Kept in a ref so `:w` writes the current buffer rather than the text this
+  // effect closed over when the file was opened.
   const view = useRef<EditorView | null>(null)
 
   useEffect(() => {
@@ -303,16 +319,15 @@ let saveCurrent: (() => void) | null = null
 
 // Defined once at module load: defining a vim ex command per mount would stack
 // handlers and save the same file several times.
-import { Vim, getCM } from '@replit/codemirror-vim'
 Vim.defineEx('write', 'w', () => saveCurrent?.())
 Vim.defineEx('wq', 'wq', () => saveCurrent?.())
-// `getCM` is imported so the vim addon's CodeMirror shim is initialised before
-// the first editor mounts; without a reference the bundler drops it.
+// Referenced so the bundler keeps the vim addon's CodeMirror shim, which the
+// ex commands above are registered against.
 void getCM
 
 const base = (p: string): string => p.split('/').pop() ?? p
 
-/** Hook payloads carry absolute paths; the panel works in workspace-relative ones. */
+/** Hook payloads carry absolute paths; the panels work in workspace-relative ones. */
 const rel = (root: string, p: string): string =>
   p.startsWith(root) ? p.slice(root.length).replace(/^\//, '') : p
 
@@ -326,14 +341,8 @@ const ago = (ts: number): string => {
 const size = (n: number): string => (n < 1024 ? `${n}b` : `${Math.round(n / 1024)}k`)
 
 const S: Record<string, React.CSSProperties> = {
-  wrap: { display: 'grid', gridTemplateColumns: '210px 1fr', height: '100%', minHeight: 0 },
-  side: {
-    borderRight: '1px solid var(--line)',
-    overflowY: 'auto',
-    font: `11px ${MONO}`,
-    minHeight: 0
-  },
-  main: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 },
+  side: { overflowY: 'auto', font: `11px ${MONO}`, height: '100%', minHeight: 0 },
+  main: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, height: '100%' },
   bar: {
     display: 'flex',
     alignItems: 'center',

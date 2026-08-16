@@ -1,69 +1,77 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  bandOf,
   DEFAULT_LAYOUT,
-  MAX_BOTTOM,
-  MIN_BOTTOM,
-  move,
-  moveToBand,
+  moveTo,
+  moveToNewColumn,
   normalise,
   PANELS,
-  resize,
-  setBottomPct,
+  resizeColumns,
+  resizeRows,
   toggle,
   visible
 } from '../src/renderer/src/layout.ts'
 
-test('a dragged panel lands where the panel it was dropped on sat', () => {
-  const l = move(DEFAULT_LAYOUT, 'floor', 'code')
-  assert.deepEqual(l.bottom, ['floor', 'code'])
-  // Dropping a panel on itself is a click, not a move.
-  assert.deepEqual(move(DEFAULT_LAYOUT, 'code', 'code'), DEFAULT_LAYOUT)
+const cols = (l: { columns: string[][] }): string => l.columns.map((c) => c.join('+')).join('|')
+
+test('the default is the arrangement asked for: four columns, two stacked in the last', () => {
+  assert.equal(cols(DEFAULT_LAYOUT), 'roster|command|editor|tree+floor')
 })
 
-test('dropping onto the other band is what moves a panel between them', () => {
-  const l = move(DEFAULT_LAYOUT, 'floor', 'command')
-  assert.equal(bandOf(l, 'floor'), 'top')
-  assert.deepEqual(l.top, ['roster', 'floor', 'command'])
-  assert.deepEqual(l.bottom, ['code'])
-  // And a band emptied that way can still be reached.
-  const empty = moveToBand(l, 'code', 'top')
-  assert.deepEqual(empty.bottom, [])
-  assert.deepEqual(moveToBand(empty, 'code', 'bottom').bottom, ['code'])
+test('a panel can be dropped above or below the one it lands on', () => {
+  assert.equal(cols(moveTo(DEFAULT_LAYOUT, 'floor', 'tree', 'above')), 'roster|command|editor|floor+tree')
+  // Moving into another column empties the one it left, which disappears.
+  assert.equal(cols(moveTo(DEFAULT_LAYOUT, 'editor', 'tree', 'below')), 'roster|command|tree+editor+floor')
+  assert.deepEqual(moveTo(DEFAULT_LAYOUT, 'tree', 'tree', 'above'), DEFAULT_LAYOUT)
+})
+
+test('an emptied column takes its width with it rather than leaving a gap', () => {
+  const l = moveTo(DEFAULT_LAYOUT, 'editor', 'tree', 'above')
+  assert.equal(l.columns.length, l.colWeight.length)
+  assert.equal(l.columns.length, 3)
+})
+
+test('a panel can be lifted into a column of its own', () => {
+  assert.equal(cols(moveToNewColumn(DEFAULT_LAYOUT, 'floor', 0)), 'floor|roster|command|editor|tree')
+  const l = moveToNewColumn(DEFAULT_LAYOUT, 'floor', 4)
+  assert.equal(cols(l), 'roster|command|editor|tree|floor')
+  assert.equal(l.colWeight.length, 5)
+  // A panel already alone where it would land is left exactly as it is.
+  assert.deepEqual(moveToNewColumn(DEFAULT_LAYOUT, 'command', 1), DEFAULT_LAYOUT)
 })
 
 test('a persisted layout is repaired rather than trusted', () => {
-  // Written by a build that had no code panel.
-  const old = normalise({ top: ['roster', 'command'], bottom: ['floor'] })
-  assert.equal(bandOf(old, 'code'), 'bottom')
-  // Hand-edited nonsense: a duplicate across bands and an unknown id.
-  const fixed = normalise({ top: ['floor', 'nope', 'floor'], bottom: ['floor', 'roster'] })
-  const all = [...fixed.top, ...fixed.bottom]
+  // Written by a build that had one code panel instead of an editor and a tree.
+  const old = normalise({ columns: [['roster'], ['command']] })
+  const all = old.columns.flat()
   assert.equal(all.length, PANELS.length)
   assert.equal(new Set(all).size, PANELS.length)
-  assert.equal(fixed.top[0], 'floor')
+  // Hand-edited nonsense: a duplicate across columns, an unknown id, an empty column.
+  const fixed = normalise({ columns: [['floor'], [], ['floor', 'nope'], ['roster']] })
+  assert.equal(new Set(fixed.columns.flat()).size, PANELS.length)
+  assert.ok(fixed.columns.every((c) => c.length > 0))
+  assert.equal(fixed.columns.length, fixed.colWeight.length)
   assert.deepEqual(normalise(undefined), DEFAULT_LAYOUT)
 })
 
 test('a size that would collapse a panel past reach is refused', () => {
-  assert.equal(normalise({ bottomPct: 0 }).bottomPct, MIN_BOTTOM)
-  assert.equal(normalise({ bottomPct: 500 }).bottomPct, MAX_BOTTOM)
-  assert.equal(normalise({ bottomPct: 'tall' }).bottomPct, DEFAULT_LAYOUT.bottomPct)
-  assert.equal(normalise({ weight: { code: 0 } }).weight.code, DEFAULT_LAYOUT.weight.code)
-  assert.equal(normalise({ weight: { code: -3 } }).weight.code, DEFAULT_LAYOUT.weight.code)
-  assert.equal(normalise({ weight: { code: 2.5 } }).weight.code, 2.5)
-  assert.equal(setBottomPct(DEFAULT_LAYOUT, 99).bottomPct, MAX_BOTTOM)
+  // A width that would collapse the column falls back to the default for that
+  // position, not to an arbitrary equal share.
+  assert.equal(normalise({ colWeight: [0, -1] }).colWeight[0], DEFAULT_LAYOUT.colWeight[0])
+  assert.equal(normalise({ rowWeight: { floor: 0 } }).rowWeight.floor, 1)
+  assert.equal(normalise({ rowWeight: { floor: 3 } }).rowWeight.floor, 3)
+  const far = resizeColumns(DEFAULT_LAYOUT, 1, 99)
+  assert.ok(far.colWeight[2] > 0)
+  const rows = resizeRows(DEFAULT_LAYOUT, 'tree', 'floor', -99)
+  assert.ok(rows.rowWeight.tree > 0)
 })
 
 test('dragging a divider keeps the pair total, so the rest of the row holds still', () => {
-  const before = DEFAULT_LAYOUT.weight.code + DEFAULT_LAYOUT.weight.floor
-  const l = resize(DEFAULT_LAYOUT, 'code', 'floor', 0.2)
-  assert.ok(l.weight.code > DEFAULT_LAYOUT.weight.code)
-  assert.equal(Math.round((l.weight.code + l.weight.floor) * 1000), Math.round(before * 1000))
-  // Dragging past the end clamps instead of collapsing the neighbour.
-  const far = resize(DEFAULT_LAYOUT, 'code', 'floor', 99)
-  assert.ok(far.weight.floor > 0)
+  const before = DEFAULT_LAYOUT.colWeight[1] + DEFAULT_LAYOUT.colWeight[2]
+  const l = resizeColumns(DEFAULT_LAYOUT, 1, 0.1)
+  assert.ok(l.colWeight[1] > DEFAULT_LAYOUT.colWeight[1])
+  assert.equal(Math.round((l.colWeight[1] + l.colWeight[2]) * 1000), Math.round(before * 1000))
+  assert.equal(l.colWeight[3], DEFAULT_LAYOUT.colWeight[3])
 })
 
 test('hiding every panel is refused - it would leave no way back', () => {
@@ -71,9 +79,11 @@ test('hiding every panel is refused - it would leave no way back', () => {
   assert.deepEqual(normalise({ hidden: ['floor', 'nope'] }).hidden, ['floor'])
 })
 
-test('toggling is its own inverse and only affects visibility', () => {
-  const off = toggle(DEFAULT_LAYOUT, 'code')
-  assert.deepEqual(visible(off, 'bottom'), ['floor'])
-  assert.deepEqual(off.bottom, DEFAULT_LAYOUT.bottom)
-  assert.deepEqual(toggle(off, 'code').hidden, [])
+test('hiding a panel drops its column but not its place in the layout', () => {
+  const off = toggle(DEFAULT_LAYOUT, 'editor')
+  assert.equal(visible(off).length, 3)
+  assert.equal(cols(off), cols(DEFAULT_LAYOUT))
+  assert.deepEqual(toggle(off, 'editor').hidden, [])
+  // Hiding one of a stacked pair leaves the column, holding the other.
+  assert.deepEqual(visible(toggle(DEFAULT_LAYOUT, 'floor')).at(-1)?.panels, ['tree'])
 })
