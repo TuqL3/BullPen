@@ -12,6 +12,12 @@ export type Config = {
    * his workspace on a different disk entirely.
    */
   godCwd?: string
+  /**
+   * Panel order and visibility. Stored opaquely: the renderer owns the shape
+   * and repairs whatever it reads, so main has no second copy of those rules
+   * to keep in step.
+   */
+  layout?: unknown
 }
 
 export const configPath = (home: string): string => join(home, 'config.json')
@@ -19,8 +25,11 @@ export const configPath = (home: string): string => join(home, 'config.json')
 export function readConfig(home: string): Config {
   try {
     const raw = JSON.parse(readFileSync(configPath(home), 'utf8')) as Config
+    const out: Config = {}
     // A path written by hand can be anything; only a non-empty string is usable.
-    return typeof raw.godCwd === 'string' && raw.godCwd.trim() ? { godCwd: raw.godCwd } : {}
+    if (typeof raw.godCwd === 'string' && raw.godCwd.trim()) out.godCwd = raw.godCwd
+    if (raw.layout !== undefined) out.layout = raw.layout
+    return out
   } catch {
     return {}
   }

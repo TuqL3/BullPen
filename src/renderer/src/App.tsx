@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
@@ -13,6 +13,23 @@ import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './avatar'
 import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
+import { Code } from './Code'
+import {
+  bandOf,
+  DEFAULT_LAYOUT,
+  move as movePanel,
+  moveToBand,
+  normalise,
+  PANEL_TITLE,
+  PANELS,
+  resize as resizePanels,
+  setBottomPct,
+  toggle as togglePanel,
+  visible as visibleIn,
+  type Band,
+  type Layout,
+  type PanelId
+} from './layout'
 import { LABEL, MONO, VARS, type Mode } from './theme'
 import { useStore, type Agent, type Approval } from './store'
 
@@ -62,7 +79,8 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
-  const [floorOn, setFloorOn] = useState(true)
+  const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
+  const [dragging, setDragging] = useState<PanelId | null>(null)
   // Null when closed; otherwise the fields the wizard opens with. Hiring the
   // second agent into a project should not mean re-answering where it lives.
   const [adding, setAdding] = useState<Partial<Draft> | null>(null)
@@ -201,6 +219,16 @@ export default function App() {
     )
   }, [agents])
 
+  useEffect(() => {
+    window.bullpen.layout().then((raw) => setLayout(normalise(raw)))
+  }, [])
+
+  /** Every layout change is persisted; there is no separate save action. */
+  const applyLayout = (next: Layout): void => {
+    setLayout(next)
+    window.bullpen.saveLayout(next)
+  }
+
   // Anything waiting on a human outranks whatever tab you were reading.
   useEffect(() => {
     if (approvals.length > 0) setTab('ask me')
@@ -306,16 +334,8 @@ export default function App() {
     setSteerText('')
   }
 
-  return (
-    <div style={{ ...(VARS[mode] as React.CSSProperties), ...S.app }}>
-      <TitleBar
-        mode={mode}
-        onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
-        floorOn={floorOn}
-        onToggleFloor={() => setFloorOn(!floorOn)}
-      />
-
-      <div style={floorOn ? S.bodyWithFloor : S.body}>
+  const panes: Record<PanelId, React.ReactNode> = {
+    roster: (
         <aside style={S.roster}>
           <button style={{ ...S.btn, width: '100%', marginBottom: 12 }} onClick={() => setAdding({})}>
             + agent
@@ -367,13 +387,10 @@ export default function App() {
             )
           })}
         </aside>
-
-        {floorOn && (
-          <div style={S.floorPane}>
-            <Floor mode={mode} onSelect={select} />
-          </div>
-        )}
-
+    ),
+    floor: <Floor mode={mode} onSelect={select} />,
+    code: <Code agent={current} />,
+    command: (
         <main style={S.main}>
           <header style={S.header}>
             {current ? <Avatar id={current.face} shirt={current.color} size={30} /> : <div style={{ width: 30 }} />}
@@ -502,6 +519,47 @@ export default function App() {
             </footer>
           )}
         </main>
+    )
+  }
+
+  return (
+    <div style={{ ...(VARS[mode] as React.CSSProperties), ...S.app }}>
+      <TitleBar
+        mode={mode}
+        onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
+        layout={layout}
+        onTogglePanel={(id) => applyLayout(togglePanel(layout, id))}
+      />
+
+      <div
+        data-layout={`${visibleIn(layout, 'top').join(',')}|${visibleIn(layout, 'bottom').join(',')}`}
+        style={S.body}
+      >
+        <Band
+          band="top"
+          layout={layout}
+          panes={panes}
+          dragging={dragging}
+          onDragStart={setDragging}
+          onDragEnd={() => setDragging(null)}
+          onDropOn={(from, target) => applyLayout(movePanel(layout, from, target))}
+          onDropIn={(from, band) => applyLayout(moveToBand(layout, from, band))}
+          onResize={(l, r, d) => applyLayout(resizePanels(layout, l, r, d))}
+        />
+        {visibleIn(layout, 'top').length > 0 && visibleIn(layout, 'bottom').length > 0 && (
+          <BandSplitter onDrag={(pct) => applyLayout(setBottomPct(layout, pct))} />
+        )}
+        <Band
+          band="bottom"
+          layout={layout}
+          panes={panes}
+          dragging={dragging}
+          onDragStart={setDragging}
+          onDragEnd={() => setDragging(null)}
+          onDropOn={(from, target) => applyLayout(movePanel(layout, from, target))}
+          onDropIn={(from, band) => applyLayout(moveToBand(layout, from, band))}
+          onResize={(l, r, d) => applyLayout(resizePanels(layout, l, r, d))}
+        />
       </div>
 
       <Dock agents={agents} selected={selected} approvals={approvals} onSelect={select} />
@@ -550,7 +608,7 @@ function Icon({
   name,
   size = 13
 }: {
-  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close'
+  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'code'
   size?: number
 }) {
   const common = {
@@ -582,6 +640,26 @@ function Icon({
       <svg {...common} aria-hidden>
         <circle cx="8" cy="8" r="3" />
         <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2 3.1 3.1" />
+      </svg>
+    )
+  if (name === 'roster')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M2 4h3v3H2zM2 10.5h3v3H2z" />
+        <path d="M7.5 5.5h6.5M7.5 12h6.5" />
+      </svg>
+    )
+  if (name === 'command')
+    return (
+      <svg {...common} aria-hidden>
+        <rect x="1.5" y="2.5" width="13" height="11" />
+        <path d="M4 6l2.2 2L4 10M8.2 10.5h3.6" />
+      </svg>
+    )
+  if (name === 'code')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5" />
       </svg>
     )
   if (name === 'min')
@@ -667,16 +745,206 @@ function FirstRun({
   )
 }
 
+/**
+ * One horizontal band of panels, with a draggable divider between each pair.
+ *
+ * The band itself is a drop target so a panel can be moved into an empty band -
+ * without that, dragging the last panel out of the bottom band would make the
+ * bottom band unreachable.
+ */
+function Band({
+  band,
+  layout,
+  panes,
+  dragging,
+  onDragStart,
+  onDragEnd,
+  onDropOn,
+  onDropIn,
+  onResize
+}: {
+  band: Band
+  layout: Layout
+  panes: Record<PanelId, React.ReactNode>
+  dragging: PanelId | null
+  onDragStart: (id: PanelId) => void
+  onDragEnd: () => void
+  onDropOn: (from: PanelId, target: PanelId) => void
+  onDropIn: (from: PanelId, band: Band) => void
+  onResize: (left: PanelId, right: PanelId, delta: number) => void
+}) {
+  const row = useRef<HTMLDivElement>(null)
+  const ids = visibleIn(layout, band)
+  const other = visibleIn(layout, band === 'top' ? 'bottom' : 'top')
+
+  // An empty band still needs to exist as a drop target, but only while there
+  // is something to drop and somewhere for it to come from.
+  if (ids.length === 0) {
+    if (!dragging || other.length < 2) return null
+    return (
+      <div
+        style={S.emptyBand}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault()
+          const from = e.dataTransfer.getData('text/panel') as PanelId
+          if (PANELS.includes(from)) onDropIn(from, band)
+        }}
+      >
+        drop here
+      </div>
+    )
+  }
+
+  const height =
+    other.length === 0 ? '1fr' : band === 'bottom' ? `${layout.bottomPct}%` : `${100 - layout.bottomPct}%`
+
+  return (
+    <div ref={row} style={{ ...S.band, height, gridTemplateColumns: cols(layout, ids) }}>
+      {ids.map((id, i) => (
+        <Fragment key={id}>
+          {i > 0 && (
+            <Splitter
+              onDrag={(dx) => {
+                const w = row.current?.clientWidth ?? 1
+                onResize(ids[i - 1], id, dx / w)
+              }}
+            />
+          )}
+          <Pane
+            id={id}
+            dragging={dragging}
+            onDragStart={() => onDragStart(id)}
+            onDragEnd={onDragEnd}
+            onDrop={(from) => onDropOn(from, id)}
+          >
+            {panes[id]}
+          </Pane>
+        </Fragment>
+      ))}
+    </div>
+  )
+}
+
+/** Weights, with a 5px track for each divider between them. */
+const cols = (layout: Layout, ids: PanelId[]): string =>
+  ids.map((id) => `${layout.weight[id]}fr`).join(' 5px ')
+
+/**
+ * A divider you drag. Pointer capture rather than mousemove on window: the
+ * pointer leaves the 5px track immediately, and without capture the drag stops
+ * the moment it does.
+ */
+function Splitter({ onDrag, vertical = false }: { onDrag: (delta: number) => void; vertical?: boolean }) {
+  const last = useRef(0)
+  return (
+    <div
+      style={vertical ? S.splitterH : S.splitterV}
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId)
+        last.current = vertical ? e.clientY : e.clientX
+      }}
+      onPointerMove={(e) => {
+        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
+        const now = vertical ? e.clientY : e.clientX
+        onDrag(now - last.current)
+        last.current = now
+      }}
+      onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)}
+    />
+  )
+}
+
+/** The divider between the bands, reported as a percentage of window height. */
+function BandSplitter({ onDrag }: { onDrag: (pct: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null)
+  return (
+    <div ref={ref} style={{ display: 'contents' }}>
+      <Splitter
+        vertical
+        onDrag={(dy) => {
+          const box = ref.current?.parentElement?.getBoundingClientRect()
+          if (!box || box.height === 0) return
+          // Read the live boundary rather than accumulating deltas, so a drag
+          // that outruns the clamp does not build up a debt to unwind.
+          const bottom = box.bottom - (ref.current?.nextElementSibling?.getBoundingClientRect().top ?? 0)
+          onDrag(((bottom - dy) / box.height) * 100)
+        }}
+      />
+    </div>
+  )
+}
+
+/**
+ * One panel, with a grip you can drag onto another to change the order.
+ *
+ * Native HTML5 drag and drop rather than a library: the whole interaction is
+ * "pick up a header, drop it on a neighbour", and pointer-event dragging would
+ * mean reimplementing what the platform already ships.
+ */
+function Pane({
+  id,
+  children,
+  dragging,
+  onDragStart,
+  onDragEnd,
+  onDrop
+}: {
+  id: PanelId
+  children: React.ReactNode
+  dragging: PanelId | null
+  onDragStart: () => void
+  onDragEnd: () => void
+  onDrop: (from: PanelId) => void
+}) {
+  const [over, setOver] = useState(false)
+  const isTarget = over && dragging !== null && dragging !== id
+
+  return (
+    <section
+      data-pane={id}
+      style={{ ...S.pane, ...(isTarget ? S.paneTarget : null) }}
+      onDragOver={(e) => {
+        // Without this the browser refuses the drop and fires nothing.
+        e.preventDefault()
+        setOver(true)
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault()
+        setOver(false)
+        const from = e.dataTransfer.getData('text/panel') as PanelId
+        if (PANELS.includes(from)) onDrop(from)
+      }}
+    >
+      <div
+        draggable
+        style={{ ...S.paneGrip, ...(dragging === id ? S.paneGripHeld : null) }}
+        onDragStart={(e) => {
+          e.dataTransfer.setData('text/panel', id)
+          e.dataTransfer.effectAllowed = 'move'
+          onDragStart()
+        }}
+        onDragEnd={onDragEnd}
+      >
+        <span>{PANEL_TITLE[id]}</span>
+        <span style={{ color: 'var(--faint)' }}>⠿</span>
+      </div>
+      <div style={S.paneBody}>{children}</div>
+    </section>
+  )
+}
+
 function TitleBar({
   mode,
   onToggle,
-  floorOn,
-  onToggleFloor
+  layout,
+  onTogglePanel
 }: {
   mode: Mode
   onToggle: () => void
-  floorOn: boolean
-  onToggleFloor: () => void
+  layout: Layout
+  onTogglePanel: (id: PanelId) => void
 }) {
   return (
     <div style={S.titlebar}>
@@ -684,18 +952,27 @@ function TitleBar({
       <div style={{ width: window.bullpen.isMac ? 72 : 14 }} />
       <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 11, fontWeight: 700 }}>Bullpen</div>
       <div style={{ flex: 1 }} />
-      <button
-        title={floorOn ? 'hide the office floor' : 'show the office floor'}
-        aria-label="toggle office floor"
-        style={{
-          ...S.iconBtn,
-          WebkitAppRegion: 'no-drag',
-          color: floorOn ? 'var(--accent-ink)' : 'var(--muted)'
-        } as React.CSSProperties}
-        onClick={onToggleFloor}
-      >
-        <Icon name="floor" />
-      </button>
+      {/* Order here is fixed, so a toggle does not move when the panels are
+          rearranged and the button under the cursor stays the one you meant. */}
+      {PANELS.map((id) => {
+        const on = !layout.hidden.includes(id)
+        return (
+          <button
+            key={id}
+            title={on ? `hide ${PANEL_TITLE[id]}` : `show ${PANEL_TITLE[id]}`}
+            aria-label={`toggle ${PANEL_TITLE[id]}`}
+            style={{
+              ...S.panelToggle,
+              WebkitAppRegion: 'no-drag',
+              color: on ? 'var(--accent-ink)' : 'var(--faint)',
+              borderColor: on ? 'var(--accent-ink)' : 'transparent'
+            } as React.CSSProperties}
+            onClick={() => onTogglePanel(id)}
+          >
+            <Icon name={id} />
+          </button>
+        )
+      })}
       <button
         title={mode === 'light' ? 'switch to dark' : 'switch to light'}
         aria-label="toggle theme"
@@ -861,7 +1138,7 @@ const S: Record<string, React.CSSProperties> = {
   // Closing is the one titlebar action with no undo, so it does not look like
   // the toggles beside it.
   closeBtn: { color: 'var(--danger)', marginRight: 4 },
-  body: { display: 'grid', gridTemplateColumns: '204px 1fr', minHeight: 0 },
+  body: { display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
   // Floor on the left, command centre on the right - the windowed layout.
   bodyWithFloor: { display: 'grid', gridTemplateColumns: '204px 1.35fr 1fr', minHeight: 0 },
   floorPane: { minWidth: 0, minHeight: 0, borderRight: '1px solid var(--line)', overflow: 'hidden' },
@@ -992,6 +1269,53 @@ const S: Record<string, React.CSSProperties> = {
     font: `11px ${MONO}`
   },
   btnPrimary: { background: 'var(--accent)', color: '#241f1a', borderColor: 'var(--accent)' },
+  pane: {
+    display: 'flex',
+    flexDirection: 'column',
+    minWidth: 0,
+    minHeight: 0,
+    borderRight: '1px solid var(--line)',
+    overflow: 'hidden'
+  },
+  paneTarget: { outline: '2px solid var(--accent)', outlineOffset: -2 },
+  band: { display: 'grid', minHeight: 0, minWidth: 0 },
+  emptyBand: {
+    height: 40,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: '2px dashed var(--accent)',
+    color: 'var(--faint)',
+    font: `10px ${MONO}`,
+    letterSpacing: '0.09em',
+    textTransform: 'uppercase'
+  },
+  splitterV: { cursor: 'col-resize', background: 'var(--line)' },
+  splitterH: { cursor: 'row-resize', background: 'var(--line)', height: 5 },
+  paneGrip: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '3px 8px',
+    borderBottom: '1px solid var(--line)',
+    background: 'var(--sunk)',
+    color: 'var(--faint)',
+    cursor: 'grab',
+    userSelect: 'none',
+    font: `10px ${MONO}`,
+    letterSpacing: '0.09em',
+    textTransform: 'uppercase'
+  },
+  paneGripHeld: { opacity: 0.5, cursor: 'grabbing' },
+  paneBody: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
+  panelToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    background: 'transparent',
+    border: '1px solid transparent',
+    cursor: 'pointer',
+    padding: '3px 5px'
+  },
   groupHead: {
     display: 'flex',
     alignItems: 'center',

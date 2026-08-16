@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
+import { list as listDir, read as readFile, write as writeFile } from './code.ts'
 import { checkWorkspace, readConfig, writeConfig } from './config.ts'
 import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
@@ -28,6 +29,14 @@ const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
 const board = new Board(boardPath(BULLPEN_HOME))
 const activity = new ActivityLog()
+
+/**
+ * What each agent has written, newest first, deduped by path. Bounded: an
+ * overnight run must not grow this forever, and nobody scrolls past the last
+ * few dozen files anyway.
+ */
+const edits = new Map<string, { path: string; ts: number; tool: string }[]>()
+const EDIT_CAP = 60
 
 /** Questions agents have addressed to the human, newest last. */
 const questions = new Map<string, Message & { id: string }>()
@@ -204,6 +213,13 @@ function wire(): void {
     send('agent:exit', id, code)
   })
 
+  approvals.on('edit', (agentId: string, path: string, tool: string) => {
+    const list = (edits.get(agentId) ?? []).filter((e) => e.path !== path)
+    list.unshift({ path, ts: Date.now(), tool })
+    edits.set(agentId, list.slice(0, EDIT_CAP))
+    send('code:edited', agentId, path)
+  })
+
   hive.on('deliver', ({ to, msg }) => {
     ptys.deliver(to, msg.from, msg.subject, msg.body)
     activity.push('message', msg.from, `${msg.from} → ${to}: ${msg.subject}`)
@@ -307,6 +323,38 @@ function wire(): void {
   )
 
   ipcMain.handle('god:cwd', () => currentGodCwd())
+
+  // The renderer never sees a path it did not get from here, and every one of
+  // these re-checks the workspace boundary rather than trusting that.
+  ipcMain.handle('code:list', (_e, root: string, rel: string) => {
+    try {
+      return { entries: listDir(root, rel) }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('code:read', (_e, root: string, rel: string) => {
+    try {
+      return readFile(root, rel)
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('code:write', (_e, root: string, rel: string, text: string) => {
+    try {
+      writeFile(root, rel, text)
+      return { ok: true }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('code:edits', (_e, agentId: string) => edits.get(agentId) ?? [])
+
+  ipcMain.handle('layout:get', () => readConfig(BULLPEN_HOME).layout ?? null)
+  ipcMain.handle('layout:set', (_e, layout: unknown) => {
+    writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), layout })
+    return true
+  })
 
   /**
    * First run has no answer to "where should Michael work", and picking one

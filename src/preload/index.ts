@@ -31,6 +31,9 @@ export type FloorAgent = {
   costUsd?: number
 }
 
+export type CodeEntry = { name: string; path: string; dir: boolean; size: number }
+export type CodeEdit = { path: string; ts: number; tool: string }
+
 export type AgentCost = {
   input: number
   output: number
@@ -122,6 +125,19 @@ const api = {
     | { id: string; name: string; cwd: string; pid: number; startedAt: number; cols: number; rows: number }
   > => ipcRenderer.invoke('god:move', dir, size),
   godCwd: (): Promise<string> => ipcRenderer.invoke('god:cwd'),
+  codeList: (root: string, rel: string): Promise<{ entries?: CodeEntry[]; error?: string }> =>
+    ipcRenderer.invoke('code:list', root, rel),
+  codeRead: (
+    root: string,
+    rel: string
+  ): Promise<{ path?: string; text?: string; truncated?: boolean; binary?: boolean; error?: string }> =>
+    ipcRenderer.invoke('code:read', root, rel),
+  codeWrite: (root: string, rel: string, text: string): Promise<{ ok?: boolean; error?: string }> =>
+    ipcRenderer.invoke('code:write', root, rel, text),
+  codeEdits: (agentId: string): Promise<CodeEdit[]> => ipcRenderer.invoke('code:edits', agentId),
+  onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
+  layout: (): Promise<unknown> => ipcRenderer.invoke('layout:get'),
+  saveLayout: (layout: unknown): Promise<boolean> => ipcRenderer.invoke('layout:set', layout),
   /** Has a workspace been chosen for Michael yet, and what to suggest if not. */
   godSetup: (): Promise<{ chosen: boolean; cwd: string }> => ipcRenderer.invoke('god:setup'),
   /** Publish the roster to the file Michael reads. */

@@ -274,12 +274,19 @@ const S: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'center',
     height: '100%',
+    minHeight: 0,
     padding: 12,
     overflow: 'hidden',
     background: 'var(--sunk)'
   },
   canvas: {
-    width: '100%',
+    // Fit the pane in both directions. Width alone overflowed the moment the
+    // floor moved into a short bottom band, and the pane clips rather than
+    // scrolls - so the overflow was simply gone.
+    maxWidth: '100%',
+    maxHeight: '100%',
+    minHeight: 0,
+    objectFit: 'contain',
     imageRendering: 'pixelated',
     border: '1px solid var(--line)',
     cursor: 'pointer'

@@ -67,6 +67,10 @@ const SECRET_PATHS = [
 
 const PATH_KEYS = ['file_path', 'path', 'notebook_path'] as const
 
+/** Tools that change a file. A Read is not an edit, and listing it as one would
+ *  make "recently touched" mean "recently looked at". */
+const WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+
 /** Which lifecycle hooks mean the agent started or finished a turn. */
 const LIFECYCLE_STATUS: Record<string, 'working' | 'idle' | undefined> = {
   UserPromptSubmit: 'working',
@@ -345,6 +349,22 @@ export class Approvals extends EventEmitter {
     }
     const status = LIFECYCLE_STATUS[event]
     if (status) this.emit('status', agentId, status, event)
+
+    // What the agent just wrote. PostToolUse fires after the write landed, so
+    // the file on disk already reflects it - no need to carry the content.
+    if (event === 'PostToolUse') {
+      try {
+        const payload = JSON.parse(body) as HookPayload
+        const tool = payload.tool_name ?? ''
+        if (WRITING_TOOLS.has(tool)) {
+          for (const path of this.touchedPaths(payload.tool_input ?? {})) {
+            this.emit('edit', agentId, path, tool)
+          }
+        }
+      } catch {
+        // Malformed payloads are already reported by the status parse above.
+      }
+    }
   }
 
   private ask(agentId: string, payload: HookPayload, reason: string): Promise<'allow' | 'deny'> {
