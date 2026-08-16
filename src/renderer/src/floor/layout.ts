@@ -30,6 +30,7 @@ export type Cell =
   | 'window'
   | 'desk'
   | 'deskUp'
+  | 'deskBoss'
   | 'table'
   | 'chairPink'
   | 'plant'
@@ -39,13 +40,44 @@ export type Cell =
   | 'board'
   | 'clock'
   | 'cooler'
+  | 'sofa'
+  | 'coffee'
+  | 'printer'
+  | 'cabinet'
 
 export type Point = { x: number; y: number }
 export type Desk = { desk: Point; seat: Point }
 
+const BLOCKED: ReadonlySet<Cell> = new Set<Cell>([
+  'wall',
+  'wallFace',
+  'window',
+  'clock',
+  'board',
+  'desk',
+  'deskUp',
+  'deskBoss',
+  'table',
+  'plant',
+  'counter',
+  'shelf',
+  'fridge',
+  'cooler',
+  'sofa',
+  'coffee',
+  'printer',
+  'cabinet'
+])
+
 export type Office = {
   grid: Cell[][]
   desks: Desk[]
+  /**
+   * The corner office. Michael stands in for the operator and everything routes
+   * through him, so he does not sit in a pod like everyone else - if he did,
+   * finding him on the floor would mean reading name labels.
+   */
+  boss: Desk | null
   /** Where agents walk in from, and where they leave. */
   door: Point
   cols: number
@@ -141,6 +173,48 @@ export function buildOffice(cols: number, rows: number): Office {
     set(kitchen.x0 - 3, roomTop + 1, 'cooler')
   }
 
+  // The corner office, bottom right. Needs its own walls, so it is only carved
+  // when there is width for it and pods left over beside it.
+  // Small on purpose: a corner office the size of the meeting room reads as
+  // empty floor with a desk in it. It has to be his, not spacious.
+  const OFFICE_W = 6
+  const OFFICE_H = 4
+  const bossRoom =
+    cols >= OFFICE_W + 14 && rows >= OFFICE_H + 8
+      ? { x0: cols - 1 - OFFICE_W, y0: rows - 2 - OFFICE_H, x1: cols - 2, y1: rows - 2 }
+      : null
+
+  let boss: Desk | null = null
+  if (bossRoom) {
+    for (let y = bossRoom.y0 - 1; y <= bossRoom.y1; y++) set(bossRoom.x0 - 1, y, 'wall')
+    for (let x = bossRoom.x0 - 1; x <= cols - 1; x++) set(x, bossRoom.y0 - 1, 'wall')
+    // A doorway, or it is a sealed box with the one agent you most want to see
+    // in it. Two tiles in from the bottom so the aisle reaches it.
+    set(bossRoom.x0 - 1, bossRoom.y1 - 1, 'floor')
+    for (let y = bossRoom.y0; y <= bossRoom.y1; y++) {
+      for (let x = bossRoom.x0; x <= bossRoom.x1; x++) set(x, y, 'rug')
+    }
+    const bx = bossRoom.x0 + 1
+    const by = bossRoom.y0 + 1
+    set(bx, by, 'deskBoss')
+    set(bx + 1, by, 'deskBoss')
+    boss = { desk: { x: bx, y: by }, seat: { x: bx, y: by + 1 } }
+    // Furnished, or it is a rug with a desk on it: a shelf and a cabinet on the
+    // back wall, a plant in the far corner.
+    set(bossRoom.x1, bossRoom.y0, 'shelf')
+    set(bossRoom.x1, bossRoom.y0 + 1, 'cabinet')
+    set(bossRoom.x1, bossRoom.y1, 'plant')
+    set(bossRoom.x0, bossRoom.y0, 'plant')
+  }
+
+  /** Does a pod's 2x4 footprint run into the corner office or its walls? */
+  const hitsOffice = (px: number, py: number): boolean =>
+    bossRoom !== null &&
+    px + 1 >= bossRoom.x0 - 1 &&
+    px <= bossRoom.x1 &&
+    py + 3 >= bossRoom.y0 - 1 &&
+    py <= bossRoom.y1
+
   // Desks in pods of four facing each other across an aisle, not a lattice. A
   // regular grid of identical desks reads as a spreadsheet; pods read as an
   // office, and cost the same to generate.
@@ -151,6 +225,7 @@ export function buildOffice(cols: number, rows: number): Office {
   // every seat unreachable, everyone stuck in the wall.
   for (let py = podTop; py + 3 < rows - 2; py += 6) {
     for (let px = 3; px + 1 < cols - 2; px += 5) {
+      if (hitsOffice(px, py)) continue
       for (const dx of [0, 1]) {
         set(px + dx, py, 'desk')
         desks.push({ desk: { x: px + dx, y: py }, seat: { x: px + dx, y: py + 1 } })
@@ -160,33 +235,76 @@ export function buildOffice(cols: number, rows: number): Office {
     }
   }
 
-  for (const p of [
-    { x: 1, y: podTop - 1 },
-    { x: cols - 2, y: podTop - 1 },
-    { x: 1, y: rows - 2 },
-    { x: cols - 2, y: rows - 2 }
-  ]) {
-    set(p.x, p.y, 'plant')
+  /**
+   * Decor, placed only where it does not cut the floor in two.
+   *
+   * Everything here is furniture, and a single plant dropped in a one-tile
+   * corridor strands whatever was behind it - which is how a desk ends up
+   * unreachable and an agent stands in the doorway forever. Rather than hunting
+   * for safe coordinates by hand, each piece is placed, checked, and undone if
+   * it cost more than the tile it covers.
+   */
+  const reachable = (): number => {
+    const seen = new Uint8Array(cols * rows)
+    const queue: Point[] = [door]
+    seen[door.y * cols + door.x] = 1
+    let n = 0
+    for (let head = 0; head < queue.length; head++) {
+      const cur = queue[head]
+      n++
+      for (const [dx, dy] of [
+        [0, -1],
+        [1, 0],
+        [0, 1],
+        [-1, 0]
+      ]) {
+        const nx = cur.x + dx
+        const ny = cur.y + dy
+        const k = ny * cols + nx
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows || seen[k]) continue
+        if (BLOCKED.has(grid[ny][nx])) continue
+        seen[k] = 1
+        queue.push({ x: nx, y: ny })
+      }
+    }
+    return n
   }
 
-  return { grid, desks, door, cols, rows }
+  let open = reachable()
+  const decor = (x: number, y: number, c: Cell): void => {
+    if (grid[y]?.[x] !== 'floor') return
+    set(x, y, c)
+    const after = reachable()
+    // One tile fewer is the tile just covered. Anything more was stranded.
+    if (after === open - 1) open = after
+    else set(x, y, 'floor')
+  }
+  for (const y of [podTop - 1, rows - 2]) {
+    decor(1, y, 'plant')
+    decor(cols - 2, y, 'plant')
+  }
+  if (hasRooms) {
+    // The strip between the rooms and the first pod row: a lounge, which is
+    // what an office has where a floor plan has empty space.
+    const y = roomBottom + 1
+    decor(3, y, 'sofa')
+    decor(4, y, 'sofa')
+    decor(5, y, 'sofa')
+    decor(7, y, 'coffee')
+    decor(9, y, 'plant')
+    decor(cols - 4, y, 'printer')
+    decor(cols - 6, y, 'cabinet')
+    decor(cols - 7, y, 'cabinet')
+  }
+  // Against the side walls, level with the pods.
+  for (let y = podTop + 1; y < rows - 2; y += 5) {
+    decor(1, y, y % 2 ? 'cabinet' : 'plant')
+    decor(cols - 2, y, y % 2 ? 'plant' : 'printer')
+  }
+
+  return { grid, desks, door, boss, cols, rows }
 }
 
-const BLOCKED: ReadonlySet<Cell> = new Set<Cell>([
-  'wall',
-  'wallFace',
-  'window',
-  'clock',
-  'board',
-  'desk',
-  'deskUp',
-  'table',
-  'plant',
-  'counter',
-  'shelf',
-  'fridge',
-  'cooler'
-])
 
 export const walkable = (grid: Cell[][], x: number, y: number): boolean =>
   y >= 0 && y < grid.length && x >= 0 && x < grid[0].length && !BLOCKED.has(grid[y][x])
@@ -244,10 +362,18 @@ export function findPath(grid: Cell[][], from: Point, to: Point): Point[] | null
  * Stable desk assignment, filling pod by pod so three agents sit together at
  * the front instead of scattering across an empty office.
  */
-export function assignDesks(agentIds: string[], desks: Desk[]): Map<string, Desk> {
+export function assignDesks(
+  agentIds: string[],
+  office: Pick<Office, 'desks' | 'boss'>,
+  godId?: string | null
+): Map<string, Desk> {
   const out = new Map<string, Desk>()
-  agentIds.forEach((id, i) => {
-    const desk = desks[i % desks.length]
+  // The god agent takes the corner office; everyone else fills the pods from
+  // the front, so three agents sit together rather than scattering.
+  const workers = agentIds.filter((id) => id !== godId || !office.boss)
+  if (godId && office.boss && agentIds.includes(godId)) out.set(godId, office.boss)
+  workers.forEach((id, i) => {
+    const desk = office.desks[i % office.desks.length]
     if (desk) out.set(id, desk)
   })
   return out

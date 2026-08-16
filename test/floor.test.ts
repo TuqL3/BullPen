@@ -78,6 +78,42 @@ for (const [cols, rows] of SIZES) {
   })
 }
 
+test('decor never strands a tile that was reachable without it', () => {
+  // The guard that undoes a piece of furniture which cuts the floor in two -
+  // asserted here rather than trusted, since it is the reason the sizes above
+  // still pass with a lounge and cabinets on them.
+  for (const [c, r] of SIZES) {
+    const o = buildOffice(c, r)
+    const furniture = new Set(['sofa', 'coffee', 'printer', 'cabinet', 'plant'])
+    let placed = 0
+    for (const row of o.grid) for (const cell of row) if (furniture.has(cell)) placed++
+    assert.ok(placed > 0, `${c}x${r}: nothing was decorated at all`)
+  }
+})
+
+test('the god agent sits in the corner office, alone', () => {
+  // Everything routes through Michael, so finding him on the floor must not
+  // mean reading name labels off a wall of identical pod desks.
+  const o = buildOffice(MAX_COLS, MAX_ROWS)
+  assert.ok(o.boss, 'no corner office was carved at full size')
+  const seats = assignDesks(['michael', 'dwight', 'jim'], o, 'michael')
+  assert.deepEqual(seats.get('michael'), o.boss)
+  for (const id of ['dwight', 'jim']) {
+    assert.notDeepEqual(seats.get(id), o.boss, `${id} took the corner office`)
+    assert.ok(o.desks.some((d) => d.seat.x === seats.get(id)!.seat.x && d.seat.y === seats.get(id)!.seat.y))
+  }
+  // The boss desk is not also in the pod list, or someone would be sat on him.
+  assert.ok(!o.desks.some((d) => d.desk.x === o.boss!.desk.x && d.desk.y === o.boss!.desk.y))
+  // And with no god on the floor the corner office is simply empty.
+  assert.equal(assignDesks(['dwight'], o).get('dwight')?.desk.x === o.boss!.desk.x, false)
+})
+
+test('the corner office is reachable, and its seat is walkable', () => {
+  const o = buildOffice(MAX_COLS, MAX_ROWS)
+  assert.ok(walkable(o.grid, o.boss!.seat.x, o.boss!.seat.y), 'the boss seat is furniture')
+  assert.ok(findPath(o.grid, o.door, o.boss!.seat), 'no route into the corner office')
+})
+
 test('at full size the office is exactly four rows of desks', () => {
   // Asked for explicitly: more rows is a wall of empty desks, fewer wastes the
   // panel. The cap has to produce the count, not merely allow it.
@@ -127,10 +163,10 @@ test('walking to where you already stand is an empty path, not null', () => {
 })
 
 test('desks are assigned one per agent, stably', () => {
-  const { desks } = buildOffice(36, 26)
+  const o = buildOffice(36, 26)
   const ids = ['michael', 'dwight', 'jim']
-  const first = assignDesks(ids, desks)
-  const second = assignDesks(ids, desks)
+  const first = assignDesks(ids, o)
+  const second = assignDesks(ids, o)
 
   assert.equal(first.size, 3)
   const seats = [...first.values()].map((d) => `${d.seat.x},${d.seat.y}`)

@@ -108,7 +108,8 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const { agents, mail, approvals } = useStore.getState()
       const seats = assignDesks(
         agents.map((a) => a.id),
-        office.current.desks
+        office.current,
+        agents.find((a) => a.role === 'god')?.id
       )
 
       // New mail becomes an envelope in flight. Only entries appended since the
@@ -229,7 +230,8 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const { agents, approvals } = useStore.getState()
       const seats = assignDesks(
         agents.map((a) => a.id),
-        office.current.desks
+        office.current,
+        agents.find((a) => a.role === 'god')?.id
       )
       for (const [, d] of seats) drawChair(ctx, d.seat.x * TILE, d.seat.y * TILE, palette)
 

@@ -12,12 +12,16 @@ export type Palette = {
   glass: string
   glassFrame: string
   deskTop: string
+  bossTop: string
+  bossEdge: string
   deskEdge: string
   deskLeg: string
   screen: string
   screenGlow: string
   chair: string
   chairPink: string
+  sofa: string
+  sofaDark: string
   table: string
   tableEdge: string
   leaf: string
@@ -42,12 +46,16 @@ export const PALETTES: Record<'light' | 'dark', Palette> = {
     glass: '#bcd9e8',
     glassFrame: '#8fa6b3',
     deskTop: '#eccb89',
+    bossTop: '#b8823c',
+    bossEdge: '#8a5c22',
     deskEdge: '#c99f56',
     deskLeg: '#a87f3d',
     screen: '#3b3b46',
     screenGlow: '#93bcd8',
     chair: '#c58f52',
     chairPink: '#e39aa8',
+    sofa: '#7f93b8',
+    sofaDark: '#5a6d90',
     table: '#eccb89',
     tableEdge: '#c99f56',
     leaf: '#5f9e63',
@@ -70,12 +78,16 @@ export const PALETTES: Record<'light' | 'dark', Palette> = {
     glass: '#2c4a5c',
     glassFrame: '#465a68',
     deskTop: '#8a7040',
+    bossTop: '#a8813e',
+    bossEdge: '#6b4d18',
     deskEdge: '#5f4d2a',
     deskLeg: '#463819',
     screen: '#0d0e13',
     screenGlow: '#3f6b8c',
     chair: '#6b4b2b',
     chairPink: '#8d5b66',
+    sofa: '#4a5877',
+    sofaDark: '#333d55',
     table: '#8a7040',
     tableEdge: '#5f4d2a',
     leaf: '#3f7048',
@@ -159,6 +171,22 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
       px(ctx, 12, 10, 2, 1, p.metalDark)
       break
 
+    // The boss desk: wider, darker wood, and it takes the whole tile. It has to
+    // be tellable from a pod desk at a glance, which is the only reason it is a
+    // separate tile rather than a flag on 'desk'.
+    case 'deskBoss':
+      px(ctx, 0, 14, TILE, 2, p.shadow)
+      px(ctx, 0, 4, TILE, 9, p.bossTop)
+      px(ctx, 0, 12, TILE, 3, p.bossEdge)
+      px(ctx, 1, 15, 2, 1, p.deskLeg)
+      px(ctx, TILE - 3, 15, 2, 1, p.deskLeg)
+      px(ctx, 3, 0, 10, 5, p.screen)
+      px(ctx, 4, 1, 8, 3, p.screenGlow)
+      px(ctx, 7, 5, 2, 1, p.bossEdge)
+      px(ctx, 3, 8, 10, 2, p.metal)
+      px(ctx, 1, 6, 2, 3, p.paper)
+      break
+
     case 'deskUp': // faces up: the seat is above, so the monitor is at the front
       px(ctx, 0, 13, TILE, 2, p.shadow)
       px(ctx, 1, 3, TILE - 2, 9, p.deskTop)
@@ -168,6 +196,38 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
       px(ctx, 4, 6, 8, 5, p.screen)
       px(ctx, 5, 7, 6, 3, p.screenGlow)
       px(ctx, 4, 4, 8, 2, p.metal)
+      break
+
+    case 'sofa':
+      px(ctx, 0, 3, TILE, 3, p.sofaDark)
+      px(ctx, 0, 6, TILE, 6, p.sofa)
+      px(ctx, 0, 12, TILE, 2, p.sofaDark)
+      px(ctx, 0, 14, TILE, 1, p.shadow)
+      break
+
+    case 'coffee':
+      px(ctx, 2, 6, TILE - 4, 6, p.table)
+      px(ctx, 2, 11, TILE - 4, 2, p.tableEdge)
+      px(ctx, 6, 4, 4, 3, p.leaf)
+      px(ctx, 3, 13, 1, 2, p.deskLeg)
+      px(ctx, TILE - 4, 13, 1, 2, p.deskLeg)
+      break
+
+    case 'printer':
+      px(ctx, 1, 5, TILE - 2, 8, p.metal)
+      px(ctx, 1, 12, TILE - 2, 2, p.metalDark)
+      px(ctx, 3, 3, TILE - 6, 3, p.paper)
+      px(ctx, 3, 9, TILE - 6, 2, p.metalDark)
+      px(ctx, 0, 14, TILE, 1, p.shadow)
+      break
+
+    case 'cabinet':
+      px(ctx, 1, 2, TILE - 2, 12, p.deskTop)
+      px(ctx, 1, 7, TILE - 2, 1, p.deskEdge)
+      px(ctx, 1, 13, TILE - 2, 1, p.deskEdge)
+      px(ctx, 6, 4, 4, 1, p.metalDark)
+      px(ctx, 6, 10, 4, 1, p.metalDark)
+      px(ctx, 0, 14, TILE, 1, p.shadow)
       break
 
     case 'table':
@@ -237,6 +297,11 @@ export function drawChair(ctx: CanvasRenderingContext2D, x: number, y: number, p
 }
 
 const KINDS: Cell[] = [
+  'deskBoss',
+  'sofa',
+  'coffee',
+  'printer',
+  'cabinet',
   'floor',
   'rug',
   'wall',
