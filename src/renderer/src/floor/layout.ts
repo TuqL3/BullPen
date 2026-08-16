@@ -147,12 +147,15 @@ export function buildOffice(cols: number, rows: number): Office {
 
   // Rooms occupy the top band. Each needs its own width, so a narrow panel gets
   // one of them and a very narrow one gets neither - open plan, not a maze.
-  const roomTop = 3
-  const roomBottom = Math.min(9, rows - 8)
+  // Partitions start directly under the wall face; the interior is everything
+  // between that and the bottom wall.
+  const partTop = 2
+  // Six rows of interior: one of floor, the four-row table block, one of floor.
+  const roomBottom = Math.min(partTop + 6, rows - 8)
   // Rooms only if they leave room for at least one pod row below them. A floor
   // of nothing but a meeting room has nowhere to seat anyone, which is worse
   // than an open-plan floor with no meeting room.
-  const hasRooms = roomBottom - roomTop >= 4 && roomBottom + 6 < rows - 2
+  const hasRooms = roomBottom - partTop >= 6 && roomBottom + 6 < rows - 2
   // Two rooms, each with its own door, sharing the vertical wall between them.
   // Sharing it is what keeps the back wall continuous: when each room's wall ran
   // out into open floor, the result was a wall that stopped in mid-air with the
@@ -162,11 +165,6 @@ export function buildOffice(cols: number, rows: number): Office {
   const meeting = roomsFit ? { x0: 2, x1: split } : hasRooms ? { x0: 2, x1: 2 + 10 } : null
   const kitchen = roomsFit ? { x0: split + 1, x1: cols - 2 } : null
 
-  // Partitions start directly under the wall face, not at roomTop. Starting
-  // lower left the row above them open, so an agent could walk in over the top
-  // of the wall instead of through the door - which is what the office looked
-  // like from the outside, too: a wall that did not reach the ceiling.
-  const partTop = 2
   if (meeting) {
     for (let y = partTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
     // From the building wall, not from x0: the room's rug reaches the outer wall,
@@ -185,11 +183,11 @@ export function buildOffice(cols: number, rows: number): Office {
     const inX1 = meeting.x1 - 1
     const inY0 = partTop
     const inY1 = roomBottom - 1
-    const tableW = Math.min(8, inX1 - inX0 - 1)
-    // chairs, table, table, chairs
-    const blockH = 4
-    const tx = inX0 + Math.floor((inX1 - inX0 + 1 - tableW) / 2)
-    const ty = inY0 + Math.floor((inY1 - inY0 + 1 - blockH) / 2)
+    // Exactly one tile of floor on every side of the block, which is what the
+    // room is sized for - not a block centred inside whatever space was left.
+    const tableW = inX1 - inX0 - 1
+    const tx = inX0 + 1
+    const ty = inY0 + 1
     for (let x = tx; x < tx + tableW; x++) {
       set(x, ty, 'chairPink')
       set(x, ty + 1, 'table')
@@ -197,9 +195,8 @@ export function buildOffice(cols: number, rows: number): Office {
       set(x, ty + 3, 'chairPink')
     }
     set(Math.floor((inX0 + inX1) / 2), 1, 'board')
-    // The corners, so the room is furnished rather than a rug with a table on it.
-    set(inX1, inY0, 'cooler')
-    set(inX0, inY1, 'plant')
+    // Nothing else inside: the ring around the table is meant to be floor, and
+    // a cooler standing in it is not floor.
   }
 
   if (kitchen) {
