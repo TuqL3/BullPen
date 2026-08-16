@@ -8,6 +8,18 @@ import { join } from 'node:path'
  * The id is fixed rather than slugged from a name, because dispatch, the graph
  * centre and the mail router all address him by it.
  */
+/**
+ * When a working agent is worth reusing, in percent of its context window.
+ *
+ * The risk in handing an agent a second task is not the second task - it is the
+ * first one still sitting in its context: every later turn re-reads it, and the
+ * agent can carry a decision from work that is already finished into work that
+ * is not. Against that, a fresh hire knows nothing about the codebase and pays
+ * to read it back in. Context fullness is the honest line between the two.
+ */
+export const REUSE_BELOW_PCT = 50
+export const HIRE_ABOVE_PCT = 70
+
 export const GOD_ID = 'michael'
 export const GOD_NAME = 'Michael'
 
@@ -55,6 +67,23 @@ shorter path and it is always the wrong one: a floor where the only agent who
 can see everyone is also the one doing the work is a floor of one agent.
 
 If nobody on the floor fits the task, say so and ask rather than picking it up.
+
+## Who to give it to
+
+\`$BULLPEN_FLOOR\` reports \`ctxPct\` for every agent - how full its context is.
+Use it:
+
+- **under ${REUSE_BELOW_PCT}%** - reuse them. They already know the codebase, and
+  a fresh agent would pay to read it all back in.
+- **${REUSE_BELOW_PCT}-${HIRE_ABOVE_PCT}%** - reuse only if the new task is close
+  to what they just did. Otherwise hire.
+- **over ${HIRE_ABOVE_PCT}%** - treat them as not free even when they are idle,
+  and hire. What is left of their window is not enough to do the work in, and
+  everything they still carry is charged again on every turn.
+
+Missing \`ctxPct\` means they have not completed a turn yet: that is empty, not
+full. A task for a different project always goes to a different agent - separate
+sandbox, nothing to reuse.
 
 ## Seeing the floor
 

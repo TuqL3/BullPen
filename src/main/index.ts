@@ -12,6 +12,8 @@ import { readCtx, type Ctx } from './ctx.ts'
 import {
   GOD_ID,
   GOD_NAME,
+  HIRE_ABOVE_PCT,
+  REUSE_BELOW_PCT,
   floorPath,
   godCwd,
   publishFloor,
@@ -568,9 +570,13 @@ function wire(): void {
     const HOW =
       'Do not do the work yourself. Read $BULLPEN_FLOOR and pick an agent on ' +
       'that project whose status is running and whose activity is idle - a ' +
-      'stopped agent cannot be given anything. Send them the task through ' +
-      '$BULLPEN_MAILBOX/outbox. ' +
-      'If the project has nobody, or nobody idle, hire one: write a message to ' +
+      'stopped agent cannot be given anything. ' +
+      `Reuse one whose ctxPct is under ${REUSE_BELOW_PCT}; over ${HIRE_ABOVE_PCT} ` +
+      'treat them as not free even if idle, because what is left of their window ' +
+      'is not enough to work in and everything they still carry is charged again ' +
+      'every turn. Missing ctxPct means a fresh agent, not a full one. ' +
+      'Send them the task through $BULLPEN_MAILBOX/outbox. ' +
+      'If the project has nobody free by that rule, hire one: write a message to ' +
       '"hire" with the project as the subject and the task as the body. ' +
       'Then tell me who has it.'
     const where = project ? ` This is for the ${project} project.` : ''
