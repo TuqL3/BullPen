@@ -1,4 +1,5 @@
 import { Avatar } from '../Avatar'
+import { CtxMeter } from '../App'
 import { LABEL, MONO } from '../theme'
 import type { Agent } from '../store'
 
@@ -44,7 +45,13 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
             <span style={{ width: 130, color: 'var(--muted)' }}>
               last output {since(lastSeen[a.id] ?? 0)} ago
             </span>
-            <span style={{ flex: 1, color: 'var(--faint)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span style={{ width: 210 }}>
+              <CtxMeter ctx={a.ctx} />
+            </span>
+            <span
+              title={a.cwd}
+              style={{ flex: 1, color: 'var(--faint)', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
               {a.cwd}
             </span>
           </div>

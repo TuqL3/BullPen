@@ -24,6 +24,10 @@ const api = {
   onExit: (fn: (id: string, code: number) => void) => on('agent:exit', fn),
   onTrust: (fn: (id: string, sandbox: string) => void) => on('agent:trust', fn),
   onStatus: (fn: (id: string, status: 'working' | 'idle') => void) => on('agent:status', fn),
+  ctx: (id: string): Promise<{ used: number; limit: number; pct: number; model: string } | null> =>
+    ipcRenderer.invoke('agent:ctx', id),
+  onCtx: (fn: (id: string, ctx: { used: number; limit: number; pct: number; model: string }) => void) =>
+    on('agent:ctx', fn),
   steer: (id: string, note: string) => ipcRenderer.invoke('agent:steer', id, note),
   steers: (id: string): Promise<string[]> => ipcRenderer.invoke('agent:steers', id),
   onSteerQueued: (fn: (id: string, note: string, depth: number) => void) => on('agent:steer-queued', fn),

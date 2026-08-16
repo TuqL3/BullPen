@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { Board, boardPath } from './board.ts'
+import { readCtx, type Ctx } from './ctx.ts'
 import { Hive } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
@@ -65,6 +66,34 @@ function createWindow(): void {
   else win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
 }
 
+const currentCtx = (id: string): Ctx | null => {
+  const path = approvals.transcriptOf(id)
+  return path ? readCtx(path) : null
+}
+
+/**
+ * Context usage is read from the agent's own transcript, which the CLI names in
+ * every hook payload. Nothing is scraped from the terminal - the on-screen
+ * meter is Claude Code's own rendering and free to change in any release.
+ */
+const pushCtx = (id: string): boolean => {
+  const ctx = currentCtx(id)
+  if (ctx) send('agent:ctx', id, ctx)
+  return Boolean(ctx)
+}
+
+/**
+ * The Stop hook fires before the CLI has finished appending that turn's usage
+ * record, so an immediate read comes back empty. Retry a couple of times and
+ * stop at the first success rather than polling every agent forever.
+ */
+const pushCtxSoon = (id: string): void => {
+  if (pushCtx(id)) return
+  for (const delay of [1200, 4000, 10_000]) {
+    setTimeout(() => pushCtx(id), delay).unref?.()
+  }
+}
+
 function wire(): void {
   ptys.on('data', (id: string, chunk: string) => send('pty:data', id, chunk))
   // Auto-confirming anything must leave a trace the human can find later.
@@ -86,7 +115,12 @@ function wire(): void {
   hive.on('dead', (msg) => send('hive:dead', msg))
   hive.start()
 
-  approvals.on('status', (id: string, status: string) => send('agent:status', id, status))
+  approvals.on('status', (id: string, status: string) => {
+    send('agent:status', id, status)
+    // A turn just ended, so the transcript now holds its token counts.
+    if (status === 'idle') pushCtxSoon(id)
+  })
+  approvals.on('transcript', (id: string) => pushCtxSoon(id))
   approvals.on('steer-queued', (id: string, note: string, depth: number) =>
     send('agent:steer-queued', id, note, depth)
   )
@@ -157,6 +191,7 @@ function wire(): void {
     send('agent:trigger-fired', t.agentId, t.prompt)
   })
 
+  ipcMain.handle('agent:ctx', (_e, id: string) => currentCtx(id))
   ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
   ipcMain.handle('board:addTask', (_e, id: string, text: string) => board.addTask(id, text))
   ipcMain.handle('board:toggleTask', (_e, id: string) => board.toggleTask(id))

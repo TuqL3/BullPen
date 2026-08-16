@@ -93,6 +93,7 @@ export default function App() {
           if (next) window.bullpen.write(id, next.replace(/\n/g, ' ') + '\r')
         }
       }),
+      window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
       window.bullpen.onSteerQueued((id) => {
         window.bullpen.steers(id).then((notes) => store().setSteers(id, notes))
       }),
@@ -238,6 +239,9 @@ export default function App() {
                 {current ? `${current.activity} · pid ${current.pid} · ${current.cwd}` : 'no agent selected'}
               </div>
             </div>
+            <div>{current && <CtxMeter ctx={current.ctx} />}</div>
+            <div style={{ display: 'none' }}>
+            </div>
           </header>
 
           {current && (
@@ -351,6 +355,28 @@ export default function App() {
       {adding && (
         <AddAgent taken={agents.map((a) => a.id)} onCancel={() => setAdding(false)} onSpawn={spawnFrom} />
       )}
+    </div>
+  )
+}
+
+/**
+ * Context window usage, read from the agent's transcript rather than scraped
+ * from its terminal. Blank until the agent has completed a turn - there is no
+ * usage record before then, and a fabricated zero would read as "plenty left".
+ */
+export function CtxMeter({ ctx }: { ctx?: Agent['ctx'] }) {
+  if (!ctx) return <span style={{ ...LABEL, color: 'var(--faint)' }}>ctx —</span>
+  const k = (n: number) => `${Math.round(n / 1000)}k`
+  const colour = ctx.pct >= 85 ? 'var(--danger)' : ctx.pct >= 60 ? 'var(--warn)' : 'var(--ok)'
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={ctx.model}>
+      <span style={{ ...LABEL, color: 'var(--muted)' }}>
+        ctx {k(ctx.used)}/{k(ctx.limit)}
+      </span>
+      <div style={S.meterTrack}>
+        <div style={{ ...S.meterBar, width: `${Math.max(2, ctx.pct)}%`, background: colour }} />
+      </div>
+      <span style={{ ...LABEL, color: colour }}>{ctx.pct}%</span>
     </div>
   )
 }
@@ -717,5 +743,7 @@ const S: Record<string, React.CSSProperties> = {
   },
   dockCardActive: { borderColor: 'var(--accent)' },
   meter: { height: 3, background: 'var(--line)', marginTop: 4, width: 76 },
+  meterTrack: { width: 90, height: 6, background: 'var(--line)', flex: '0 0 auto' },
+  meterBar: { height: '100%' },
   meterFill: { height: '100%' }
 }

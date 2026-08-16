@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { spawn, type IPty } from 'node-pty'
 import { platform } from 'node:os'
+import { cleanEnv } from './ctx.ts'
 import { feed, newWatch, type TrustWatch } from './trust.ts'
 
 export type AgentSpec = {
@@ -42,7 +43,10 @@ export class PtyManager extends EventEmitter {
       cwd: spec.cwd,
       cols: spec.cols ?? 120,
       rows: spec.rows ?? 32,
-      env: { ...process.env, ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
+      // cleanEnv strips CLAUDE_CODE_*: if Bullpen was itself launched from a
+      // Claude Code session, the inherited child-session marker turns the
+      // agent's transcript off, which removes the context and cost data.
+      env: { ...cleanEnv(process.env), ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
     })
 
     const state: AgentState = {

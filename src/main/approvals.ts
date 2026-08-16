@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 export type HookPayload = {
   session_id?: string
   cwd?: string
+  transcript_path?: string
   hook_event_name?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
@@ -85,6 +86,8 @@ export class Approvals extends EventEmitter {
   private sandboxes = new Map<string, string>()
   /** agentId -> steer notes waiting to ride out on the next hook reply */
   private steers = new Map<string, string[]>()
+  /** agentId -> the transcript the CLI reported in its last hook payload */
+  private transcripts = new Map<string, string>()
 
   constructor(root: string) {
     super()
@@ -120,6 +123,19 @@ export class Approvals extends EventEmitter {
     list.push(text)
     this.steers.set(agentId, list)
     this.emit('steer-queued', agentId, text, list.length)
+  }
+
+  transcriptOf(agentId: string): string | undefined {
+    return this.transcripts.get(agentId)
+  }
+
+  /** Every hook payload carries the transcript path; that is where the token
+   *  counts live, so remember it rather than trying to guess the path. */
+  private noteTranscript(agentId: string, payload: HookPayload): void {
+    const path = payload.transcript_path
+    if (!path || this.transcripts.get(agentId) === path) return
+    this.transcripts.set(agentId, path)
+    this.emit('transcript', agentId, path)
   }
 
   pendingSteers(agentId: string): string[] {
@@ -226,6 +242,7 @@ export class Approvals extends EventEmitter {
             this.reply(reply, 'deny', 'Bullpen could not parse the hook payload')
             return
           }
+          this.noteTranscript(agentId, payload)
           const { verdict, reason } = this.classify(agentId, payload)
           // Steers ride out on whichever tool call comes next, but only when it
           // is actually allowed to run - a denied call is not a delivery.
@@ -320,6 +337,11 @@ export class Approvals extends EventEmitter {
       event = (JSON.parse(body) as HookPayload).hook_event_name ?? ''
     } catch {
       return
+    }
+    try {
+      this.noteTranscript(agentId, JSON.parse(body))
+    } catch {
+      // Already reported above; the status still matters.
     }
     const status = LIFECYCLE_STATUS[event]
     if (status) this.emit('status', agentId, status, event)

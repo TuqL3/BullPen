@@ -15,6 +15,8 @@ export type Agent = {
   color?: string
   /** Epoch ms the pty was spawned; drives uptime in monitor and workers. */
   startedAt?: number
+  /** Context window usage from the agent's own transcript. */
+  ctx?: { used: number; limit: number; pct: number; model: string }
   exitCode?: number
 }
 
