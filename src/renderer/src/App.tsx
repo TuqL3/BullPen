@@ -63,7 +63,9 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
   const [floorOn, setFloorOn] = useState(true)
-  const [adding, setAdding] = useState(false)
+  // Null when closed; otherwise the fields the wizard opens with. Hiring the
+  // second agent into a project should not mean re-answering where it lives.
+  const [adding, setAdding] = useState<Partial<Draft> | null>(null)
   const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
   const [moveError, setMoveError] = useState('')
@@ -242,7 +244,7 @@ export default function App() {
       if (d.role === 'god') window.bullpen.setGod(id)
       select(id)
       setTab('terminal')
-      setAdding(false)
+      setAdding(null)
 
       // ponytail: fixed delay, because the CLI gives no ready signal on the pty.
       // Ceiling - a slow cold start swallows the briefing. Upgrade path: watch
@@ -315,7 +317,7 @@ export default function App() {
 
       <div style={floorOn ? S.bodyWithFloor : S.body}>
         <aside style={S.roster}>
-          <button style={{ ...S.btn, width: '100%', marginBottom: 12 }} onClick={() => setAdding(true)}>
+          <button style={{ ...S.btn, width: '100%', marginBottom: 12 }} onClick={() => setAdding({})}>
             + agent
           </button>
 
@@ -338,7 +340,19 @@ export default function App() {
           {byProject(agents).map(({ label, rows }) => {
             return (
               <div key={label} style={{ marginBottom: 10 }}>
-                <div style={{ ...LABEL, color: 'var(--faint)', margin: '0 0 4px 4px' }}>{label}</div>
+                <div style={S.groupHead}>
+                  <span style={{ ...LABEL, color: 'var(--faint)' }}>{label}</span>
+                  <button
+                    title={`hire into ${label}`}
+                    aria-label={`hire into ${label}`}
+                    style={S.groupAdd}
+                    // Same directory and project as the agents already there, so
+                    // the second hire only needs a name.
+                    onClick={() => setAdding({ project: label, cwd: rows[0].cwd })}
+                  >
+                    +
+                  </button>
+                </div>
                 {rows.map((a) => (
                   <RosterRow
                     key={a.id}
@@ -495,7 +509,8 @@ export default function App() {
       {adding && (
         <AddAgent
           taken={agents.map((a) => a.id)}
-          onCancel={() => setAdding(false)}
+          prefill={adding}
+          onCancel={() => setAdding(null)}
           onSpawn={spawnFrom}
         />
       )}
@@ -977,6 +992,21 @@ const S: Record<string, React.CSSProperties> = {
     font: `11px ${MONO}`
   },
   btnPrimary: { background: 'var(--accent)', color: '#241f1a', borderColor: 'var(--accent)' },
+  groupHead: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    margin: '0 4px 4px 4px'
+  },
+  groupAdd: {
+    background: 'transparent',
+    border: '1px solid var(--line)',
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    lineHeight: 1,
+    padding: '1px 6px',
+    font: `12px ${MONO}`
+  },
   modalWrap: {
     position: 'fixed',
     inset: 0,

@@ -26,8 +26,8 @@ const STEPS = [
 const EMPTY: Draft = {
   role: 'worker',
   project: '',
-  name: 'Michael',
-  face: 'Michael',
+  name: '',
+  face: PRESETS[1],
   color: SHIRT_CHOICES[2],
   cwd: '',
   cmd: 'claude',
@@ -35,19 +35,32 @@ const EMPTY: Draft = {
   briefing: ''
 }
 
+/**
+ * Michael is spawned by the app and holds that id, so suggesting him here only
+ * ever produced "michael is already on the floor". Suggest the first preset
+ * nobody has taken instead, and fall back to no suggestion once they run out.
+ */
+const suggest = (taken: string[]): { name: string; face: string } => {
+  const free = PRESETS.find((p) => !taken.includes(slug(p)))
+  return { name: free ?? '', face: free ?? PRESETS[1] }
+}
+
 export function AddAgent({
   taken,
+  prefill,
   onCancel,
   onSpawn
 }: {
   taken: string[]
+  /** Fields the caller already knows - hiring into a project fills in both. */
+  prefill?: Partial<Draft>
   onCancel: () => void
   onSpawn: (d: Draft) => Promise<string | null>
 }) {
   const [step, setStep] = useState(0)
   // Michael already holds the god seat and is spawned on launch, so everyone
   // hired here is a worker. Nothing to decide.
-  const [d, setD] = useState<Draft>({ ...EMPTY })
+  const [d, setD] = useState<Draft>({ ...EMPTY, ...suggest(taken), ...prefill })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -265,6 +278,8 @@ export function AddAgent({
                 next
               </button>
             )}
+            {/* A prefilled draft is complete at step 1, so spawning must not
+                require walking to step 4 to reach the button. */}
             <button style={S.btn} onClick={onCancel}>
               cancel
             </button>
