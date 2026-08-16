@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
+import { checkWorkspace, readConfig, writeConfig } from './config.ts'
 import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
@@ -95,6 +96,17 @@ function spawnAgent(spec: AgentSpec): ReturnType<PtyManager['spawn']> {
     startedAt: state.startedAt
   })
   return state
+}
+
+/** Where Michael lives: whatever the operator chose, else the default. */
+const currentGodCwd = (): string => readConfig(BULLPEN_HOME).godCwd ?? godCwd(BULLPEN_HOME)
+
+/** Create the workspace, drop the briefing in it if absent, and bring him up. */
+function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType<PtyManager['spawn']> {
+  mkdirSync(cwd, { recursive: true })
+  writeBriefing(cwd, floorPath(BULLPEN_HOME))
+  approvals.setSandbox(GOD_ID, cwd)
+  return spawnAgent({ id: GOD_ID, cwd, cmd: 'claude', args: [], ...size })
 }
 
 function createWindow(): void {
@@ -251,13 +263,50 @@ function wire(): void {
    */
   ipcMain.handle('god:ensure', (_e, size: { cols: number; rows: number }) => {
     const running = ptys.list().find((a) => a.id === GOD_ID && a.status === 'running')
-    const cwd = godCwd(BULLPEN_HOME)
     if (running) return { ...running, name: GOD_NAME, alreadyUp: true }
-    mkdirSync(cwd, { recursive: true })
-    writeBriefing(cwd, floorPath(BULLPEN_HOME))
-    const state = spawnAgent({ id: GOD_ID, cwd, cmd: 'claude', args: [], ...size })
+    const state = startGod(currentGodCwd(), size)
     return { ...state, name: GOD_NAME, alreadyUp: false }
   })
+
+  /**
+   * Move Michael to a directory the operator picked. `~/.bullpen/michael` is a
+   * default, not a decision - one machine's layout is not another's.
+   *
+   * The CLI reads its working directory once, at startup, so this is a restart:
+   * the running Michael is killed and a new one comes up in the new place. The
+   * conversation does not survive that, which is why the UI says so first.
+   */
+  ipcMain.handle(
+    'god:move',
+    async (_e, dir: string, size: { cols: number; rows: number }) => {
+      const target = resolve(dir)
+      const bad = checkWorkspace(target, app.getPath('home'))
+      if (bad) return { error: bad }
+
+      writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), godCwd: target })
+
+      if (ptys.isRunning(GOD_ID)) {
+        // spawn() refuses a duplicate id, so the old process must be gone -
+        // not merely signalled - before the new one starts.
+        await new Promise<void>((done) => {
+          const timer = setTimeout(done, 5000)
+          ptys.once('exit', (id: string) => {
+            if (id !== GOD_ID) return
+            clearTimeout(timer)
+            done()
+          })
+          ptys.kill(GOD_ID)
+        })
+      }
+      try {
+        return { ...startGod(target, size), name: GOD_NAME }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle('god:cwd', () => currentGodCwd())
 
   /**
    * The renderer holds the only complete picture of the floor - names, projects

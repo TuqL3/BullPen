@@ -109,6 +109,15 @@ const api = {
     rows: number
     alreadyUp: boolean
   }> => ipcRenderer.invoke('god:ensure', size),
+  /** Restart Michael in a directory of the operator's choosing, and remember it. */
+  moveGod: (
+    dir: string,
+    size: { cols: number; rows: number }
+  ): Promise<
+    | { error: string }
+    | { id: string; name: string; cwd: string; pid: number; startedAt: number; cols: number; rows: number }
+  > => ipcRenderer.invoke('god:move', dir, size),
+  godCwd: (): Promise<string> => ipcRenderer.invoke('god:cwd'),
   /** Publish the roster to the file Michael reads. */
   publishFloor: (agents: FloorAgent[]): Promise<boolean> =>
     ipcRenderer.invoke('floor:publish', agents),

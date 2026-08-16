@@ -66,6 +66,7 @@ export default function App() {
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
+  const [moveError, setMoveError] = useState('')
 
   useEffect(() => setTerminalTheme(mode), [mode])
 
@@ -248,6 +249,33 @@ export default function App() {
     setDraft('')
   }
 
+  /**
+   * Michael's workspace is a setting, not a fixture. The CLI reads its working
+   * directory once at startup, so moving him is a restart - the conversation in
+   * his terminal does not survive it, and that is worth saying out loud before
+   * it happens rather than after.
+   */
+  const moveGod = async (): Promise<void> => {
+    const dir = await window.bullpen.pickDir()
+    if (!dir) return
+    if (!confirm(`Restart Michael in ${dir}?\n\nHis current conversation is lost.`)) return
+    setMoveError('')
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    const res = await window.bullpen.moveGod(dir, { cols, rows })
+    if ('error' in res) return setMoveError(res.error)
+    store().upsertAgent({
+      id: res.id,
+      cwd: res.cwd,
+      pid: res.pid,
+      startedAt: res.startedAt,
+      cols: res.cols,
+      rows: res.rows,
+      status: 'running',
+      exitCode: undefined,
+      activity: 'idle'
+    })
+  }
+
   const steer = (): void => {
     if (!selected || !steerText.trim()) return
     window.bullpen.steer(selected, steerText.trim())
@@ -319,7 +347,15 @@ export default function App() {
               </div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>
                 {current ? `${current.activity} · pid ${current.pid} · ${current.cwd}` : 'no agent selected'}
+                {current?.role === 'god' && (
+                  <button style={S.linkBtn} onClick={moveGod}>
+                    move
+                  </button>
+                )}
               </div>
+              {moveError && (
+                <div style={{ fontSize: 11, color: 'var(--danger)' }}>{moveError}</div>
+              )}
             </div>
             <div>{current && <CtxMeter ctx={current.ctx} />}</div>
             <div style={{ display: 'none' }}>
