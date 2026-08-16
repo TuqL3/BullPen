@@ -4,6 +4,8 @@ import {
   assignDesks,
   buildOffice,
   findPath,
+  MAX_COLS,
+  MAX_ROWS,
   MIN_COLS,
   MIN_ROWS,
   randomWalkable,
@@ -17,7 +19,8 @@ import {
  * smallest thing that still counts as an office.
  */
 const SIZES: [number, number][] = [
-  [36, 26], // the original fixed grid
+  [36, 26], // the original fixed grid - now above the cap, so it clamps
+  [200, 200], // far past the cap in both directions
   [22, 60], // a tall narrow column
   [90, 16], // a short wide strip
   [MIN_COLS, MIN_ROWS], // the floor of what is allowed
@@ -69,6 +72,8 @@ for (const [cols, rows] of SIZES) {
     assert.equal(o.grid.length, o.rows)
     assert.ok(o.grid.every((r) => r.length === o.cols))
     assert.ok(o.cols >= MIN_COLS && o.rows >= MIN_ROWS)
+    // And capped: past this the office is not more readable, just more of it.
+    assert.ok(o.cols <= MAX_COLS && o.rows <= MAX_ROWS)
   })
 }
 

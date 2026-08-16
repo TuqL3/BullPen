@@ -14,14 +14,23 @@ import {
 
 const cols = (l: { columns: string[][] }): string => l.columns.map((c) => c.join('+')).join('|')
 
-test('the default is the arrangement asked for: four columns, two stacked in the last', () => {
-  assert.equal(cols(DEFAULT_LAYOUT), 'roster|command|editor|tree+floor')
+test('the default is the arrangement asked for: four columns, a stack in the last', () => {
+  assert.equal(cols(DEFAULT_LAYOUT), 'roster|command|editor|tree+shell+floor')
+  // The shell is a second terminal; two on screen by default is a wall of them.
+  assert.deepEqual(DEFAULT_LAYOUT.hidden, ['shell'])
+  assert.equal(visible(DEFAULT_LAYOUT).at(-1)?.panels.join('+'), 'tree+floor')
 })
 
 test('a panel can be dropped above or below the one it lands on', () => {
-  assert.equal(cols(moveTo(DEFAULT_LAYOUT, 'floor', 'tree', 'above')), 'roster|command|editor|floor+tree')
+  assert.equal(
+    cols(moveTo(DEFAULT_LAYOUT, 'floor', 'tree', 'above')),
+    'roster|command|editor|floor+tree+shell'
+  )
   // Moving into another column empties the one it left, which disappears.
-  assert.equal(cols(moveTo(DEFAULT_LAYOUT, 'editor', 'tree', 'below')), 'roster|command|tree+editor+floor')
+  assert.equal(
+    cols(moveTo(DEFAULT_LAYOUT, 'editor', 'tree', 'below')),
+    'roster|command|tree+editor+shell+floor'
+  )
   assert.deepEqual(moveTo(DEFAULT_LAYOUT, 'tree', 'tree', 'above'), DEFAULT_LAYOUT)
 })
 
@@ -32,9 +41,12 @@ test('an emptied column takes its width with it rather than leaving a gap', () =
 })
 
 test('a panel can be lifted into a column of its own', () => {
-  assert.equal(cols(moveToNewColumn(DEFAULT_LAYOUT, 'floor', 0)), 'floor|roster|command|editor|tree')
+  assert.equal(
+    cols(moveToNewColumn(DEFAULT_LAYOUT, 'floor', 0)),
+    'floor|roster|command|editor|tree+shell'
+  )
   const l = moveToNewColumn(DEFAULT_LAYOUT, 'floor', 4)
-  assert.equal(cols(l), 'roster|command|editor|tree|floor')
+  assert.equal(cols(l), 'roster|command|editor|tree+shell|floor')
   assert.equal(l.colWeight.length, 5)
   // A panel already alone where it would land is left exactly as it is.
   assert.deepEqual(moveToNewColumn(DEFAULT_LAYOUT, 'command', 1), DEFAULT_LAYOUT)
@@ -79,11 +91,18 @@ test('hiding every panel is refused - it would leave no way back', () => {
   assert.deepEqual(normalise({ hidden: ['floor', 'nope'] }).hidden, ['floor'])
 })
 
+test('an absent hidden list takes the default; an empty one is a choice', () => {
+  // Showing every panel and hiding none are different states, and reading the
+  // second as the first would put the shell back every time it was dismissed.
+  assert.deepEqual(normalise({}).hidden, DEFAULT_LAYOUT.hidden)
+  assert.deepEqual(normalise({ hidden: [] }).hidden, [])
+})
+
 test('hiding a panel drops its column but not its place in the layout', () => {
   const off = toggle(DEFAULT_LAYOUT, 'editor')
   assert.equal(visible(off).length, 3)
   assert.equal(cols(off), cols(DEFAULT_LAYOUT))
-  assert.deepEqual(toggle(off, 'editor').hidden, [])
-  // Hiding one of a stacked pair leaves the column, holding the other.
+  assert.deepEqual(toggle(off, 'editor').hidden, ['shell'])
+  // Hiding one of a stack leaves the column, holding the rest.
   assert.deepEqual(visible(toggle(DEFAULT_LAYOUT, 'floor')).at(-1)?.panels, ['tree'])
 })

@@ -8,6 +8,14 @@ export const TILE = 16
 export const MIN_COLS = 18
 export const MIN_ROWS = 14
 
+/**
+ * And large enough is enough. Past this the office is not more readable, just
+ * more of it: a wall of empty desks nobody sits at, with the agents you are
+ * actually watching lost somewhere in the middle.
+ */
+export const MAX_COLS = 34
+export const MAX_ROWS = 24
+
 export type Cell =
   | 'floor'
   | 'rug'
@@ -54,8 +62,8 @@ export type Office = {
  *   y+3   two desks facing up, seats on y+2
  */
 export function buildOffice(cols: number, rows: number): Office {
-  cols = Math.max(MIN_COLS, Math.floor(cols))
-  rows = Math.max(MIN_ROWS, Math.floor(rows))
+  cols = Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(cols)))
+  rows = Math.min(MAX_ROWS, Math.max(MIN_ROWS, Math.floor(rows)))
 
   const grid: Cell[][] = Array.from({ length: rows }, () =>
     Array.from({ length: cols }, (): Cell => 'floor')

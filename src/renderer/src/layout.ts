@@ -6,7 +6,7 @@
  * office floor, both beside the editor", and it costs no recursive renderer, no
  * per-node split ratios and no drop zones on four edges of every node.
  */
-export const PANELS = ['roster', 'command', 'editor', 'tree', 'floor'] as const
+export const PANELS = ['roster', 'command', 'editor', 'tree', 'shell', 'floor'] as const
 export type PanelId = (typeof PANELS)[number]
 
 export type Layout = {
@@ -25,14 +25,17 @@ export const PANEL_TITLE: Record<PanelId, string> = {
   command: 'command center',
   editor: 'file · vim',
   tree: 'work tree',
+  shell: 'shell',
   floor: 'office floor'
 }
 
 export const DEFAULT_LAYOUT: Layout = {
-  columns: [['roster'], ['command'], ['editor'], ['tree', 'floor']],
-  hidden: [],
+  columns: [['roster'], ['command'], ['editor'], ['tree', 'shell', 'floor']],
+  // The shell starts hidden: it is a second terminal, and showing two by
+  // default is a wall of terminal before anyone has asked for one.
+  hidden: ['shell'],
   colWeight: [0.62, 2, 2, 1.25],
-  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, floor: 1 }
+  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, shell: 1.2, floor: 1 }
 }
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
@@ -84,13 +87,11 @@ export function normalise(raw: unknown): Layout {
     if (typeof w === 'number' && Number.isFinite(w) && w > 0.02) rowWeight[p] = w
   }
 
-  const hidden = [
-    ...new Set(
-      (Array.isArray(l.hidden) ? l.hidden : []).filter((p): p is PanelId =>
-        PANELS.includes(p as PanelId)
-      )
-    )
-  ]
+  // An absent list is "never chosen" and takes the default; an empty one is a
+  // choice - everything shown - and must not be overwritten by that default.
+  const hidden = Array.isArray(l.hidden)
+    ? [...new Set(l.hidden.filter((p): p is PanelId => PANELS.includes(p as PanelId)))]
+    : [...DEFAULT_LAYOUT.hidden]
 
   return {
     columns,

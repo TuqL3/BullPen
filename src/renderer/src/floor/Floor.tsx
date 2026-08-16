@@ -4,6 +4,8 @@ import { LABEL } from '../theme'
 import {
   assignDesks,
   buildOffice,
+  MAX_COLS,
+  MAX_ROWS,
   MIN_COLS,
   MIN_ROWS,
   findPath,
@@ -60,11 +62,11 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
     const canvas = canvasRef.current
     if (!wrap || !canvas) return
     const fit = (): void => {
-      const cols = Math.max(MIN_COLS, Math.floor(wrap.clientWidth / TILE))
+      const cols = Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(wrap.clientWidth / TILE)))
       // Measured, not assumed: the caption wraps to three lines in a narrow
       // panel, and a constant guess left the floor short by two tiles.
       const spare = wrap.clientHeight - (legendRef.current?.offsetHeight ?? 0)
-      const rows = Math.max(MIN_ROWS, Math.floor(spare / TILE))
+      const rows = Math.min(MAX_ROWS, Math.max(MIN_ROWS, Math.floor(spare / TILE)))
       if (cols === office.current.cols && rows === office.current.rows) return
       office.current = buildOffice(cols, rows)
       canvas.width = office.current.cols * TILE
@@ -297,7 +299,7 @@ const S: Record<string, React.CSSProperties> = {
   wrap: {
     display: 'flex',
     flexDirection: 'column',
-    alignItems: 'stretch',
+    alignItems: 'center',
     height: '100%',
     minHeight: 0,
     padding: 12,
@@ -305,11 +307,13 @@ const S: Record<string, React.CSSProperties> = {
     background: 'var(--sunk)'
   },
   canvas: {
-    // The grid is built to the panel's own proportions, so the canvas fills it
-    // rather than being letterboxed inside it.
-    width: '100%',
-    height: '100%',
+    // The grid is built to the panel's proportions up to a cap, so the canvas
+    // draws at its natural size and only shrinks when the panel is smaller than
+    // that. Stretching it to fill a tall panel is what made a wall of desks.
+    maxWidth: '100%',
+    maxHeight: '100%',
     minHeight: 0,
+    objectFit: 'contain',
     imageRendering: 'pixelated',
     border: '1px solid var(--line)',
     cursor: 'pointer'

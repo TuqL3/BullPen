@@ -137,6 +137,12 @@ const api = {
   codeWrite: (root: string, rel: string, text: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('code:write', root, rel, text),
   codeEdits: (agentId: string): Promise<CodeEdit[]> => ipcRenderer.invoke('code:edits', agentId),
+  openShell: (
+    agentId: string,
+    cwd: string,
+    size: { cols: number; rows: number }
+  ): Promise<{ id: string; cwd: string; pid: number; status: string }> =>
+    ipcRenderer.invoke('shell:open', agentId, cwd, size),
   gitChanges: (root: string): Promise<GitChanges> => ipcRenderer.invoke('git:changes', root),
   gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
     ipcRenderer.invoke('git:diff', root, rel),

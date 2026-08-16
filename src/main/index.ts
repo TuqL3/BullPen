@@ -25,6 +25,10 @@ import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
 const BULLPEN_HOME = process.env.BULLPEN_HOME ?? join(app.getPath('home'), '.bullpen')
 const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
 
+/** Ids under this prefix are the operator's own shells, not hired agents. */
+const SHELL_PREFIX = 'shell:'
+const isShell = (id: string): boolean => id.startsWith(SHELL_PREFIX)
+
 const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
@@ -210,6 +214,7 @@ function wire(): void {
     send('agent:trust', id, sandbox)
   })
   ptys.on('exit', (id: string, code: number) => {
+    if (isShell(id)) return send('agent:exit', id, code)
     // Drop the claim first: a pidfile outliving its process is what makes the
     // next startup consider killing whatever inherited that pid.
     clearPid(join(AGENTS_HOME, id))
@@ -354,6 +359,28 @@ function wire(): void {
     }
   })
   ipcMain.handle('code:edits', (_e, agentId: string) => edits.get(agentId) ?? [])
+  /**
+   * A plain shell in an agent's workspace.
+   *
+   * Deliberately not spawnAgent(): a shell gets no settings file, no hooks, no
+   * mailbox and no pidfile. It is the operator's own terminal, not an agent, and
+   * giving it an agent's control plane would put its every command through the
+   * approvals gate that exists to police agents.
+   */
+  ipcMain.handle('shell:open', (_e, agentId: string, cwd: string, size: { cols: number; rows: number }) => {
+    const id = SHELL_PREFIX + agentId
+    const running = ptys.list().find((a) => a.id === id && a.status === 'running')
+    if (running) return running
+    return ptys.spawn({
+      id,
+      cwd: resolve(cwd),
+      cmd: process.env.SHELL || 'bash',
+      args: [],
+      ...size,
+      env: { BULLPEN_FLOOR: floorPath(BULLPEN_HOME) }
+    })
+  })
+
   ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
   ipcMain.handle('git:diff', (_e, root: string, rel: string) => gitDiff(root, rel))
 

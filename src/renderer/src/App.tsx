@@ -14,6 +14,7 @@ import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './avatar'
 import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
 import { FilePanel, openFile, WorkTree, type OpenFile } from './Code'
+import { isShellId, Shell } from './Shell'
 import {
   DEFAULT_LAYOUT,
   moveTo,
@@ -106,9 +107,12 @@ export default function App() {
           store().touch(id, now)
         }
       }),
-      window.bullpen.onExit((id, code) =>
+      window.bullpen.onExit((id, code) => {
+        // A shell exiting is not an agent exiting; upserting it would put a
+        // phantom agent on the roster and on the office floor.
+        if (isShellId(id)) return
         store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
-      ),
+      }),
       window.bullpen.onStatus((id, status) => store().upsertAgent({ id, activity: status })),
       window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
       window.bullpen.onCost((id, cost) => store().upsertAgent({ id, cost })),
@@ -390,6 +394,7 @@ export default function App() {
     floor: <Floor mode={mode} onSelect={select} />,
     tree: <WorkTree agent={current} openPath={file?.path ?? null} onOpen={open} />,
     editor: <FilePanel file={file} onSave={saveFile} note={fileNote} />,
+    shell: <Shell agent={current} />,
     command: (
         <main style={S.main}>
           <header style={S.header}>
@@ -565,7 +570,7 @@ function Icon({
   name,
   size = 13
 }: {
-  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'editor' | 'tree'
+  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'editor' | 'tree' | 'shell'
   size?: number
 }) {
   const common = {
@@ -617,6 +622,13 @@ function Icon({
     return (
       <svg {...common} aria-hidden>
         <path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5" />
+      </svg>
+    )
+  if (name === 'shell')
+    return (
+      <svg {...common} aria-hidden>
+        <rect x="1.5" y="2.5" width="13" height="11" />
+        <path d="M4 6.5l2 1.5-2 1.5" />
       </svg>
     )
   if (name === 'tree')
