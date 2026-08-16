@@ -14,7 +14,6 @@ import {
   type Point
 } from './layout'
 import { ATLAS_INDEX, buildAtlas, drawChair, PALETTES, type Palette } from './tiles'
-import { buildHybridAtlas, drawSheetTile, KENNEY_CHAIR, loadSheet, sheetReady } from './kenney'
 import { drawEnvelope, drawLabel, drawPerson, type Facing } from './sprite'
 
 const office = buildOffice()
@@ -42,20 +41,12 @@ type Envelope = { from: Point; to: Point; born: number }
  * spends a token, or changes agent behaviour - an agent looks busy because a
  * lifecycle hook said it was, not the other way round.
  */
-export function Floor({
-  mode,
-  art,
-  onSelect
-}: {
-  mode: 'light' | 'dark'
-  art: 'drawn' | 'kenney'
-  onSelect: (id: string) => void
-}) {
+export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (id: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const bodies = useRef(new Map<string, Body>())
   const envelopes = useRef<Envelope[]>([])
   const seenMail = useRef(0)
-  const atlas = useRef<{ canvas: HTMLCanvasElement; palette: Palette; art: string; ready: boolean } | null>(null)
+  const atlas = useRef<{ canvas: HTMLCanvasElement; palette: Palette } | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -71,16 +62,8 @@ export function Floor({
       last = now
 
       const palette = PALETTES[mode]
-      const ready = sheetReady()
-      const cur = atlas.current
-      const stale =
-        !cur ||
-        cur.palette !== palette ||
-        cur.art !== art ||
-        cur.ready !== ready
-      if (stale) {
-        const canvas = art === 'kenney' ? buildHybridAtlas(palette) : buildAtlas(palette)
-        atlas.current = { canvas, palette, art, ready }
+      if (!atlas.current || atlas.current.palette !== palette) {
+        atlas.current = { canvas: buildAtlas(palette), palette }
       }
 
       const { agents, mail, approvals } = useStore.getState()
@@ -124,7 +107,7 @@ export function Floor({
         if (!agents.some((a) => a.id === id)) bodies.current.delete(id)
       }
 
-      draw(ctx, canvas, palette, atlas.current!.canvas, now)
+      draw(ctx, canvas, palette, atlas.current.canvas, now)
       raf = requestAnimationFrame(frame)
     }
 
@@ -209,13 +192,7 @@ export function Floor({
         agents.map((a) => a.id),
         office.desks
       )
-      for (const [, d] of seats) {
-        if (art === 'kenney' && sheetReady()) {
-          drawSheetTile(ctx, KENNEY_CHAIR[0], KENNEY_CHAIR[1], d.seat.x * TILE, d.seat.y * TILE)
-        } else {
-          drawChair(ctx, d.seat.x * TILE, d.seat.y * TILE, palette)
-        }
-      }
+      for (const [, d] of seats) drawChair(ctx, d.seat.x * TILE, d.seat.y * TILE, palette)
 
       for (const agent of agents) {
         const body = bodies.current.get(agent.id)
@@ -258,10 +235,9 @@ export function Floor({
       }
     }
 
-    if (art === 'kenney') loadSheet(() => {})
     raf = requestAnimationFrame(frame)
     return () => cancelAnimationFrame(raf)
-  }, [mode, art])
+  }, [mode])
 
   const click = (e: React.MouseEvent<HTMLCanvasElement>): void => {
     const canvas = canvasRef.current!

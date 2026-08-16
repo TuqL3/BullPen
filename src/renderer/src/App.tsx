@@ -62,7 +62,6 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
   const [floorOn, setFloorOn] = useState(true)
-  const [art, setArt] = useState<'drawn' | 'kenney'>('drawn')
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
@@ -195,8 +194,6 @@ export default function App() {
         onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
         floorOn={floorOn}
         onToggleFloor={() => setFloorOn(!floorOn)}
-        art={art}
-        onToggleArt={() => setArt(art === 'drawn' ? 'kenney' : 'drawn')}
       />
 
       <div style={floorOn ? S.bodyWithFloor : S.body}>
@@ -227,7 +224,7 @@ export default function App() {
 
         {floorOn && (
           <div style={S.floorPane}>
-            <Floor mode={mode} art={art} onSelect={select} />
+            <Floor mode={mode} onSelect={select} />
           </div>
         )}
 
@@ -388,16 +385,12 @@ function TitleBar({
   mode,
   onToggle,
   floorOn,
-  onToggleFloor,
-  art,
-  onToggleArt
+  onToggleFloor
 }: {
   mode: Mode
   onToggle: () => void
   floorOn: boolean
   onToggleFloor: () => void
-  art: 'drawn' | 'kenney'
-  onToggleArt: () => void
 }) {
   return (
     <div style={S.titlebar}>
@@ -414,13 +407,6 @@ function TitleBar({
         onClick={onToggleFloor}
       >
         floor
-      </button>
-      <button
-        style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        onClick={onToggleArt}
-        title="swap the floor art between generated tiles and Kenney's CC0 pack"
-      >
-        art:{art}
       </button>
       {/* Text, not glyphs: ☾/⛶ fall back to tofu in most monospace faces. */}
       <button style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties} onClick={onToggle}>
