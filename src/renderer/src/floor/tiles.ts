@@ -40,9 +40,9 @@ export const PALETTES: Record<'light' | 'dark', Palette> = {
     floorDot: '#aed3b6',
     rug: '#e6dcc4',
     rugLine: '#d8ccae',
-    wallTop: '#f7f5ef',
-    wallFace: '#e3ded1',
-    wallEdge: '#c5bfae',
+    wallTop: '#e8e2d2',
+    wallFace: '#d5cdb8',
+    wallEdge: '#a89f88',
     glass: '#bcd9e8',
     glassFrame: '#8fa6b3',
     deskTop: '#eccb89',
@@ -152,17 +152,20 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
 
     // The inner face of a side wall: cap outside, face toward the room, so a
     // vertical run has the same depth the top wall gets from its face row.
+    // Mostly face, with a cap on the outer edge - the same way round as the top
+    // wall. Drawn mostly cap, the tile came out the colour of the page and the
+    // room looked open on that side.
     case 'wallLeft':
-      px(ctx, 0, 0, TILE, TILE, p.wallTop)
-      px(ctx, TILE - 6, 0, 6, TILE, p.wallFace)
-      px(ctx, TILE - 6, 0, 1, TILE, p.wallEdge)
+      px(ctx, 0, 0, TILE, TILE, p.wallFace)
+      px(ctx, 0, 0, 5, TILE, p.wallTop)
+      px(ctx, 4, 0, 1, TILE, p.wallEdge)
       px(ctx, TILE - 1, 0, 1, TILE, p.wallEdge)
       break
 
     case 'wallRight':
-      px(ctx, 0, 0, TILE, TILE, p.wallTop)
-      px(ctx, 0, 0, 6, TILE, p.wallFace)
-      px(ctx, 5, 0, 1, TILE, p.wallEdge)
+      px(ctx, 0, 0, TILE, TILE, p.wallFace)
+      px(ctx, TILE - 5, 0, 5, TILE, p.wallTop)
+      px(ctx, TILE - 5, 0, 1, TILE, p.wallEdge)
       px(ctx, 0, 0, 1, TILE, p.wallEdge)
       break
 
