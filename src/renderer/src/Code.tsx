@@ -69,6 +69,9 @@ export function WorkTree({
   const [showTree, setShowTree] = useState(true)
   const [showRecent, setShowRecent] = useState(false)
   const [showChanges, setShowChanges] = useState(true)
+  // Bumped on every refresh so the tree re-lists: a file an agent just created
+  // did not appear until the panel happened to remount.
+  const [version, setVersion] = useState(0)
 
   const refresh = (): void => {
     if (!agent) {
@@ -78,6 +81,7 @@ export function WorkTree({
     }
     window.bullpen.codeEdits(agent.id).then(setEdits)
     window.bullpen.gitChanges(agent.cwd).then(setGit)
+    setVersion((v) => v + 1)
   }
   useEffect(refresh, [agent?.id, agent?.cwd])
 
@@ -148,7 +152,7 @@ export function WorkTree({
       </Section>
 
       <Section title="files" open={showTree} onToggle={() => setShowTree(!showTree)}>
-        <Tree key={agent.id} root={agent.cwd} onOpen={onOpen} openPath={openPath} />
+        <Tree key={agent.id} root={agent.cwd} version={version} onOpen={onOpen} openPath={openPath} />
       </Section>
     </div>
   )
@@ -285,12 +289,15 @@ function Section({
  */
 function Tree({
   root,
+  version,
   onOpen,
   openPath,
   rel = '',
   depth = 0
 }: {
   root: string
+  /** Changes when the listing may be stale; every level re-reads on it. */
+  version: number
   onOpen: (path: string) => void
   openPath: string | null
   rel?: string
@@ -306,7 +313,7 @@ function Tree({
       setError(res.error ?? '')
       setEntries(res.entries ?? [])
     })
-  }, [root, rel])
+  }, [root, rel, version])
 
   if (error) return <div style={S.hint}>{error}</div>
   if (!entries) return <div style={S.hint}>Reading…</div>
@@ -337,7 +344,14 @@ function Tree({
             {!e.dir && <span style={S.rowMeta}>{size(e.size)}</span>}
           </button>
           {e.dir && expanded.includes(e.path) && (
-            <Tree root={root} onOpen={onOpen} openPath={openPath} rel={e.path} depth={depth + 1} />
+            <Tree
+              root={root}
+              version={version}
+              onOpen={onOpen}
+              openPath={openPath}
+              rel={e.path}
+              depth={depth + 1}
+            />
           )}
         </div>
       ))}

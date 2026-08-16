@@ -496,7 +496,10 @@ export default function App() {
 
       <div data-layout={cols.map((c) => c.panels.join('+')).join('|')} style={S.body}>
         {cols.map((col, i) => (
-          <Fragment key={col.panels.join('+')}>
+          // Keyed by the column's lead panel, not its contents: keying by
+          // contents remounted the whole column whenever a panel in it was
+          // hidden, which collapsed every folder open in the work tree.
+          <Fragment key={col.panels[0]}>
             {i > 0 && (
               <Splitter
                 onDrag={(dx) => applyLayout(resizeColumns(layout, i - 1, dx / (window.innerWidth || 1)))}

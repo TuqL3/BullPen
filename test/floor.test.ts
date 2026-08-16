@@ -7,6 +7,7 @@ import {
   DESK_ROWS,
   MAX_COLS,
   MAX_ROWS,
+  POD_COLS,
   MIN_COLS,
   MIN_ROWS,
   randomWalkable,
@@ -114,15 +115,19 @@ test('the corner office is reachable, and its seat is walkable', () => {
   assert.ok(findPath(o.grid, o.door, o.boss!.seat), 'no route into the corner office')
 })
 
-test('at full size the office is exactly four rows of desks', () => {
-  // Asked for explicitly: more rows is a wall of empty desks, fewer wastes the
-  // panel. The cap has to produce the count, not merely allow it.
+test('at full size the office is exactly four rows of desks by five pods across', () => {
+  // Asked for explicitly: more is a wall of empty desks, fewer wastes the
+  // panel. The caps have to produce the counts, not merely allow them.
   const o = buildOffice(MAX_COLS, MAX_ROWS)
   const rows = new Set(o.desks.map((d) => d.desk.y))
   assert.equal(rows.size, DESK_ROWS, [...rows].join(','))
+  // Pods are 2 wide, so a pod column is the desk x rounded to its pod origin.
+  const podCols = new Set(o.desks.map((d) => Math.floor((d.desk.x - 3) / 5)))
+  assert.equal(podCols.size, POD_COLS, [...podCols].join(','))
   // And a panel larger than the cap gets the same office, not a bigger one.
   const huge = buildOffice(500, 500)
   assert.equal(new Set(huge.desks.map((d) => d.desk.y)).size, DESK_ROWS)
+  assert.equal(new Set(huge.desks.map((d) => Math.floor((d.desk.x - 3) / 5))).size, POD_COLS)
 })
 
 test('a path is contiguous, walkable, and ends where asked', () => {

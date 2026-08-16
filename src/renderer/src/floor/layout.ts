@@ -13,13 +13,16 @@ export const MIN_ROWS = 14
  * more of it: a wall of empty desks nobody sits at, with the agents you are
  * actually watching lost somewhere in the middle.
  *
- * The row cap is four rows of desks and nothing more. A pod is 4 tall and holds
- * two desk rows, pods repeat every 6, and the last one has to clear the aisle
- * inside the bottom wall - so two pods is `podTop + 6 + 3 + 3`, and any larger
- * number would either add a fifth and sixth row or leave empty floor below.
+ * The caps are four rows of desks by five pods across, and nothing more. A pod
+ * is 4 tall and holds two desk rows, pods repeat every 6, and the last one has
+ * to clear the aisle inside the bottom wall - so two pod rows is
+ * `podTop + 6 + 3 + 3`. Pods repeat every 5 across from x=3, so 30 columns fits
+ * five and starts no sixth. Any larger number adds a row or a column; any
+ * smaller leaves empty floor.
  */
-export const MAX_COLS = 34
+export const MAX_COLS = 30
 export const DESK_ROWS = 4
+export const POD_COLS = 5
 export const MAX_ROWS = 24
 
 export type Cell =
