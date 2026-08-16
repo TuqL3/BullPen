@@ -83,6 +83,8 @@ export class Approvals extends EventEmitter {
   private pending = new Map<string, { p: Pending; resolve: (v: 'allow' | 'deny') => void }>()
   /** agentId -> absolute sandbox dir the agent may touch freely */
   private sandboxes = new Map<string, string>()
+  /** agentId -> steer notes waiting to ride out on the next hook reply */
+  private steers = new Map<string, string[]>()
 
   constructor(root: string) {
     super()
@@ -97,6 +99,40 @@ export class Approvals extends EventEmitter {
 
   listPending(): Pending[] {
     return [...this.pending.values()].map((e) => e.p)
+  }
+
+  /**
+   * Queue a note to be handed to a working agent as conversation context.
+   *
+   * Typing into the pty is the wrong tool while an agent is mid-turn: the text
+   * lands in the middle of its work. A PreToolUse hook may return
+   * `additionalContext`, so a steer rides out on the agent's next tool call
+   * instead - no keystrokes, no interruption.
+   *
+   * Consequence worth knowing: an agent that makes no further tool calls never
+   * collects it. Steering is for a busy agent; an idle one should just be sent
+   * a message.
+   */
+  steer(agentId: string, note: string): void {
+    const text = note.trim()
+    if (!text) return
+    const list = this.steers.get(agentId) ?? []
+    list.push(text)
+    this.steers.set(agentId, list)
+    this.emit('steer-queued', agentId, text, list.length)
+  }
+
+  pendingSteers(agentId: string): string[] {
+    return [...(this.steers.get(agentId) ?? [])]
+  }
+
+  /** Take everything queued for this agent, formatted for the hook reply. */
+  private drainSteers(agentId: string): string {
+    const list = this.steers.get(agentId)
+    if (!list?.length) return ''
+    this.steers.delete(agentId)
+    this.emit('steer-delivered', agentId, list)
+    return list.map((n) => `[steer from your operator] ${n}`).join('\n')
   }
 
   /** Resolve a queued request. Unknown id is a no-op. */
@@ -191,14 +227,17 @@ export class Approvals extends EventEmitter {
             return
           }
           const { verdict, reason } = this.classify(agentId, payload)
-          if (verdict === 'allow') return this.reply(reply, 'allow', '')
+          // Steers ride out on whichever tool call comes next, but only when it
+          // is actually allowed to run - a denied call is not a delivery.
+          if (verdict === 'allow') return this.reply(reply, 'allow', '', this.drainSteers(agentId))
           if (verdict === 'deny') return this.reply(reply, 'deny', `Bullpen: ${reason}`)
 
           const decision = await this.ask(agentId, payload, reason)
           this.reply(
             reply,
             decision,
-            decision === 'deny' ? `Bullpen: human denied (${reason})` : ''
+            decision === 'deny' ? `Bullpen: human denied (${reason})` : '',
+            decision === 'allow' ? this.drainSteers(agentId) : ''
           )
         })
       })
@@ -302,7 +341,12 @@ export class Approvals extends EventEmitter {
     })
   }
 
-  private reply(reply: import('node:http').ServerResponse, decision: 'allow' | 'deny', why: string): void {
+  private reply(
+    reply: import('node:http').ServerResponse,
+    decision: 'allow' | 'deny',
+    why: string,
+    additionalContext = ''
+  ): void {
     // Compact, key order fixed: the hook script greps this string to decide its
     // exit code, so do not pretty-print it.
     const out = JSON.stringify({
@@ -310,7 +354,8 @@ export class Approvals extends EventEmitter {
         hookEventName: 'PreToolUse',
         permissionDecision: decision,
         permissionDecisionReason: why
-      }
+      },
+      ...(additionalContext ? { additionalContext } : {})
     })
     reply.writeHead(200, { 'Content-Type': 'application/json' }).end(out)
   }

@@ -28,13 +28,14 @@ const DOT: Record<string, string> = {
 }
 
 export default function App() {
-  const { agents, approvals, mail, selected, select } = useStore()
+  const { agents, approvals, mail, queue, steers, selected, select } = useStore()
   const store = useStore.getState
 
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
+  const [steerText, setSteerText] = useState('')
 
   useEffect(() => setTerminalTheme(mode), [mode])
 
@@ -44,7 +45,28 @@ export default function App() {
       window.bullpen.onExit((id, code) =>
         store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
       ),
-      window.bullpen.onStatus((id, status) => store().upsertAgent({ id, activity: status })),
+      window.bullpen.onStatus((id, status) => {
+        store().upsertAgent({ id, activity: status })
+        // One message per idle transition, not the whole backlog at once:
+        // sending it flips the agent back to working, and the next Stop pulls
+        // the following one.
+        if (status === 'idle') {
+          const next = store().shift(id)
+          if (next) window.bullpen.write(id, next.replace(/\n/g, ' ') + '\r')
+        }
+      }),
+      window.bullpen.onSteerQueued((id) => {
+        window.bullpen.steers(id).then((notes) => store().setSteers(id, notes))
+      }),
+      window.bullpen.onSteerDelivered((id, notes) => {
+        store().setSteers(id, [])
+        store().addMail({
+          from: 'you',
+          to: id,
+          subject: `steer delivered · ${notes.join(' | ').slice(0, 80)}`,
+          ts: Date.now()
+        })
+      }),
       window.bullpen.onTrust((id, sandbox) =>
         store().addMail({ from: 'bullpen', to: id, subject: `auto-accepted workspace trust · ${sandbox}`, ts: Date.now() })
       ),
@@ -83,7 +105,10 @@ export default function App() {
         cwd: state.cwd,
         pid: state.pid,
         status: 'running',
-        activity: 'working'
+        // A freshly booted agent is sitting at its prompt, not working. It has
+        // submitted nothing, so no Stop hook will ever arrive to correct an
+        // optimistic 'working' - it would stay wrong until its first real turn.
+        activity: 'idle'
       })
       select(id)
       setTab('terminal')
@@ -105,10 +130,21 @@ export default function App() {
     }
   }
 
+  const busy = current?.status === 'running' && current.activity === 'working'
+
   const send = (): void => {
     if (!selected || !draft.trim()) return
-    window.bullpen.write(selected, draft.replace(/\n/g, ' ') + '\r')
+    // Typing into a busy agent's prompt drops text into the middle of its turn,
+    // so it waits for the Stop hook instead. Use steer to reach it right now.
+    if (busy) store().enqueue(selected, draft.trim())
+    else window.bullpen.write(selected, draft.replace(/\n/g, ' ') + '\r')
     setDraft('')
+  }
+
+  const steer = (): void => {
+    if (!selected || !steerText.trim()) return
+    window.bullpen.steer(selected, steerText.trim())
+    setSteerText('')
   }
 
   return (
@@ -156,6 +192,34 @@ export default function App() {
             </div>
           </header>
 
+          {current && (
+            <div style={S.control}>
+              <span style={{ ...LABEL, color: 'var(--faint)' }}>steer</span>
+              <input
+                style={S.steerInput}
+                value={steerText}
+                placeholder={
+                  busy
+                    ? 'injected as context on its next tool call — no typing into its terminal'
+                    : 'steer reaches a working agent; this one is idle, just message it'
+                }
+                onChange={(e) => setSteerText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && steer()}
+              />
+              <button style={S.btn} onClick={steer}>
+                steer
+              </button>
+              {(steers[current.id]?.length ?? 0) > 0 && (
+                <span style={{ ...LABEL, color: 'var(--warn)' }}>
+                  {steers[current.id].length} waiting
+                </span>
+              )}
+              <button style={{ ...S.btn, ...S.btnDanger }} onClick={() => window.bullpen.kill(current.id)}>
+                halt
+              </button>
+            </div>
+          )}
+
           <nav style={S.tabs}>
             {TABS.map((t) => (
               <button
@@ -181,23 +245,48 @@ export default function App() {
           </section>
 
           {tab === 'terminal' && selected && (
-            <footer style={S.composer}>
-              <textarea
-                style={S.draft}
-                rows={2}
-                value={draft}
-                placeholder={`message ${selected}`}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    send()
-                  }
-                }}
-              />
-              <button style={{ ...S.btn, ...S.btnPrimary }} onClick={send}>
-                send →
-              </button>
+            <footer>
+              {(queue[selected]?.length ?? 0) > 0 && (
+                <div style={S.queue}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span style={{ ...LABEL, color: 'var(--ink)' }}>queue</span>
+                    <span style={{ ...LABEL, color: 'var(--warn)' }}>{queue[selected].length}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1 }}>
+                      {selected} is busy — sent one at a time as it frees up
+                    </span>
+                    <button style={S.linkBtn} onClick={() => store().clearQueue(selected)}>
+                      clear all
+                    </button>
+                  </div>
+                  {queue[selected].map((q, i) => (
+                    <div key={i} style={S.queueRow}>
+                      <span style={{ color: 'var(--faint)' }}>{i + 1}.</span>
+                      <span style={{ flex: 1 }}>{q}</span>
+                      <button style={S.linkBtn} onClick={() => store().removeQueued(selected, i)}>
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={S.composer}>
+                <textarea
+                  style={S.draft}
+                  rows={2}
+                  value={draft}
+                  placeholder={busy ? `${selected} is busy — queue a message` : `message ${selected}`}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      send()
+                    }
+                  }}
+                />
+                <button style={{ ...S.btn, ...S.btnPrimary }} onClick={send}>
+                  {busy ? 'queue' : 'send →'}
+                </button>
+              </div>
             </footer>
           )}
         </main>
@@ -404,13 +493,53 @@ const S: Record<string, React.CSSProperties> = {
     padding: 10,
     overflowY: 'auto'
   },
-  main: { display: 'grid', gridTemplateRows: 'auto auto 1fr auto', minHeight: 0, minWidth: 0 },
+  main: { display: 'grid', gridTemplateRows: 'auto auto auto 1fr auto', minHeight: 0, minWidth: 0 },
   header: {
     display: 'flex',
     alignItems: 'center',
     gap: 10,
     padding: '10px 14px',
     borderBottom: '1px solid var(--line)'
+  },
+  control: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '7px 14px',
+    borderBottom: '1px solid var(--line)',
+    background: 'var(--panel)'
+  },
+  steerInput: {
+    flex: 1,
+    padding: '5px 8px',
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    font: `11px ${MONO}`
+  },
+  linkBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: 'var(--faint)',
+    cursor: 'pointer',
+    font: `10px ${MONO}`,
+    textTransform: 'uppercase',
+    letterSpacing: '0.12em'
+  },
+  queue: {
+    padding: '10px 14px',
+    borderTop: '1px solid var(--line)',
+    background: 'var(--sunk)',
+    maxHeight: 150,
+    overflowY: 'auto'
+  },
+  queueRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 8,
+    padding: '3px 0',
+    fontSize: 11,
+    color: 'var(--muted)'
   },
   tabs: { display: 'flex', gap: 2, padding: '0 10px', borderBottom: '1px solid var(--line)' },
   tab: {

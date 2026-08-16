@@ -86,6 +86,60 @@ test('an agent cannot disarm its own leash', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
+test('a steer rides out on the next allowed tool call, once', async () => {
+  const { a, root } = fresh()
+  const port = await a.start()
+  const post = async (body: unknown) =>
+    (
+      await fetch(`http://127.0.0.1:${port}/hook?token=${a.token}&agent=dwight`, {
+        method: 'POST',
+        body: JSON.stringify(body)
+      })
+    ).json()
+
+  a.steer('dwight', 'stop refactoring, just ship the fix')
+  a.steer('dwight', 'and leave the tests alone')
+  assert.equal(a.pendingSteers('dwight').length, 2)
+
+  const first = await post(bash('npm test'))
+  assert.match(first.additionalContext, /stop refactoring/)
+  assert.match(first.additionalContext, /leave the tests alone/)
+  assert.equal(a.pendingSteers('dwight').length, 0, 'delivery must drain the queue')
+
+  const second = await post(bash('git status'))
+  assert.equal(second.additionalContext, undefined, 'must not repeat on every call')
+
+  a.stop()
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a denied call is not a delivery - the steer stays queued', async () => {
+  const { a, root } = fresh()
+  const port = await a.start()
+  a.on('pending', (p) => a.decide(p.id, 'deny'))
+  a.steer('dwight', 'keep me until something actually runs')
+
+  const res = await fetch(`http://127.0.0.1:${port}/hook?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify(bash('rm -rf /'))
+  })
+  const json = await res.json()
+  assert.equal(json.hookSpecificOutput.permissionDecision, 'deny')
+  assert.equal(json.additionalContext, undefined)
+  assert.equal(a.pendingSteers('dwight').length, 1, 'still waiting for a real tool call')
+
+  a.stop()
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('blank steers are ignored', () => {
+  const { a, root } = fresh()
+  a.steer('dwight', '   ')
+  a.steer('dwight', '')
+  assert.deepEqual(a.pendingSteers('dwight'), [])
+  rmSync(root, { recursive: true, force: true })
+})
+
 test('server denies on a token mismatch and honours a human deny', async () => {
   const { a, root } = fresh()
   const port = await a.start()

@@ -85,6 +85,10 @@ function wire(): void {
   hive.start()
 
   approvals.on('status', (id: string, status: string) => send('agent:status', id, status))
+  approvals.on('steer-queued', (id: string, note: string, depth: number) =>
+    send('agent:steer-queued', id, note, depth)
+  )
+  approvals.on('steer-delivered', (id: string, notes: string[]) => send('agent:steer-delivered', id, notes))
   approvals.on('pending', (p: Pending) => send('approvals:pending', p))
   approvals.on('resolved', (p: Pending, decision: string) => send('approvals:resolved', p, decision))
 
@@ -141,6 +145,9 @@ function wire(): void {
   ipcMain.handle('agent:kill', (_e, id: string) => ptys.kill(id))
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => ptys.resize(id, cols, rows))
+
+  ipcMain.handle('agent:steer', (_e, id: string, note: string) => approvals.steer(id, note))
+  ipcMain.handle('agent:steers', (_e, id: string) => approvals.pendingSteers(id))
 
   ipcMain.handle('approvals:list', () => approvals.listPending())
   ipcMain.handle('approvals:decide', (_e, id: string, d: 'allow' | 'deny') => approvals.decide(id, d))
