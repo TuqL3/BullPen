@@ -28,8 +28,11 @@ export const MAX_ROWS = 24
 export type Cell =
   | 'floor'
   | 'rug'
+  | 'door'
   | 'wall'
   | 'wallFace'
+  | 'wallLeft'
+  | 'wallRight'
   | 'window'
   | 'desk'
   | 'deskUp'
@@ -54,6 +57,8 @@ export type Desk = { desk: Point; seat: Point }
 const BLOCKED: ReadonlySet<Cell> = new Set<Cell>([
   'wall',
   'wallFace',
+  'wallLeft',
+  'wallRight',
   'window',
   'clock',
   'board',
@@ -120,13 +125,18 @@ export function buildOffice(cols: number, rows: number): Office {
     set(x, 1, 'wallFace')
     set(x, rows - 1, 'wall')
   }
+  // The side walls get a face of their own. Drawn as a flat cap they read as a
+  // strip of paint rather than a wall, which is exactly how the top wall would
+  // read without the face tile under it.
   for (let y = 0; y < rows; y++) {
-    set(0, y, 'wall')
-    set(cols - 1, y, 'wall')
+    set(0, y, y === 0 || y === rows - 1 ? 'wall' : 'wallLeft')
+    set(cols - 1, y, y === 0 || y === rows - 1 ? 'wall' : 'wallRight')
   }
 
   const door: Point = { x: Math.floor(cols / 2), y: rows - 1 }
-  set(door.x, door.y, 'floor')
+  // A doorway drawn as a hole in the wall reads as a wall with a piece missing.
+  // 'door' is walkable like floor, but drawn with a frame.
+  set(door.x, door.y, 'door')
   for (let x = 3; x < cols - 3; x += 5) {
     set(x, 1, 'window')
     set(x + 1, 1, 'window')
@@ -141,39 +151,54 @@ export function buildOffice(cols: number, rows: number): Office {
   // of nothing but a meeting room has nowhere to seat anyone, which is worse
   // than an open-plan floor with no meeting room.
   const hasRooms = roomBottom - roomTop >= 4 && roomBottom + 6 < rows - 2
-  const meetingW = 10
-  const kitchenW = 8
-  const meeting = hasRooms && cols >= meetingW + 6 ? { x0: 2, x1: 2 + meetingW } : null
-  const kitchen =
-    hasRooms && cols >= meetingW + kitchenW + 10 ? { x0: cols - 1 - kitchenW, x1: cols - 2 } : null
+  // Two rooms, each with its own door, sharing the vertical wall between them.
+  // Sharing it is what keeps the back wall continuous: when each room's wall ran
+  // out into open floor, the result was a wall that stopped in mid-air with the
+  // next one starting further along, read - correctly - as a missing wall.
+  const split = Math.floor(cols / 2)
+  const roomsFit = hasRooms && cols >= 24
+  const meeting = roomsFit ? { x0: 2, x1: split } : hasRooms ? { x0: 2, x1: 2 + 10 } : null
+  const kitchen = roomsFit ? { x0: split + 1, x1: cols - 2 } : null
 
   if (meeting) {
     for (let y = roomTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
     for (let x = meeting.x0; x <= meeting.x1; x++) set(x, roomBottom, 'wall')
-    // A doorway in each partition, or the room is a sealed box.
-    set(meeting.x1, roomTop + 3, 'floor')
-    set(meeting.x0 + 5, roomBottom, 'floor')
+    // The right-hand partition is shared with the kitchen, so its door goes in
+    // the bottom wall - one in the other would open into the fridge.
+    set(meeting.x0 + 5, roomBottom, 'door')
     for (let y = roomTop + 1; y < roomBottom; y++) {
       for (let x = meeting.x0; x < meeting.x1; x++) set(x, y, 'rug')
     }
     const midY = Math.floor((roomTop + roomBottom) / 2)
-    for (let x = meeting.x0 + 2; x <= meeting.x1 - 2; x++) {
+    // A table the width of the room is a runway; cap it and leave floor around.
+    const tableEnd = Math.min(meeting.x1 - 2, meeting.x0 + 9)
+    for (let x = meeting.x0 + 2; x <= tableEnd; x++) {
       set(x, midY, 'table')
       set(x, midY + 1, 'table')
       set(x, midY - 1, 'chairPink')
       set(x, midY + 2, 'chairPink')
     }
     set(meeting.x0 + 7, 1, 'board')
+    // The half of the room past the table would otherwise be bare rug.
+    if (meeting.x1 - tableEnd > 3) {
+      set(meeting.x1 - 1, roomTop + 1, 'cooler')
+      set(meeting.x1 - 1, roomBottom - 1, 'plant')
+      set(meeting.x1 - 3, roomBottom - 1, 'sofa')
+      set(meeting.x1 - 4, roomBottom - 1, 'sofa')
+    }
   }
 
   if (kitchen) {
     for (let y = roomTop; y <= roomBottom; y++) set(kitchen.x0 - 1, y, 'wall')
-    for (let x = kitchen.x0 - 1; x <= kitchen.x1; x++) set(x, roomBottom, 'wall')
-    set(kitchen.x0 - 1, roomBottom - 2, 'floor')
+    for (let x = kitchen.x0 - 1; x <= cols - 1; x++) set(x, roomBottom, 'wall')
+    // Its own door, in its own wall - not in the one it shares with the meeting
+    // room, which would make the kitchen a way through rather than a room.
+    // Placed clear of the shelf run, or the door opens onto a shelf and the
+    // kitchen is a sealed box with a doorway painted on it.
+    set(kitchen.x0 + 1, roomBottom, 'door')
     for (let x = kitchen.x0; x <= kitchen.x1; x++) set(x, roomTop, 'counter')
     set(kitchen.x0, roomTop + 1, 'fridge')
     for (let x = kitchen.x0 + 3; x <= kitchen.x1; x++) set(x, roomBottom - 1, 'shelf')
-    set(kitchen.x0 - 3, roomTop + 1, 'cooler')
   }
 
   // The corner office, bottom right. Needs its own walls, so it is only carved
@@ -193,7 +218,7 @@ export function buildOffice(cols: number, rows: number): Office {
     for (let x = bossRoom.x0 - 1; x <= cols - 1; x++) set(x, bossRoom.y0 - 1, 'wall')
     // A doorway, or it is a sealed box with the one agent you most want to see
     // in it. Two tiles in from the bottom so the aisle reaches it.
-    set(bossRoom.x0 - 1, bossRoom.y1 - 1, 'floor')
+    set(bossRoom.x0 - 1, bossRoom.y1 - 1, 'door')
     for (let y = bossRoom.y0; y <= bossRoom.y1; y++) {
       for (let x = bossRoom.x0; x <= bossRoom.x1; x++) set(x, y, 'rug')
     }

@@ -118,9 +118,27 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
   if (cell !== 'rug') px(ctx, TILE / 2 - 1, TILE / 2 - 1, 2, 2, p.floorDot)
 
   switch (cell) {
+    // A doorway. Walkable, but framed - a plain floor tile in a wall run reads
+    // as a wall with a piece missing, which is exactly how it was reported.
+    case 'door':
+      px(ctx, 0, 0, TILE, TILE, p.floor)
+      px(ctx, 0, 0, 2, TILE, p.wallTop)
+      px(ctx, TILE - 2, 0, 2, TILE, p.wallTop)
+      px(ctx, 0, 0, TILE, 2, p.wallEdge)
+      px(ctx, 2, 2, TILE - 4, 2, p.shadow)
+      px(ctx, 3, TILE - 5, TILE - 6, 3, p.rug)
+      px(ctx, 3, TILE - 5, TILE - 6, 1, p.rugLine)
+      break
+
     case 'wall':
       px(ctx, 0, 0, TILE, TILE, p.wallTop)
       px(ctx, 0, TILE - 2, TILE, 2, p.wallEdge)
+      // Edges on every side, not just the bottom. A vertical run had no line
+      // where it met the floor, so the left and right walls read as open - the
+      // room looked like it had no side to it.
+      px(ctx, 0, 0, 1, TILE, p.wallEdge)
+      px(ctx, TILE - 1, 0, 1, TILE, p.wallEdge)
+      px(ctx, 0, 0, TILE, 1, p.wallEdge)
       break
 
     case 'wallFace':
@@ -130,6 +148,22 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
       px(ctx, 0, 0, TILE, 1, p.wallEdge)
       px(ctx, 0, TILE - 3, TILE, 1, p.wallEdge)
       px(ctx, 0, TILE - 2, TILE, 2, p.wallTop)
+      break
+
+    // The inner face of a side wall: cap outside, face toward the room, so a
+    // vertical run has the same depth the top wall gets from its face row.
+    case 'wallLeft':
+      px(ctx, 0, 0, TILE, TILE, p.wallTop)
+      px(ctx, TILE - 6, 0, 6, TILE, p.wallFace)
+      px(ctx, TILE - 6, 0, 1, TILE, p.wallEdge)
+      px(ctx, TILE - 1, 0, 1, TILE, p.wallEdge)
+      break
+
+    case 'wallRight':
+      px(ctx, 0, 0, TILE, TILE, p.wallTop)
+      px(ctx, 0, 0, 6, TILE, p.wallFace)
+      px(ctx, 5, 0, 1, TILE, p.wallEdge)
+      px(ctx, 0, 0, 1, TILE, p.wallEdge)
       break
 
     case 'window':
@@ -297,6 +331,9 @@ export function drawChair(ctx: CanvasRenderingContext2D, x: number, y: number, p
 }
 
 const KINDS: Cell[] = [
+  'wallLeft',
+  'wallRight',
+  'door',
   'deskBoss',
   'sofa',
   'coffee',

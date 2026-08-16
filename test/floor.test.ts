@@ -34,16 +34,22 @@ for (const [cols, rows] of SIZES) {
 
   test(`${label}: the office is sealed except for the door`, () => {
     const o = buildOffice(cols, rows)
-    let gaps = 0
+    // Anything walkable in the outer ring is a way in, and there should be
+    // exactly one - the door, which is a framed tile rather than a hole.
+    let ways = 0
     for (let x = 0; x < o.cols; x++) {
-      if (o.grid[0][x] === 'floor') gaps++
-      if (o.grid[o.rows - 1][x] === 'floor') gaps++
+      if (walkable(o.grid, x, 0)) ways++
+      if (walkable(o.grid, x, o.rows - 1)) ways++
     }
     for (let y = 1; y < o.rows - 1; y++) {
-      if (o.grid[y][0] === 'floor') gaps++
-      if (o.grid[y][o.cols - 1] === 'floor') gaps++
+      if (walkable(o.grid, 0, y)) ways++
+      if (walkable(o.grid, o.cols - 1, y)) ways++
     }
-    assert.equal(gaps, 1, 'the only hole in the outer wall should be the door')
+    assert.equal(ways, 1, 'the only way through the outer wall should be the door')
+    assert.equal(o.grid[o.door.y][o.door.x], 'door', 'the door is drawn as a hole')
+    // The side walls carry their own face, or they read as a strip of paint.
+    assert.equal(o.grid[Math.floor(o.rows / 2)][0], 'wallLeft')
+    assert.equal(o.grid[Math.floor(o.rows / 2)][o.cols - 1], 'wallRight')
     assert.ok(walkable(o.grid, o.door.x, o.door.y))
   })
 
