@@ -4,19 +4,18 @@ import { LABEL } from '../theme'
 import {
   assignDesks,
   buildOffice,
-  COLS,
-  DOOR,
+  MIN_COLS,
+  MIN_ROWS,
   findPath,
   randomWalkable,
   rng,
-  ROWS,
   TILE,
+  type Office,
   type Point
 } from './layout'
 import { ATLAS_INDEX, buildAtlas, drawChair, PALETTES, type Palette } from './tiles'
 import { drawEnvelope, drawLabel, drawPerson, type Facing } from './sprite'
 
-const office = buildOffice()
 
 /** Tiles crossed per second while walking. */
 const SPEED = 3.2
@@ -43,10 +42,43 @@ type Envelope = { from: Point; to: Point; born: number }
  */
 export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (id: string) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const legendRef = useRef<HTMLDivElement>(null)
+  // The office is rebuilt to fit the panel, so it is state the frame loop reads
+  // rather than a module constant.
+  const office = useRef<Office>(buildOffice(36, 26))
   const bodies = useRef(new Map<string, Body>())
   const envelopes = useRef<Envelope[]>([])
   const seenMail = useRef(0)
   const atlas = useRef<{ canvas: HTMLCanvasElement; palette: Palette } | null>(null)
+
+  // Fit the office to the panel rather than letterboxing a fixed 36x26 grid:
+  // in a tall narrow panel that left a short wide floor stranded in the middle
+  // with dead space above and below it.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    const canvas = canvasRef.current
+    if (!wrap || !canvas) return
+    const fit = (): void => {
+      const cols = Math.max(MIN_COLS, Math.floor(wrap.clientWidth / TILE))
+      // Measured, not assumed: the caption wraps to three lines in a narrow
+      // panel, and a constant guess left the floor short by two tiles.
+      const spare = wrap.clientHeight - (legendRef.current?.offsetHeight ?? 0)
+      const rows = Math.max(MIN_ROWS, Math.floor(spare / TILE))
+      if (cols === office.current.cols && rows === office.current.rows) return
+      office.current = buildOffice(cols, rows)
+      canvas.width = office.current.cols * TILE
+      canvas.height = office.current.rows * TILE
+      canvas.getContext('2d')!.imageSmoothingEnabled = false
+      // Desks moved, so every walk in progress is now a path across a grid that
+      // no longer exists. Dropping the bodies re-enters everyone at the door.
+      bodies.current.clear()
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(wrap)
+    return () => ro.disconnect()
+  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -69,14 +101,14 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const { agents, mail, approvals } = useStore.getState()
       const seats = assignDesks(
         agents.map((a) => a.id),
-        office.desks
+        office.current.desks
       )
 
       // New mail becomes an envelope in flight. Only entries appended since the
       // last frame, so a full mail list does not replay on every render.
       for (let i = seenMail.current; i < mail.length; i++) {
         const m = mail[i]
-        const from = seats.get(m.from)?.seat ?? DOOR
+        const from = seats.get(m.from)?.seat ?? office.current.door
         const to = seats.get(m.to)?.seat
         if (to) envelopes.current.push({ from, to, born: now })
       }
@@ -90,8 +122,8 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
         if (!body) {
           // Everyone walks in through the door, then finds their desk.
           body = {
-            pos: { ...DOOR },
-            path: findPath(office.grid, DOOR, seat) ?? [],
+            pos: { ...office.current.door },
+            path: findPath(office.current.grid, office.current.door, seat) ?? [],
             facing: 'up',
             frame: 0,
             progress: 0,
@@ -145,7 +177,7 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       if (body.wandering && !atSeat) body.wandering = false
 
       if (!atSeat && !body.wandering) {
-        body.path = findPath(office.grid, body.pos, seat) ?? []
+        body.path = findPath(office.current.grid, body.pos, seat) ?? []
         return
       }
       const agent = useStore.getState().agents.find((a) => a.id === id)
@@ -157,8 +189,8 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       // Only a bored agent wanders. One that is working stays at its desk, and
       // one waiting on a human stays put so you can find it.
       if (!working && !blocked && !body.wandering && body.next() < WANDER_CHANCE * dt * 60) {
-        const target = randomWalkable(office.grid, body.next)
-        const path = findPath(office.grid, body.pos, target)
+        const target = randomWalkable(office.current.grid, body.next, office.current.door)
+        const path = findPath(office.current.grid, body.pos, target)
         if (path?.length) {
           body.path = path
           body.wandering = true
@@ -180,9 +212,9 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       ctx.fillStyle = palette.floor
       ctx.fillRect(0, 0, canvas.width, canvas.height)
 
-      for (let y = 0; y < ROWS; y++) {
-        for (let x = 0; x < COLS; x++) {
-          const cell = office.grid[y][x]
+      for (let y = 0; y < office.current.rows; y++) {
+        for (let x = 0; x < office.current.cols; x++) {
+          const cell = office.current.grid[y][x]
           ctx.drawImage(tiles, ATLAS_INDEX[cell] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
         }
       }
@@ -190,7 +222,7 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const { agents, approvals } = useStore.getState()
       const seats = assignDesks(
         agents.map((a) => a.id),
-        office.desks
+        office.current.desks
       )
       for (const [, d] of seats) drawChair(ctx, d.seat.x * TILE, d.seat.y * TILE, palette)
 
@@ -242,8 +274,8 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
   const click = (e: React.MouseEvent<HTMLCanvasElement>): void => {
     const canvas = canvasRef.current!
     const rect = canvas.getBoundingClientRect()
-    const x = Math.floor(((e.clientX - rect.left) / rect.width) * COLS)
-    const y = Math.floor(((e.clientY - rect.top) / rect.height) * ROWS)
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * office.current.cols)
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * office.current.rows)
     const { agents } = useStore.getState()
     for (const agent of agents) {
       const body = bodies.current.get(agent.id)
@@ -252,15 +284,9 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
   }
 
   return (
-    <div style={S.wrap}>
-      <canvas
-        ref={canvasRef}
-        width={COLS * TILE}
-        height={ROWS * TILE}
-        onClick={click}
-        style={S.canvas}
-      />
-      <div style={{ ...LABEL, color: 'var(--faint)', marginTop: 8 }}>
+    <div ref={wrapRef} style={S.wrap}>
+      <canvas ref={canvasRef} onClick={click} style={S.canvas} />
+      <div ref={legendRef} style={{ ...LABEL, color: 'var(--faint)', marginTop: 8 }}>
         deterministic · reads agent status, spends nothing · click someone to open their terminal
       </div>
     </div>
@@ -271,8 +297,7 @@ const S: Record<string, React.CSSProperties> = {
   wrap: {
     display: 'flex',
     flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: 'stretch',
     height: '100%',
     minHeight: 0,
     padding: 12,
@@ -280,13 +305,11 @@ const S: Record<string, React.CSSProperties> = {
     background: 'var(--sunk)'
   },
   canvas: {
-    // Fit the pane in both directions. Width alone overflowed the moment the
-    // floor moved into a short bottom band, and the pane clips rather than
-    // scrolls - so the overflow was simply gone.
-    maxWidth: '100%',
-    maxHeight: '100%',
+    // The grid is built to the panel's own proportions, so the canvas fills it
+    // rather than being letterboxed inside it.
+    width: '100%',
+    height: '100%',
     minHeight: 0,
-    objectFit: 'contain',
     imageRendering: 'pixelated',
     border: '1px solid var(--line)',
     cursor: 'pointer'
