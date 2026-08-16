@@ -22,15 +22,25 @@ test('context is the prompt the model read, not what it wrote', () => {
   const ctx = usageFromLine(assistant('claude-opus-5', REAL))!
   // 2 + 136 + 84548. Output tokens must not inflate it.
   assert.equal(ctx.used, 84686)
-  assert.equal(ctx.limit, 200_000)
-  assert.equal(ctx.pct, 42)
+  assert.equal(ctx.limit, 1_000_000)
+  assert.equal(ctx.pct, 8)
 })
 
 test('the 1M variant is recognised from the model id', () => {
+  // A 1M session records the plain id, so keying off the [1m] suffix reported
+  // 200k for a window five times that - every percentage five times too high.
+  assert.equal(limitForModel('claude-opus-5'), 1_000_000)
   assert.equal(limitForModel('claude-opus-5[1m]'), 1_000_000)
-  assert.equal(limitForModel('claude-opus-5'), 200_000)
+  assert.equal(limitForModel('claude-sonnet-5'), 1_000_000)
+  assert.equal(limitForModel('claude-opus-4-6'), 1_000_000)
+  // Dated releases land on the same row as the alias.
+  assert.equal(limitForModel('claude-opus-5-20260101'), 1_000_000)
+  // Haiku is the small window, and must not be caught by a 4.x rule.
+  assert.equal(limitForModel('claude-haiku-4-5-20251001'), 200_000)
+  // Unknown under-reports the window, which overstates the pressure.
+  assert.equal(limitForModel('some-other-model'), 200_000)
   assert.equal(limitForModel(''), 200_000)
-  const ctx = usageFromLine(assistant('claude-opus-5[1m]', REAL))!
+  const ctx = usageFromLine(assistant('claude-opus-5', REAL))!
   assert.equal(ctx.limit, 1_000_000)
   assert.equal(ctx.pct, 8)
 })

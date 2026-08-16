@@ -7,12 +7,35 @@ export type Ctx = {
   model: string
 }
 
-/** Context windows we can tell apart from the model id alone. */
 const ONE_MILLION = 1_000_000
-const DEFAULT_LIMIT = 200_000
+const TWO_HUNDRED_K = 200_000
+
+/**
+ * The context window a model actually has.
+ *
+ * This used to key off the `[1m]` suffix, which is a Claude Code selector and
+ * not part of the model's identity: a transcript written by a 1M session still
+ * records `claude-opus-5`, so the meter reported 200k for a window five times
+ * that and every percentage was five times too high.
+ *
+ * Matched on the family rather than the exact id, so a dated release
+ * (`claude-opus-5-20260101`) lands on the same row as the alias.
+ */
+const WINDOWS: { test: RegExp; limit: number }[] = [
+  // Haiku is the small window; check it before the generic 4.x rule below.
+  { test: /haiku/i, limit: TWO_HUNDRED_K },
+  { test: /opus-?5|sonnet-?5|fable-?5|mythos-?5/i, limit: ONE_MILLION },
+  { test: /opus-?4[-.]?[678]|sonnet-?4[-.]?6/i, limit: ONE_MILLION }
+]
+
+/** Anything unrecognised. Under-reporting the window overstates the pressure,
+ *  which is the safer way to be wrong about how much room is left. */
+const DEFAULT_LIMIT = TWO_HUNDRED_K
 
 export function limitForModel(model: string): number {
-  return /\[1m\]/i.test(model) ? ONE_MILLION : DEFAULT_LIMIT
+  // An explicit [1m] still wins: it is only ever set on a 1M session.
+  if (/\[1m\]/i.test(model)) return ONE_MILLION
+  return WINDOWS.find((w) => w.test.test(model))?.limit ?? DEFAULT_LIMIT
 }
 
 /**
