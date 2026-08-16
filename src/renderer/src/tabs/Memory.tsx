@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { onEnter } from '../keys'
 import { LABEL, MONO } from '../theme'
 import type { Agent } from '../store'
 
@@ -44,7 +45,7 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
           value={query}
           placeholder="find exact text across the hive…"
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && search()}
+          onKeyDown={onEnter(search)}
         />
         <button style={S.btn} onClick={search}>
           search

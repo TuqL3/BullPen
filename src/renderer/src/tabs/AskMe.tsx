@@ -65,7 +65,7 @@ export function AskMe({ approvals, agents }: { approvals: Approval[]; agents: Ag
               placeholder="Your answer — sent straight back to their inbox (Ctrl+Enter)"
               onChange={(e) => setDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) answer(q)
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing && (e.ctrlKey || e.metaKey)) answer(q)
               }}
             />
             <button style={{ ...S.btn, ...S.btnPrimary }} onClick={() => answer(q)}>

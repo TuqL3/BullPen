@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
+import { onEnter } from './keys'
 import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
@@ -449,7 +450,7 @@ export default function App() {
                     : 'steer reaches a working agent; this one is idle, just message it'
                 }
                 onChange={(e) => setSteerText(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && steer()}
+                onKeyDown={onEnter(steer)}
               />
               <button style={S.btn} onClick={steer}>
                 steer
@@ -722,7 +723,7 @@ function FirstRun({
             value={dir}
             spellCheck={false}
             onChange={(e) => setDir(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && go()}
+            onKeyDown={onEnter(go)}
           />
           <button
             style={S.btn}

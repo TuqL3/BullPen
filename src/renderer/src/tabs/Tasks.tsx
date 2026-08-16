@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { onEnter } from '../keys'
 import { LABEL, MONO } from '../theme'
 import type { Agent } from '../store'
 
@@ -45,7 +46,7 @@ export function Tasks({ agents }: { agents: Agent[] }) {
           value={text}
           placeholder="add a card"
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && add()}
+          onKeyDown={onEnter(add)}
         />
         <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
           <option value="">unassigned</option>

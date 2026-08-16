@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { onEnter } from '../keys'
 import { LABEL, MONO } from '../theme'
 import type { Agent } from '../store'
 
@@ -60,7 +61,7 @@ export function Triggers({ agent }: { agent: Agent | null }) {
           value={prompt}
           placeholder={`sent to ${agent.name} on a schedule`}
           onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && add()}
+          onKeyDown={onEnter(add)}
         />
         <input
           style={{ ...S.input, flex: '0 0 70px', textAlign: 'right' }}
