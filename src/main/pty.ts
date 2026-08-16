@@ -22,6 +22,10 @@ export type AgentState = {
   pid: number
   startedAt: number
   status: 'running' | 'exited'
+  /** Live pty dimensions. A mismatch with the renderer's xterm garbles output,
+   *  so they are reported rather than left invisible. */
+  cols: number
+  rows: number
   exitCode?: number
 }
 
@@ -52,12 +56,16 @@ export class PtyManager extends EventEmitter {
       env: { ...cleanEnv(process.env), ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
     })
 
+    const cols = spec.cols ?? 120
+    const rows = spec.rows ?? 32
     const state: AgentState = {
       id: spec.id,
       cwd: spec.cwd,
       pid: pty.pid,
       startedAt: Date.now(),
-      status: 'running'
+      status: 'running',
+      cols,
+      rows
     }
     this.ptys.set(spec.id, pty)
     this.states.set(spec.id, state)
@@ -93,8 +101,14 @@ export class PtyManager extends EventEmitter {
   }
 
   resize(id: string, cols: number, rows: number): void {
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 2 || rows < 2) return
     try {
       this.ptys.get(id)?.resize(cols, rows)
+      const state = this.states.get(id)
+      if (state) {
+        state.cols = cols
+        state.rows = rows
+      }
     } catch {
       // A pty that exited mid-resize is not an error worth surfacing.
     }

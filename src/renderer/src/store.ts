@@ -2,6 +2,14 @@ import { create } from 'zustand'
 
 export type Agent = {
   id: string
+  /**
+   * The god agent is the operator's own clone: one per floor, pinned above the
+   * projects. It is what dispatch routes through, what sits at the centre of
+   * the graph, and what the activity log means by "god".
+   */
+  role: 'god' | 'worker'
+  /** Which project this agent belongs to. God agents belong to none. */
+  project: string
   /** What the human typed in the wizard; `id` is its slug. */
   name: string
   cwd: string
@@ -80,6 +88,8 @@ export const useStore = create<State>((set, get) => ({
       const i = s.agents.findIndex((x) => x.id === a.id)
       if (i === -1) {
         const fresh: Agent = {
+          role: 'worker',
+          project: '',
           name: a.id,
           cwd: '',
           pid: 0,

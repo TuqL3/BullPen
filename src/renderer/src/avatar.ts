@@ -90,6 +90,11 @@ export function faceFor(seed: string, shirt?: string): Face {
 
 export const FACE_SIZE = 12
 
+/** Derive a project name from a working directory, for the roster grouping. */
+export function projectOf(cwd: string): string {
+  return cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd
+}
+
 /** The roster you pick from in the add-agent wizard. */
 export const PRESETS = [
   'Michael',

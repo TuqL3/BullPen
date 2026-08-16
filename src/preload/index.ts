@@ -26,7 +26,7 @@ const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void) => {
 const api = {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDir'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
-  spawn: (spec: { id: string; cwd: string; cmd?: string; args?: string[] }) =>
+  spawn: (spec: { id: string; cwd: string; cmd?: string; args?: string[]; cols?: number; rows?: number }) =>
     ipcRenderer.invoke('agent:spawn', spec),
   listAgents: () => ipcRenderer.invoke('agent:list'),
   kill: (id: string) => ipcRenderer.invoke('agent:kill', id),

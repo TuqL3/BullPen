@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { Avatar } from './Avatar'
-import { PRESETS, SHIRT_CHOICES, slug } from './avatar'
+import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './avatar'
 import { LABEL, MONO } from './theme'
 
 export type Draft = {
+  /** The first agent is the operator's own clone; every later one is a worker. */
+  role: 'god' | 'worker'
+  project: string
   name: string
   face: string
   color: string
@@ -21,6 +24,8 @@ const STEPS = [
 ] as const
 
 const EMPTY: Draft = {
+  role: 'worker',
+  project: '',
   name: 'Michael',
   face: 'Michael',
   color: SHIRT_CHOICES[2],
@@ -32,15 +37,19 @@ const EMPTY: Draft = {
 
 export function AddAgent({
   taken,
+  hasGod,
   onCancel,
   onSpawn
 }: {
   taken: string[]
+  hasGod: boolean
   onCancel: () => void
   onSpawn: (d: Draft) => Promise<string | null>
 }) {
   const [step, setStep] = useState(0)
-  const [d, setD] = useState<Draft>(EMPTY)
+  // With no god on the floor yet, this one is it - that is the agent the
+  // operator talks through, so it should not need a decision to create.
+  const [d, setD] = useState<Draft>({ ...EMPTY, role: hasGod ? 'worker' : 'god' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -115,9 +124,22 @@ export function AddAgent({
                   spellCheck={false}
                   onChange={(e) => setName(e.target.value)}
                 />
-                <div style={{ fontSize: 10, color: 'var(--faint)', marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: 'var(--faint)', marginBottom: 10 }}>
                   id: {id} · becomes their mailbox and settings directory
                 </div>
+
+                <label style={S.roleRow}>
+                  <input
+                    type="checkbox"
+                    checked={d.role === 'god'}
+                    disabled={hasGod && d.role !== 'god'}
+                    onChange={(e) => set('role', e.target.checked ? 'god' : 'worker')}
+                  />
+                  <span>
+                    This one is <b>me</b> — the orchestrator every other agent reports to.
+                    {hasGod && d.role !== 'god' && ' One already exists.'}
+                  </span>
+                </label>
 
                 <div style={LABEL}>Character</div>
                 <div style={S.faces}>
@@ -171,6 +193,19 @@ export function AddAgent({
                     browse
                   </button>
                 </div>
+                {d.role === 'worker' && (
+                  <>
+                    <div style={{ ...LABEL, marginTop: 14 }}>Project</div>
+                    <input
+                      style={S.input}
+                      value={d.project}
+                      placeholder={projectOf(d.cwd) || 'grouped by folder name if left blank'}
+                      spellCheck={false}
+                      onChange={(e) => set('project', e.target.value)}
+                    />
+                  </>
+                )}
+
                 <p style={S.note}>
                   This is the agent&apos;s sandbox. Writes outside it get escalated to you, and reads are
                   not restricted at all. Give them a scratch directory, never your home folder — Bullpen
@@ -297,6 +332,16 @@ const S: Record<string, React.CSSProperties> = {
   },
   faceActive: { border: '1px solid var(--accent)', background: 'var(--sunk)' },
   swatch: { width: 26, height: 22, cursor: 'pointer' },
+  roleRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginBottom: 14,
+    fontSize: 11,
+    color: 'var(--muted)',
+    lineHeight: 1.5,
+    cursor: 'pointer'
+  },
   note: { fontSize: 11, color: 'var(--muted)', lineHeight: 1.6, marginTop: 4 },
   error: { color: 'var(--danger)', fontSize: 11, marginTop: 14 },
   footer: {

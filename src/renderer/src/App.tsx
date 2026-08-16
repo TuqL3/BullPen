@@ -10,8 +10,8 @@ import { Monitor } from './tabs/Monitor'
 import { Tasks } from './tabs/Tasks'
 import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
-import { slug } from './avatar'
-import { setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
+import { projectOf, slug } from './avatar'
+import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
 import { LABEL, MONO, VARS, type Mode } from './theme'
 import { useStore, type Agent, type Approval } from './store'
 
@@ -30,14 +30,14 @@ const TABS = [
 type Tab = (typeof TABS)[number]
 
 /**
- * Roster grouping is by workspace folder: agents sharing a directory are
- * working on the same thing, which is the question you actually ask when
- * scanning the list.
+ * The roster is a hierarchy, not a flat list: the operator's own clone sits
+ * above everything, and the workers below it are grouped by project. That
+ * shape is what dispatch, the graph centre and the activity log all key off.
  */
-function byFolder(agents: Agent[]): { label: string; rows: Agent[] }[] {
+function byProject(agents: Agent[]): { label: string; rows: Agent[] }[] {
   const groups = new Map<string, Agent[]>()
-  for (const a of agents) {
-    const label = a.cwd.split(/[/\\]/).filter(Boolean).pop() ?? a.cwd
+  for (const a of agents.filter((x) => x.role !== 'god')) {
+    const label = a.project || projectOf(a.cwd)
     groups.set(label, [...(groups.get(label) ?? []), a])
   }
   return [...groups.entries()]
@@ -131,14 +131,21 @@ export default function App() {
   const spawnFrom = async (d: Draft): Promise<string | null> => {
     const id = slug(d.name)
     try {
+      // Start the pty at the size of the pane it will appear in, so the CLI's
+      // first paint is not drawn to a width the terminal never actually had.
+      const { cols, rows } = paneSize(document.querySelector('section'))
       const state = await window.bullpen.spawn({
         id,
         cwd: d.cwd.trim(),
         cmd: d.cmd.trim() || 'claude',
-        args: d.args.trim() ? d.args.trim().split(/\s+/) : []
+        args: d.args.trim() ? d.args.trim().split(/\s+/) : [],
+        cols,
+        rows
       })
       store().upsertAgent({
         id,
+        role: d.role,
+        project: d.role === 'god' ? '' : d.project.trim() || projectOf(d.cwd.trim()),
         name: d.name.trim(),
         face: d.face,
         color: d.color,
@@ -204,7 +211,22 @@ export default function App() {
           </button>
 
           {agents.length === 0 && <div style={S.empty}>No one hired yet.</div>}
-          {byFolder(agents).map(({ label, rows }) => {
+
+          {agents
+            .filter((a) => a.role === 'god')
+            .map((a) => (
+              <RosterRow
+                key={a.id}
+                agent={a}
+                god
+                active={selected === a.id}
+                blocked={approvals.some((p) => p.agentId === a.id)}
+                onSelect={() => select(a.id)}
+                onKill={() => window.bullpen.kill(a.id)}
+              />
+            ))}
+
+          {byProject(agents).map(({ label, rows }) => {
             return (
               <div key={label} style={{ marginBottom: 10 }}>
                 <div style={{ ...LABEL, color: 'var(--faint)', margin: '0 0 4px 4px' }}>{label}</div>
@@ -354,7 +376,12 @@ export default function App() {
       <Dock agents={agents} selected={selected} approvals={approvals} onSelect={select} />
 
       {adding && (
-        <AddAgent taken={agents.map((a) => a.id)} onCancel={() => setAdding(false)} onSpawn={spawnFrom} />
+        <AddAgent
+          taken={agents.map((a) => a.id)}
+          hasGod={agents.some((a) => a.role === 'god')}
+          onCancel={() => setAdding(false)}
+          onSpawn={spawnFrom}
+        />
       )}
     </div>
   )
@@ -476,12 +503,14 @@ function TitleBar({
 
 function RosterRow({
   agent,
+  god = false,
   active,
   blocked,
   onSelect,
   onKill
 }: {
   agent: Agent
+  god?: boolean
   active: boolean
   blocked: boolean
   onSelect: () => void
@@ -489,10 +518,17 @@ function RosterRow({
 }) {
   const status = agent.status === 'exited' ? 'exited' : blocked ? 'blocked' : agent.activity
   return (
-    <div data-agent={agent.id} onClick={onSelect} style={{ ...S.row, ...(active ? S.rowActive : null) }}>
-      <Avatar id={agent.face} shirt={agent.color} size={28} />
+    <div
+      data-agent={agent.id}
+      onClick={onSelect}
+      style={{ ...S.row, ...(god ? S.rowGod : null), ...(active ? S.rowActive : null) }}
+    >
+      <Avatar id={agent.face} shirt={agent.color} size={god ? 34 : 28} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 10 }}>{agent.name}</div>
+        <div style={{ ...LABEL, color: 'var(--ink)', fontSize: god ? 11 : 10 }}>
+          {agent.name}
+          {god && <span style={{ color: 'var(--accent-ink)' }}> · you</span>}
+        </div>
         <div
           title={agent.cwd}
           style={{ fontSize: 10, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -752,6 +788,12 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer'
   },
   rowActive: { background: 'var(--sunk)', borderColor: 'var(--line)' },
+  rowGod: {
+    borderColor: 'var(--line)',
+    background: 'var(--sunk)',
+    marginBottom: 12,
+    padding: '9px 6px'
+  },
   dot: { width: 7, height: 7, borderRadius: 7, flex: '0 0 auto' },
   kill: { color: 'var(--faint)', padding: '0 3px' },
   error: { color: 'var(--danger)', fontSize: 11, marginBottom: 10, whiteSpace: 'pre-wrap' },

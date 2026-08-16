@@ -21,8 +21,8 @@ function get(id: string): { term: Xterm; fit: FitAddon } {
   const existing = terms.get(id)
   if (existing) return existing
   const term = new Xterm({
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-    fontSize: 12.5,
+    fontFamily: FONT,
+    fontSize: FONT_SIZE,
     cursorBlink: true,
     scrollback: 10_000,
     theme: THEMES[mode]
@@ -39,6 +39,47 @@ function get(id: string): { term: Xterm; fit: FitAddon } {
 export function setTerminalTheme(next: Mode): void {
   mode = next
   for (const { term } of terms.values()) term.options.theme = THEMES[next]
+}
+
+const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+const FONT_SIZE = 12.5
+
+/**
+ * Cell size for the terminal font, measured once from a real glyph.
+ *
+ * Needed before any terminal exists: an agent's pty is spawned with the size
+ * the pane will actually be, so the CLI's first paint - its welcome box - is
+ * drawn at the right width. Spawning at node-pty's default and resizing a beat
+ * later leaves that first box wrapped at the wrong width in the scrollback,
+ * where nothing can redraw it.
+ */
+let cell: { w: number; h: number } | null = null
+
+function measureCell(): { w: number; h: number } {
+  if (cell) return cell
+  const probe = document.createElement('span')
+  probe.textContent = 'W'.repeat(100)
+  probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${FONT_SIZE}px ${FONT}`
+  document.body.appendChild(probe)
+  const rect = probe.getBoundingClientRect()
+  probe.remove()
+  cell = { w: rect.width / 100 || 7.5, h: rect.height || Math.ceil(FONT_SIZE * 1.2) }
+  return cell
+}
+
+/**
+ * The dimensions a new agent's pty should start at, taken from the pane it will
+ * live in. Falls back to a conventional 80x24 rather than to a guess that could
+ * be absurd - a wrong size here is exactly what garbles the CLI's first paint.
+ */
+export function paneSize(el: Element | null): { cols: number; rows: number } {
+  const box = el?.getBoundingClientRect()
+  if (!box || box.width < 40 || box.height < 40) return { cols: 80, rows: 24 }
+  const { w, h } = measureCell()
+  return {
+    cols: Math.max(20, Math.floor((box.width - 20) / w)),
+    rows: Math.max(6, Math.floor(box.height / h))
+  }
 }
 
 /** Feed PTY output into the right buffer even while its tab is hidden. */
@@ -78,11 +119,14 @@ function TerminalHost({ id, visible }: { id: string; visible: boolean }) {
     if (!el.hasChildNodes()) term.open(el)
 
     const resize = () => {
+      // A hidden or unlaid-out pane measures near zero. Fitting to that sends
+      // the pty a nonsense width, and every later CLI paint is drawn to it.
+      if (el.clientWidth < 40 || el.clientHeight < 40) return
       try {
         fit.fit()
         window.bullpen.resize(id, term.cols, term.rows)
-      } catch {
-        // Fires while the pane is display:none and has no size yet.
+      } catch (err) {
+        console.warn(`[bullpen] fit failed for ${id}:`, err)
       }
     }
     resize()
