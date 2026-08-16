@@ -138,9 +138,24 @@ export class PtyManager extends EventEmitter {
    * work, and there is no delivery receipt. Upgrade path when that bites: stop
    * typing, and have agents poll their own inbox/ files as a tool call instead.
    */
-  deliver(id: string, from: string, subject: string, body: string): void {
-    if (!this.isRunning(id)) return
-    const text = `[bullpen mail from ${from}] ${subject}: ${body}`
-    this.write(id, text.replace(/\r?\n/g, ' ') + '\r')
+  /** False when the recipient is not running - the caller has to say so. */
+  deliver(id: string, from: string, subject: string, body: string): boolean {
+    return this.submit(id, `[bullpen mail from ${from}] ${subject}: ${body}`)
+  }
+
+  /**
+   * Type a prompt and submit it.
+   *
+   * The Enter must be a write of its own. Claude Code treats a line that lands
+   * in one burst as a paste, and Enter inside a paste is a newline - so
+   * `text + '\r'` left the message sitting on the prompt, never sent. Every
+   * path that puts words in an agent's mouth goes through here: hive mail,
+   * dispatch, scheduled triggers, the first briefing.
+   */
+  submit(id: string, text: string): boolean {
+    if (!this.isRunning(id)) return false
+    this.write(id, text.replace(/\r?\n/g, ' '))
+    setTimeout(() => this.write(id, '\r'), 150).unref?.()
+    return true
   }
 }

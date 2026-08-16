@@ -18,7 +18,7 @@ import {
   writeBriefing,
   type FloorAgent
 } from './god.ts'
-import { Hive, HUMAN, type Message } from './hive.ts'
+import { Hive, HIRE, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
 
@@ -112,18 +112,41 @@ function spawnAgent(spec: AgentSpec): ReturnType<PtyManager['spawn']> {
   return state
 }
 
+/** See PtyManager.submit for why the Enter cannot ride along with the text. */
+const submitPrompt = (id: string, text: string): boolean => ptys.submit(id, text)
+
+/** Agents main hired on Michael's behalf, so a second hire does not reuse a name. */
+const hires = new Map<string, { name: string; project: string }>()
+
+const slugId = (name: string): string =>
+  name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+
 /**
- * Type a prompt into an agent's terminal and submit it.
- *
- * The Enter has to arrive as a write of its own. Claude Code treats a line that
- * lands in a single burst as a paste, and Enter inside a paste is a newline -
- * so `text + '\r'` left the brief sitting in the prompt, never sent. Nothing
- * reported an error: the write succeeded, the agent just never saw a turn.
+ * The directory a project works in, taken from the agents already on it. There
+ * is no registry of projects - a project is just the agents that share a
+ * workspace, which is also all Michael can see in floor.json.
  */
-function submitPrompt(id: string, text: string): void {
-  ptys.write(id, text.replace(/\r?\n/g, ' '))
-  setTimeout(() => ptys.write(id, '\r'), 150).unref?.()
+function projectCwd(project: string): string | null {
+  const want = project.trim().toLowerCase()
+  if (!want) return null
+  for (const row of lastFloor) {
+    if (row.project.trim().toLowerCase() === want) return row.cwd
+  }
+  return null
 }
+
+/** `seo-2`, `seo-3`, ... - readable, and never colliding with a live agent. */
+function nextHireName(project: string): string {
+  const base = project.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'agent'
+  for (let n = 2; n < 100; n++) {
+    const name = `${base}-${n}`
+    if (!ptys.isRunning(slugId(name))) return name
+  }
+  return `${base}-${Date.now()}`
+}
+
+/** The roster as the renderer last published it - what Michael reads too. */
+let lastFloor: FloorAgent[] = []
 
 /** Where Michael lives: whatever the operator chose, else the default. */
 const currentGodCwd = (): string => readConfig(BULLPEN_HOME).godCwd ?? godCwd(BULLPEN_HOME)
@@ -244,7 +267,22 @@ function wire(): void {
   })
 
   hive.on('deliver', ({ to, msg }) => {
-    ptys.deliver(to, msg.from, msg.subject, msg.body)
+    // A halted agent used to swallow its mail: deliver() returned early and
+    // nothing said so, so the sender believed the task was assigned and the
+    // work simply never happened.
+    if (!ptys.deliver(to, msg.from, msg.subject, msg.body)) {
+      activity.push('dead', msg.from, `${to} is not running — "${msg.subject}" was not delivered`)
+      send('hive:dead', msg)
+      if (ptys.isRunning(msg.from)) {
+        hive.send({
+          from: 'bullpen',
+          to: msg.from,
+          subject: `undelivered: ${msg.subject}`,
+          body: `${to} is not running, so it never got this. Check $BULLPEN_FLOOR for who is actually up, or hire someone onto the project.`
+        })
+      }
+      return
+    }
     activity.push('message', msg.from, `${msg.from} → ${to}: ${msg.subject}`)
     send('hive:deliver', { to, msg })
   })
@@ -257,6 +295,44 @@ function wire(): void {
     questions.set(q.id, q)
     activity.push('question', msg.from, `${msg.from} asks you: ${msg.subject}`)
     send('ask:pending', [...questions.values()])
+  })
+
+  /**
+   * Michael asking for another pair of hands.
+   *
+   * The floor he can see is the floor the renderer publishes, so a hire has to
+   * come back out to the renderer to exist there too - main spawns the pty, the
+   * renderer puts them on the roster and the office floor.
+   */
+  hive.on('hire', (msg: Message) => {
+    const project = msg.subject.trim()
+    const cwd = projectCwd(project)
+    if (!cwd) {
+      hive.send({
+        from: 'bullpen',
+        to: msg.from,
+        subject: 're: hire',
+        body: `No project called "${project}" on the floor. Hire only into a project that already has an agent, or ask the human to start one.`
+      })
+      return
+    }
+    const name = nextHireName(project)
+    try {
+      const state = spawnAgent({ id: slugId(name), cwd, cmd: 'claude', args: [], cols: 100, rows: 30 })
+      hires.set(state.id, { name, project })
+      activity.push('spawn', msg.from, `${msg.from} hired ${name} onto ${project}`)
+      send('agent:hired', { ...state, name, project })
+      // The briefing is what the new agent is for; it arrives as its first turn.
+      if (msg.body.trim()) setTimeout(() => ptys.submit(state.id, msg.body), 4000).unref?.()
+      hive.send({ from: 'bullpen', to: msg.from, subject: 're: hire', body: `${name} is on ${project} and has the task.` })
+    } catch (err) {
+      hive.send({
+        from: 'bullpen',
+        to: msg.from,
+        subject: 're: hire',
+        body: `Could not hire: ${err instanceof Error ? err.message : String(err)}`
+      })
+    }
   })
 
   activity.on('activity', (item) => send('activity:item', item))
@@ -418,9 +494,10 @@ function wire(): void {
    * and live status - so it is what publishes the snapshot Michael reads. Agents
    * do not outlive the window, so a stale file cannot describe a live floor.
    */
-  ipcMain.handle('floor:publish', (_e, agents: FloorAgent[]) =>
-    publishFloor(BULLPEN_HOME, agents, Date.now())
-  )
+  ipcMain.handle('floor:publish', (_e, agents: FloorAgent[]) => {
+    lastFloor = agents
+    return publishFloor(BULLPEN_HOME, agents, Date.now())
+  })
 
   // Everywhere but macOS the frame is dropped, so these are the only window
   // controls there are - without them the window cannot be minimised or closed
@@ -481,13 +558,26 @@ function wire(): void {
    * Dispatch: hand a request to the god agent's own prompt. It is the god that
    * decomposes and assigns - Bullpen does not invent a plan of its own.
    */
-  ipcMain.handle('agent:dispatch', (_e, text: string, owner: string) => {
+  ipcMain.handle('agent:dispatch', (_e, text: string, owner: string, project = '') => {
     const target = godId && ptys.isRunning(godId) ? godId : null
     if (!target) return 'no god agent is running'
+    const task = text.replace(/\r?\n/g, ' ')
+    // Michael assigns; he does not do. Doing it himself is always the shortest
+    // path, so the instruction has to say so every time - a floor where the one
+    // agent that can see everyone is also the one doing the work is one agent.
+    const HOW =
+      'Do not do the work yourself. Read $BULLPEN_FLOOR and pick an agent on ' +
+      'that project whose status is running and whose activity is idle - a ' +
+      'stopped agent cannot be given anything. Send them the task through ' +
+      '$BULLPEN_MAILBOX/outbox. ' +
+      'If the project has nobody, or nobody idle, hire one: write a message to ' +
+      '"hire" with the project as the subject and the task as the body. ' +
+      'Then tell me who has it.'
+    const where = project ? ` This is for the ${project} project.` : ''
     const brief =
       owner && owner !== 'decide'
-        ? `Dispatch: ${text.replace(/\r?\n/g, ' ')} — assign this to ${owner}.`
-        : `Dispatch: ${text.replace(/\r?\n/g, ' ')} — decide who should own it and assign it.`
+        ? `Dispatch: ${task} — assign this to ${owner}.${where} ${HOW}`
+        : `Dispatch: ${task} —${where} ${HOW}`
     submitPrompt(target, brief)
     activity.push('message', HUMAN, `you dispatched via ${target}: ${text.slice(0, 80)}`)
     return null

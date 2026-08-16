@@ -149,6 +149,10 @@ const api = {
   gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
     ipcRenderer.invoke('git:diff', root, rel),
   onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
+  /** An agent Michael hired: main spawned it, the roster has never seen it. */
+  onHired: (
+    fn: (a: { id: string; name: string; project: string; cwd: string; pid: number; startedAt: number; cols: number; rows: number }) => void
+  ) => on('agent:hired', fn),
   layout: (): Promise<unknown> => ipcRenderer.invoke('layout:get'),
   saveLayout: (layout: unknown): Promise<boolean> => ipcRenderer.invoke('layout:set', layout),
   /** Has a workspace been chosen for Michael yet, and what to suggest if not. */
@@ -156,8 +160,8 @@ const api = {
   /** Publish the roster to the file Michael reads. */
   publishFloor: (agents: FloorAgent[]): Promise<boolean> =>
     ipcRenderer.invoke('floor:publish', agents),
-  dispatch: (text: string, owner: string): Promise<string | null> =>
-    ipcRenderer.invoke('agent:dispatch', text, owner),
+  dispatch: (text: string, owner: string, project = ''): Promise<string | null> =>
+    ipcRenderer.invoke('agent:dispatch', text, owner, project),
   search: (q: string): Promise<{ where: string; text: string }[]> =>
     ipcRenderer.invoke('search:text', q),
 

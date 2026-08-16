@@ -20,6 +20,15 @@ export type Delivery = { to: string; msg: Message }
 export const HUMAN = 'you'
 
 /**
+ * Reserved recipient: a request to hire. Michael has to be able to put someone
+ * on a project that has nobody free, and the alternative - an IPC only the UI
+ * can call - is a capability he could never reach.
+ *
+ * `subject` is the project; `body` is the briefing the new agent starts with.
+ */
+export const HIRE = 'hire'
+
+/**
  * File-based agent mailbox.
  *
  *   <root>/agents/<id>/outbox/*.json   agent writes here
@@ -109,6 +118,10 @@ export class Hive extends EventEmitter {
 
         if (msg.to === HUMAN) {
           this.emit('question', msg)
+          continue
+        }
+        if (msg.to === HIRE) {
+          this.emit('hire', msg)
           continue
         }
 

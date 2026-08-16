@@ -132,6 +132,22 @@ export default function App() {
       window.bullpen.onTrust((id, sandbox) =>
         store().addMail({ from: 'bullpen', to: id, subject: `auto-accepted workspace trust · ${sandbox}`, ts: Date.now() })
       ),
+      window.bullpen.onHired((a) =>
+        store().upsertAgent({
+          id: a.id,
+          role: 'worker',
+          project: a.project,
+          name: a.name,
+          face: a.id,
+          cwd: a.cwd,
+          pid: a.pid,
+          startedAt: a.startedAt,
+          cols: a.cols,
+          rows: a.rows,
+          status: 'running',
+          activity: 'idle'
+        })
+      ),
       window.bullpen.onPending((p) => store().addApproval(p as Approval)),
       window.bullpen.onResolved((p) => store().removeApproval((p as Approval).id)),
       window.bullpen.onDeliver((d) => {

@@ -29,6 +29,7 @@ const tokens = (n: number): string =>
 export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Record<string, number> }) {
   const [brief, setBrief] = useState('')
   const [owner, setOwner] = useState('decide')
+  const [project, setProject] = useState('')
   const [sent, setSent] = useState('')
   const god = agents.find((a) => a.role === 'god')
 
@@ -43,6 +44,9 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
     0
   )
   const anyUnpriced = costs.some((c) => !c.complete)
+  // The projects on the floor are the ones agents are already working in;
+  // there is no registry, and Michael reads the same list out of floor.json.
+  const projects = [...new Set(agents.filter((a) => a.role !== 'god').map((a) => a.project).filter(Boolean))]
 
   return (
     <div style={S.wrap}>
@@ -58,6 +62,15 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
           dispatch {god ? `— via ${god.name}` : '— no clone of you yet'}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+          <span style={{ ...LABEL, color: 'var(--faint)' }}>project</span>
+          <select style={S.select} value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">any</option>
+            {projects.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
           <span style={{ ...LABEL, color: 'var(--faint)' }}>suggested owner</span>
           <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
             <option value="decide">{god ? `${god.name} decides` : 'decide'}</option>
@@ -86,7 +99,7 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
             style={{ ...S.btn, opacity: god && brief.trim() ? 1 : 0.5 }}
             onClick={async () => {
               if (!brief.trim()) return
-              const err = await window.bullpen.dispatch(brief.trim(), owner)
+              const err = await window.bullpen.dispatch(brief.trim(), owner, project)
               setSent(err ?? `handed to ${god?.name}`)
               if (!err) setBrief('')
             }}
@@ -97,7 +110,8 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
         </div>
         <p style={{ ...S.note, marginTop: 8 }}>
           Dispatch types the brief into your clone&apos;s own prompt. It decides the breakdown and the
-          assignment — Bullpen does not invent a plan of its own and then pretend an agent made it.
+          assignment — Bullpen does not invent a plan of its own and then pretend an agent made it. If
+          the project has nobody free, it hires someone rather than doing the work itself.
         </p>
       </div>
 
