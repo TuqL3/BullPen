@@ -16,11 +16,13 @@ export const MIN_ROWS = 14
  * The caps are four rows of desks by five pods across, and nothing more. A pod
  * is 4 tall and holds two desk rows, pods repeat every 6, and the last one has
  * to clear the aisle inside the bottom wall - so two pod rows is
- * `podTop + 6 + 3 + 3`. Pods repeat every 5 across from x=3, so 30 columns fits
- * five and starts no sixth. Any larger number adds a row or a column; any
- * smaller leaves empty floor.
+ * `podTop + 6 + 3 + 3`. Pods repeat every 5 across from x=3, so 29 columns fits
+ * five and starts no sixth - a tile narrower than the widest that still does,
+ * which keeps the outer wall clear of the pane edge when the canvas is scaled
+ * down. The row count cannot come down with it: one row fewer drops a whole
+ * pod row and the floor goes to two rows of desks.
  */
-export const MAX_COLS = 30
+export const MAX_COLS = 29
 export const DESK_ROWS = 4
 export const POD_COLS = 5
 export const MAX_ROWS = 24
@@ -160,14 +162,19 @@ export function buildOffice(cols: number, rows: number): Office {
   const meeting = roomsFit ? { x0: 2, x1: split } : hasRooms ? { x0: 2, x1: 2 + 10 } : null
   const kitchen = roomsFit ? { x0: split + 1, x1: cols - 2 } : null
 
+  // Partitions start directly under the wall face, not at roomTop. Starting
+  // lower left the row above them open, so an agent could walk in over the top
+  // of the wall instead of through the door - which is what the office looked
+  // like from the outside, too: a wall that did not reach the ceiling.
+  const partTop = 2
   if (meeting) {
-    for (let y = roomTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
+    for (let y = partTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
     for (let x = meeting.x0; x <= meeting.x1; x++) set(x, roomBottom, 'wall')
     // The right-hand partition is shared with the kitchen, so its door goes in
     // the bottom wall - one in the other would open into the fridge.
     set(meeting.x0 + 5, roomBottom, 'door')
-    for (let y = roomTop + 1; y < roomBottom; y++) {
-      for (let x = meeting.x0; x < meeting.x1; x++) set(x, y, 'rug')
+    for (let y = partTop; y < roomBottom; y++) {
+      for (let x = meeting.x0 - 1; x < meeting.x1; x++) set(x, y, 'rug')
     }
     const midY = Math.floor((roomTop + roomBottom) / 2)
     // A table the width of the room is a runway; cap it and leave floor around.
@@ -189,15 +196,17 @@ export function buildOffice(cols: number, rows: number): Office {
   }
 
   if (kitchen) {
-    for (let y = roomTop; y <= roomBottom; y++) set(kitchen.x0 - 1, y, 'wall')
+    for (let y = partTop; y <= roomBottom; y++) set(kitchen.x0 - 1, y, 'wall')
     for (let x = kitchen.x0 - 1; x <= cols - 1; x++) set(x, roomBottom, 'wall')
     // Its own door, in its own wall - not in the one it shares with the meeting
     // room, which would make the kitchen a way through rather than a room.
     // Placed clear of the shelf run, or the door opens onto a shelf and the
     // kitchen is a sealed box with a doorway painted on it.
     set(kitchen.x0 + 1, roomBottom, 'door')
-    for (let x = kitchen.x0; x <= kitchen.x1; x++) set(x, roomTop, 'counter')
-    set(kitchen.x0, roomTop + 1, 'fridge')
+    // The counter run goes against the back wall. A row lower it stretched right
+    // across the room and cut the strip above it off from the door.
+    for (let x = kitchen.x0; x <= kitchen.x1; x++) set(x, partTop, 'counter')
+    set(kitchen.x0, partTop + 1, 'fridge')
     for (let x = kitchen.x0 + 3; x <= kitchen.x1; x++) set(x, roomBottom - 1, 'shelf')
   }
 
