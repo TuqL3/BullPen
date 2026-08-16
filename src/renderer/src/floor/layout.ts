@@ -169,30 +169,37 @@ export function buildOffice(cols: number, rows: number): Office {
   const partTop = 2
   if (meeting) {
     for (let y = partTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
-    for (let x = meeting.x0; x <= meeting.x1; x++) set(x, roomBottom, 'wall')
+    // From the building wall, not from x0: the room's rug reaches the outer wall,
+    // and starting the bottom run one tile in left a hole beside it - a second
+    // way out of the room that was not a door.
+    for (let x = meeting.x0 - 1; x <= meeting.x1; x++) set(x, roomBottom, 'wall')
     // The right-hand partition is shared with the kitchen, so its door goes in
     // the bottom wall - one in the other would open into the fridge.
     set(meeting.x0 + 5, roomBottom, 'door')
     for (let y = partTop; y < roomBottom; y++) {
       for (let x = meeting.x0 - 1; x < meeting.x1; x++) set(x, y, 'rug')
     }
-    const midY = Math.floor((roomTop + roomBottom) / 2)
-    // A table the width of the room is a runway; cap it and leave floor around.
-    const tableEnd = Math.min(meeting.x1 - 2, meeting.x0 + 9)
-    for (let x = meeting.x0 + 2; x <= tableEnd; x++) {
-      set(x, midY, 'table')
-      set(x, midY + 1, 'table')
-      set(x, midY - 1, 'chairPink')
-      set(x, midY + 2, 'chairPink')
+    // Centred both ways. A table pinned to one end of the room reads as
+    // furniture that was pushed aside rather than a meeting room.
+    const inX0 = meeting.x0 - 1
+    const inX1 = meeting.x1 - 1
+    const inY0 = partTop
+    const inY1 = roomBottom - 1
+    const tableW = Math.min(8, inX1 - inX0 - 1)
+    // chairs, table, table, chairs
+    const blockH = 4
+    const tx = inX0 + Math.floor((inX1 - inX0 + 1 - tableW) / 2)
+    const ty = inY0 + Math.floor((inY1 - inY0 + 1 - blockH) / 2)
+    for (let x = tx; x < tx + tableW; x++) {
+      set(x, ty, 'chairPink')
+      set(x, ty + 1, 'table')
+      set(x, ty + 2, 'table')
+      set(x, ty + 3, 'chairPink')
     }
-    set(meeting.x0 + 7, 1, 'board')
-    // The half of the room past the table would otherwise be bare rug.
-    if (meeting.x1 - tableEnd > 3) {
-      set(meeting.x1 - 1, roomTop + 1, 'cooler')
-      set(meeting.x1 - 1, roomBottom - 1, 'plant')
-      set(meeting.x1 - 3, roomBottom - 1, 'sofa')
-      set(meeting.x1 - 4, roomBottom - 1, 'sofa')
-    }
+    set(Math.floor((inX0 + inX1) / 2), 1, 'board')
+    // The corners, so the room is furnished rather than a rug with a table on it.
+    set(inX1, inY0, 'cooler')
+    set(inX0, inY1, 'plant')
   }
 
   if (kitchen) {
