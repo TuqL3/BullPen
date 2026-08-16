@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { Board, boardPath } from './board.ts'
+import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { readCtx, type Ctx } from './ctx.ts'
 import { Hive } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
@@ -66,6 +67,20 @@ function createWindow(): void {
   else win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
 }
 
+/** One reader per agent, so a growing transcript is parsed once, not re-read. */
+const meters = new Map<string, Meter>()
+
+const currentCost = (id: string): Cost | null => {
+  const path = approvals.transcriptOf(id)
+  if (!path) return null
+  let meter = meters.get(id)
+  if (!meter) {
+    meter = newMeter()
+    meters.set(id, meter)
+  }
+  return updateCost(meter, path)
+}
+
 const currentCtx = (id: string): Ctx | null => {
   const path = approvals.transcriptOf(id)
   return path ? readCtx(path) : null
@@ -79,6 +94,8 @@ const currentCtx = (id: string): Ctx | null => {
 const pushCtx = (id: string): boolean => {
   const ctx = currentCtx(id)
   if (ctx) send('agent:ctx', id, ctx)
+  const cost = currentCost(id)
+  if (cost && cost.turns > 0) send('agent:cost', id, cost)
   return Boolean(ctx)
 }
 
@@ -105,6 +122,7 @@ function wire(): void {
     // Drop the claim first: a pidfile outliving its process is what makes the
     // next startup consider killing whatever inherited that pid.
     clearPid(join(AGENTS_HOME, id))
+    meters.delete(id)
     send('agent:exit', id, code)
   })
 
@@ -192,6 +210,7 @@ function wire(): void {
   })
 
   ipcMain.handle('agent:ctx', (_e, id: string) => currentCtx(id))
+  ipcMain.handle('agent:cost', (_e, id: string) => currentCost(id))
   ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
   ipcMain.handle('board:addTask', (_e, id: string, text: string) => board.addTask(id, text))
   ipcMain.handle('board:toggleTask', (_e, id: string) => board.toggleTask(id))

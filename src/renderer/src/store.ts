@@ -17,6 +17,8 @@ export type Agent = {
   startedAt?: number
   /** Context window usage from the agent's own transcript. */
   ctx?: { used: number; limit: number; pct: number; model: string }
+  /** Token totals and API-equivalent cost, accumulated from the transcript. */
+  cost?: import('../../preload/index').AgentCost
   exitCode?: number
 }
 

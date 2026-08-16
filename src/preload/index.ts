@@ -1,5 +1,18 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
+export type AgentCost = {
+  input: number
+  output: number
+  cacheWrite5m: number
+  cacheWrite1h: number
+  cacheRead: number
+  turns: number
+  models: string[]
+  unpricedTokens: number
+  usd: number
+  complete: boolean
+}
+
 const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void) => {
   const listener = (_e: IpcRendererEvent, ...args: unknown[]) => fn(...(args as T))
   ipcRenderer.on(channel, listener)
@@ -28,6 +41,8 @@ const api = {
     ipcRenderer.invoke('agent:ctx', id),
   onCtx: (fn: (id: string, ctx: { used: number; limit: number; pct: number; model: string }) => void) =>
     on('agent:ctx', fn),
+  cost: (id: string): Promise<AgentCost | null> => ipcRenderer.invoke('agent:cost', id),
+  onCost: (fn: (id: string, cost: AgentCost) => void) => on('agent:cost', fn),
   steer: (id: string, note: string) => ipcRenderer.invoke('agent:steer', id, note),
   steers: (id: string): Promise<string[]> => ipcRenderer.invoke('agent:steers', id),
   onSteerQueued: (fn: (id: string, note: string, depth: number) => void) => on('agent:steer-queued', fn),

@@ -94,6 +94,7 @@ export default function App() {
         }
       }),
       window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
+      window.bullpen.onCost((id, cost) => store().upsertAgent({ id, cost })),
       window.bullpen.onSteerQueued((id) => {
         window.bullpen.steers(id).then((notes) => store().setSteers(id, notes))
       }),
@@ -381,6 +382,49 @@ export function CtxMeter({ ctx }: { ctx?: Agent['ctx'] }) {
   )
 }
 
+/**
+ * Inline SVG, not font glyphs. ☾/⛶ and friends fall back to tofu in the
+ * monospace faces this UI uses - that was a real defect, not a preference.
+ */
+function Icon({ name, size = 13 }: { name: 'floor' | 'sun' | 'moon' | 'full'; size?: number }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 16 16',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.4,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    style: { display: 'block' }
+  }
+  if (name === 'floor')
+    return (
+      <svg {...common} aria-hidden>
+        <rect x="1.5" y="2.5" width="13" height="11" />
+        <path d="M1.5 7h13M6.5 7v6.5M10.5 2.5v4.5" />
+      </svg>
+    )
+  if (name === 'moon')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z" />
+      </svg>
+    )
+  if (name === 'sun')
+    return (
+      <svg {...common} aria-hidden>
+        <circle cx="8" cy="8" r="3" />
+        <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2 3.1 3.1" />
+      </svg>
+    )
+  return (
+    <svg {...common} aria-hidden>
+      <path d="M6 1.5H1.5V6M10 1.5h4.5V6M10 14.5h4.5V10M6 14.5H1.5V10" />
+    </svg>
+  )
+}
+
 function TitleBar({
   mode,
   onToggle,
@@ -399,6 +443,8 @@ function TitleBar({
       <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 11, fontWeight: 700 }}>Bullpen</div>
       <div style={{ flex: 1 }} />
       <button
+        title={floorOn ? 'hide the office floor' : 'show the office floor'}
+        aria-label="toggle office floor"
         style={{
           ...S.iconBtn,
           WebkitAppRegion: 'no-drag',
@@ -406,17 +452,23 @@ function TitleBar({
         } as React.CSSProperties}
         onClick={onToggleFloor}
       >
-        floor
-      </button>
-      {/* Text, not glyphs: ☾/⛶ fall back to tofu in most monospace faces. */}
-      <button style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties} onClick={onToggle}>
-        {mode === 'light' ? 'dark' : 'light'}
+        <Icon name="floor" />
       </button>
       <button
+        title={mode === 'light' ? 'switch to dark' : 'switch to light'}
+        aria-label="toggle theme"
+        style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        onClick={onToggle}
+      >
+        <Icon name={mode === 'light' ? 'moon' : 'sun'} />
+      </button>
+      <button
+        title="maximise"
+        aria-label="maximise window"
         style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         onClick={() => window.bullpen.toggleMaximize()}
       >
-        full
+        <Icon name="full" />
       </button>
     </div>
   )
@@ -550,12 +602,13 @@ const S: Record<string, React.CSSProperties> = {
     WebkitAppRegion: 'drag'
   } as React.CSSProperties,
   iconBtn: {
+    display: 'flex',
+    alignItems: 'center',
     background: 'transparent',
     border: 'none',
     color: 'var(--muted)',
     cursor: 'pointer',
-    fontSize: 13,
-    padding: '2px 6px'
+    padding: '4px 6px'
   },
   body: { display: 'grid', gridTemplateColumns: '204px 1fr', minHeight: 0 },
   // Floor on the left, command centre on the right - the windowed layout.
@@ -615,15 +668,16 @@ const S: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: 'var(--muted)'
   },
-  // Ten tabs in a pane that shrinks when the floor is open: scroll rather than
-  // wrap, so a tab never splits across two lines or falls off the edge unseen.
+  // Ten tabs in a pane that shrinks when the floor is open. Wrapping onto a
+  // second row keeps every tab visible; a horizontal scroller hid the last ones
+  // behind an edge nobody thinks to drag.
   tabs: {
     display: 'flex',
+    flexWrap: 'wrap',
+    rowGap: 0,
     gap: 2,
     padding: '0 10px',
-    borderBottom: '1px solid var(--line)',
-    overflowX: 'auto',
-    scrollbarWidth: 'thin'
+    borderBottom: '1px solid var(--line)'
   },
   tab: {
     ...LABEL,
