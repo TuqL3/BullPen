@@ -128,16 +128,48 @@ main -> renderer traffic passes through, plus dropping the reference on
 `closed`. Verified by closing the window mid-stream with two live agents: exit
 code 0, no crash lines, no orphans.
 
-**B. Spawned agents inherit the main process's file descriptors.**
-An orphaned agent was observed holding Bullpen's listening socket open
-(`ss -ltnp` showed the `claude` pid on the debug port after Electron died). The
-same mechanism means every agent inherits the approvals server socket. Not
-known to be exploitable, but agents should not hold fds they were never given.
+**B. Spawned agents inherit the main process's file descriptors. — MEASURED, NOT FIXED.**
 
-Also the most likely reason agents sometimes outlive the app: an agent holding a
-copy of an earlier agent's pty master keeps that master open, so the earlier
-agent never sees EOF. Fixing B would probably make defect A's symptom rarer —
-which is a reason to still want the reaper, not a reason to skip B.
+Measured directly from `/proc/<pid>/fd`, three agents spawned in order:
+
+| agent | spawn order | `/dev/ptmx` handles held |
+|---|---|---|
+| michael | 1st | 0 |
+| dwight | 2nd | 1 |
+| andy | 3rd | 2 |
+
+Each agent inherits the pty **master** of every agent spawned before it. Two
+consequences:
+
+- the earlier agent never sees EOF when Bullpen dies, so it can outlive the app
+  still holding shell access — this is the non-deterministic half of defect A,
+  and explains why the orphan could not be reproduced on demand
+- holding another agent's pty master is a write channel into that agent's
+  terminal, bypassing the hive mailbox and the approvals hook entirely
+
+The listening sockets are **not** leaked. An earlier `ss -ltnp` reading that
+suggested otherwise was misattributed; `listening on: none` for every agent.
+
+**Attempted fix, reverted.** Launch each agent through `/bin/sh -c` that closes
+every descriptor above stdio and then `exec`s the real command. It works in
+isolation — verified closing an explicitly inherited fd, and preserving
+arguments containing spaces — but every variant exits 127 inside the app, where
+the shell inherits ~70 descriptors instead of one. Enumerating and closing that
+many descriptors also closes the ones `dash` keeps for its own redirection
+bookkeeping, and it kills itself before reaching `exec`. Three variants failed:
+per-eval redirect, snapshot-the-list-first, and numeric-range. A fourth bug
+found along the way and worth remembering: an unmatched `/dev/fd/*` glob leaves
+the literal string, so `n` becomes `*` and dash reads `exec *>&-` as "exec the
+file named `*`".
+
+Shipping a launcher that cannot start an agent is far worse than an unfixed
+hygiene issue whose main consequence the reaper already covers, so the wrapper
+is out and `PtyManager` spawns directly.
+
+*Real fixes, in order of preference:* set `FD_CLOEXEC` on the pty master inside
+node-pty (a native change - upstream, or a patched build); or spawn agents from
+a small dedicated child process, since Node's own `child_process` does not leak
+descriptors. Neither is a config change.
 
 ## Unverified — needs a real run
 

@@ -38,6 +38,9 @@ export class PtyManager extends EventEmitter {
     if (this.ptys.has(spec.id)) throw new Error(`agent ${spec.id} already running`)
 
     const cmd = spec.cmd ?? (platform() === 'win32' ? 'claude.cmd' : 'claude')
+    // Direct spawn. A /bin/sh wrapper that closes inherited descriptors was
+    // tried and reverted - see defect B in OPEN-QUESTIONS.md for what it fixed,
+    // how it broke, and why it is not worth a broken launcher.
     const pty = spawn(cmd, spec.args ?? [], {
       name: 'xterm-256color',
       cwd: spec.cwd,
