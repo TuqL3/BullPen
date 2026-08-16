@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, write as writeFile } from './code.ts'
@@ -120,26 +120,50 @@ const submitPrompt = (id: string, text: string): boolean => ptys.submit(id, text
 /** Agents main hired on Michael's behalf, so a second hire does not reuse a name. */
 const hires = new Map<string, { name: string; project: string }>()
 
-const slugId = (name: string): string =>
-  name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+const slugId = (name: string): string => slug(name).replace(/^-|-$/g, '')
+
+const slug = (s: string): string => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')
 
 /**
- * The directory a project works in, taken from the agents already on it. There
- * is no registry of projects - a project is just the agents that share a
- * workspace, which is also all Michael can see in floor.json.
+ * The directory a project works in.
+ *
+ * First the agents already on it - a project is just the agents that share a
+ * workspace, which is also all Michael can see in floor.json. Failing that,
+ * look for a directory of that name beside the workspaces already in use.
+ *
+ * Without the second step, naming a project that had nobody on it yet was a
+ * dead end: hiring could only add to a project, never start one, so the first
+ * agent on everything had to come from the wizard and the operator had to type
+ * out a path they had already effectively given by choosing where Michael works.
  */
 function projectCwd(project: string): string | null {
-  const want = project.trim().toLowerCase()
+  const want = slug(project)
   if (!want) return null
   for (const row of lastFloor) {
-    if (row.project.trim().toLowerCase() === want) return row.cwd
+    if (slug(row.project) === want) return row.cwd
+  }
+
+  // Where projects live: Michael's own workspace, and the parent of every
+  // workspace already in use. Deduped, and searched in that order.
+  const roots = [currentGodCwd(), ...lastFloor.map((r) => join(r.cwd, '..'))]
+  for (const root of [...new Set(roots.map((r) => resolve(r)))]) {
+    let entries: string[]
+    try {
+      entries = readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+    } catch {
+      continue
+    }
+    const hit = entries.find((name) => slug(name) === want)
+    if (hit) return join(root, hit)
   }
   return null
 }
 
 /** `seo-2`, `seo-3`, ... - readable, and never colliding with a live agent. */
 function nextHireName(project: string): string {
-  const base = project.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'agent'
+  const base = slug(project) || 'agent'
   for (let n = 2; n < 100; n++) {
     const name = `${base}-${n}`
     if (!ptys.isRunning(slugId(name))) return name
@@ -308,21 +332,30 @@ function wire(): void {
    */
   hive.on('hire', (msg: Message) => {
     const project = msg.subject.trim()
-    const cwd = projectCwd(project)
-    if (!cwd) {
-      hive.send({
-        from: 'bullpen',
-        to: msg.from,
-        subject: 're: hire',
-        body: `No project called "${project}" on the floor. Hire only into a project that already has an agent, or ask the human to start one.`
-      })
+    // An existing project is known by the agents already on it. A new one has
+    // to name its directory - otherwise hiring could never start a project at
+    // all, only add to one, and the first agent on every project would have to
+    // come from the wizard. That was a real dead end: asked to put someone on a
+    // project that did not exist yet, Michael could only refuse.
+    const known = projectCwd(project)
+    const cwd = known ?? (msg.cwd ?? '').trim()
+    const bad = !project
+      ? 'a hire needs the project as its subject'
+      : !cwd
+        ? `No directory found for "${project}". I looked where the other projects live. Ask the human where it is and send the hire again with "cwd" set to that path.`
+        : known
+          ? null
+          : checkWorkspace(cwd, app.getPath('home')) ??
+            (existsSync(cwd) ? null : `${cwd} does not exist`)
+    if (bad) {
+      hive.send({ from: 'bullpen', to: msg.from, subject: 're: hire', body: bad })
       return
     }
     const name = nextHireName(project)
     try {
       const state = spawnAgent({ id: slugId(name), cwd, cmd: 'claude', args: [], cols: 100, rows: 30 })
       hires.set(state.id, { name, project })
-      activity.push('spawn', msg.from, `${msg.from} hired ${name} onto ${project}`)
+      activity.push('spawn', msg.from, `${msg.from} hired ${name} onto ${project}${known ? '' : ' (new project)'}`)
       send('agent:hired', { ...state, name, project })
       // The briefing is what the new agent is for; it arrives as its first turn.
       if (msg.body.trim()) setTimeout(() => ptys.submit(state.id, msg.body), 4000).unref?.()
@@ -577,7 +610,9 @@ function wire(): void {
       'every turn. Missing ctxPct means a fresh agent, not a full one. ' +
       'Send them the task through $BULLPEN_MAILBOX/outbox. ' +
       'If the project has nobody free by that rule, hire one: write a message to ' +
-      '"hire" with the project as the subject and the task as the body. ' +
+      '"hire" with the project as the subject and the task as the body. If the ' +
+      'floor has never heard of the project, it has no directory yet - ask me ' +
+      'where it lives and send the hire again with "cwd" set to that path. ' +
       'Then tell me who has it.'
     const where = project ? ` This is for the ${project} project.` : ''
     const brief =

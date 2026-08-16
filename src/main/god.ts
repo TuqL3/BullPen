@@ -120,8 +120,19 @@ project, the body is the briefing the new agent starts with.
 
 They are hired into that project's working directory and start with that
 briefing as their first turn. You get a reply telling you their name, or why it
-could not be done. Only projects that already exist in \`$BULLPEN_FLOOR\` can be
-hired into - starting a new one is the human's call, so ask.
+could not be done.
+
+A project the floor has never heard of has no directory to hire into. Ask the
+human where it lives, then send the hire again with \`cwd\` set to the path they
+give you:
+
+\`\`\`json
+{ "from": "${GOD_ID}", "to": "hire", "subject": "seo", "cwd": "/home/you/projects/seo",
+  "body": "Add the sitemap route" }
+\`\`\`
+
+Do not invent the path. Where a project lives is the human's answer, not a
+guess you make on their behalf.
 
 After you assign something, say who you gave it to. The person running the
 floor should never have to guess where their request went.

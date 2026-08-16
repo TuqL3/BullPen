@@ -8,6 +8,12 @@ export type Message = {
   subject: string
   body: string
   ts: number
+  /**
+   * Only read on a message to `hire`, and only when the project is new: the
+   * directory the first agent on it should work in. Starting a project is the
+   * operator's call, so this is the field that carries their answer.
+   */
+  cwd?: string
 }
 
 export type Delivery = { to: string; msg: Message }
@@ -24,7 +30,8 @@ export const HUMAN = 'you'
  * on a project that has nobody free, and the alternative - an IPC only the UI
  * can call - is a capability he could never reach.
  *
- * `subject` is the project; `body` is the briefing the new agent starts with.
+ * `subject` is the project, `body` is the briefing the new agent starts with,
+ * and `cwd` names the directory when the project does not exist yet.
  */
 export const HIRE = 'hire'
 
