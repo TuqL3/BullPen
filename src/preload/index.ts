@@ -74,6 +74,8 @@ const api = {
   kill: (id: string) => ipcRenderer.invoke('agent:kill', id),
 
   write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
+  /** Type a prompt and submit it - see submitPrompt in main for why not write(). */
+  submit: (id: string, text: string) => ipcRenderer.invoke('agent:submit', id, text),
   resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
   onData: (fn: (id: string, chunk: string) => void) => on('pty:data', fn),
   onExit: (fn: (id: string, code: number) => void) => on('agent:exit', fn),

@@ -276,7 +276,7 @@ export default function App() {
       // Ceiling - a slow cold start swallows the briefing. Upgrade path: watch
       // the stream for the prompt marker before writing.
       if (d.briefing.trim()) {
-        setTimeout(() => window.bullpen.write(id, d.briefing.replace(/\n/g, ' ') + '\r'), 4000)
+        setTimeout(() => window.bullpen.submit(id, d.briefing), 4000)
       }
       return null
     } catch (err) {

@@ -112,6 +112,19 @@ function spawnAgent(spec: AgentSpec): ReturnType<PtyManager['spawn']> {
   return state
 }
 
+/**
+ * Type a prompt into an agent's terminal and submit it.
+ *
+ * The Enter has to arrive as a write of its own. Claude Code treats a line that
+ * lands in a single burst as a paste, and Enter inside a paste is a newline -
+ * so `text + '\r'` left the brief sitting in the prompt, never sent. Nothing
+ * reported an error: the write succeeded, the agent just never saw a turn.
+ */
+function submitPrompt(id: string, text: string): void {
+  ptys.write(id, text.replace(/\r?\n/g, ' '))
+  setTimeout(() => ptys.write(id, '\r'), 150).unref?.()
+}
+
 /** Where Michael lives: whatever the operator chose, else the default. */
 const currentGodCwd = (): string => readConfig(BULLPEN_HOME).godCwd ?? godCwd(BULLPEN_HOME)
 
@@ -420,6 +433,8 @@ function wire(): void {
     win.isMaximized() ? win.unmaximize() : win.maximize()
   })
 
+  // Used for the first briefing, which has the same paste problem.
+  ipcMain.handle('agent:submit', (_e, id: string, text: string) => submitPrompt(id, text))
   ipcMain.handle('agent:list', () => ptys.list())
   ipcMain.handle('agent:kill', (_e, id: string) => ptys.kill(id))
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
@@ -429,7 +444,7 @@ function wire(): void {
   // turn in progress would corrupt whatever it was doing.
   board.start((t) => {
     if (!ptys.isRunning(t.agentId)) return
-    ptys.write(t.agentId, t.prompt.replace(/\r?\n/g, ' ') + '\r')
+    submitPrompt(t.agentId, t.prompt)
     console.log(`[bullpen] trigger fired for ${t.agentId}: ${t.prompt.slice(0, 60)}`)
     activity.push('trigger', t.agentId, `scheduled prompt fired: ${t.prompt.slice(0, 80)}`)
     send('agent:trigger-fired', t.agentId, t.prompt)
@@ -473,7 +488,7 @@ function wire(): void {
       owner && owner !== 'decide'
         ? `Dispatch: ${text.replace(/\r?\n/g, ' ')} — assign this to ${owner}.`
         : `Dispatch: ${text.replace(/\r?\n/g, ' ')} — decide who should own it and assign it.`
-    ptys.write(target, brief + '\r')
+    submitPrompt(target, brief)
     activity.push('message', HUMAN, `you dispatched via ${target}: ${text.slice(0, 80)}`)
     return null
   })
