@@ -17,6 +17,20 @@ export type Question = {
   ts: number
 }
 
+/** One row of the snapshot Michael reads to see who is on the floor. */
+export type FloorAgent = {
+  id: string
+  name: string
+  project: string
+  cwd: string
+  status: string
+  activity: string
+  pid: number
+  ctxPct?: number
+  model?: string
+  costUsd?: number
+}
+
 export type AgentCost = {
   input: number
   output: number
@@ -81,6 +95,23 @@ const api = {
   onAsk: (fn: (qs: Question[]) => void) => on('ask:pending', fn),
 
   setGod: (id: string) => ipcRenderer.invoke('agent:setGod', id),
+  /** Bring Michael up, or hand back the one already running. */
+  ensureGod: (size: {
+    cols: number
+    rows: number
+  }): Promise<{
+    id: string
+    name: string
+    cwd: string
+    pid: number
+    startedAt: number
+    cols: number
+    rows: number
+    alreadyUp: boolean
+  }> => ipcRenderer.invoke('god:ensure', size),
+  /** Publish the roster to the file Michael reads. */
+  publishFloor: (agents: FloorAgent[]): Promise<boolean> =>
+    ipcRenderer.invoke('floor:publish', agents),
   dispatch: (text: string, owner: string): Promise<string | null> =>
     ipcRenderer.invoke('agent:dispatch', text, owner),
   search: (q: string): Promise<{ where: string; text: string }[]> =>

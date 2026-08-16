@@ -121,6 +121,61 @@ export default function App() {
     return () => off.forEach((fn) => fn())
   }, [])
 
+  // Michael is the floor's starting state, not a hire. Bringing him up here
+  // rather than in the wizard is what makes "open the app and he is there"
+  // true; main hands back the running one if this fires twice.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const { cols, rows } = paneSize(document.querySelector('section'))
+      try {
+        const g = await window.bullpen.ensureGod({ cols, rows })
+        if (cancelled) return
+        store().upsertAgent({
+          id: g.id,
+          role: 'god',
+          project: '',
+          name: g.name,
+          face: g.id,
+          cwd: g.cwd,
+          pid: g.pid,
+          startedAt: g.startedAt,
+          cols: g.cols,
+          rows: g.rows,
+          status: 'running',
+          activity: 'idle'
+        })
+        select(g.id)
+      } catch (err) {
+        // A floor with no Michael still works - dispatch is what stops working,
+        // and it already says so - but silence would look like he never existed.
+        console.error('[bullpen] could not start Michael:', err)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Michael reads the floor from a file, so it has to be rewritten whenever the
+  // roster or anyone's status changes. Main skips the write when nothing moved.
+  useEffect(() => {
+    window.bullpen.publishFloor(
+      agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        project: a.role === 'god' ? '' : a.project || projectOf(a.cwd),
+        cwd: a.cwd,
+        status: a.status,
+        activity: a.activity,
+        pid: a.pid,
+        ctxPct: a.ctx?.pct,
+        model: a.ctx?.model,
+        costUsd: a.cost?.usd
+      }))
+    )
+  }, [agents])
+
   // Anything waiting on a human outranks whatever tab you were reading.
   useEffect(() => {
     if (approvals.length > 0) setTab('ask me')
@@ -382,7 +437,6 @@ export default function App() {
       {adding && (
         <AddAgent
           taken={agents.map((a) => a.id)}
-          hasGod={agents.some((a) => a.role === 'god')}
           onCancel={() => setAdding(false)}
           onSpawn={spawnFrom}
         />

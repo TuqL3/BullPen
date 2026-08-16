@@ -6,6 +6,15 @@ import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { readCtx, type Ctx } from './ctx.ts'
+import {
+  GOD_ID,
+  GOD_NAME,
+  floorPath,
+  godCwd,
+  publishFloor,
+  writeBriefing,
+  type FloorAgent
+} from './god.ts'
 import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
@@ -23,8 +32,13 @@ const activity = new ActivityLog()
 const questions = new Map<string, Message & { id: string }>()
 let questionSeq = 0
 
-/** The god agent - the operator's own clone. Dispatch and answers route via it. */
-let godId: string | null = null
+/**
+ * The god agent - the operator's own clone. Dispatch and answers route via it.
+ *
+ * Defaults to Michael, who is spawned on launch rather than hired, so the floor
+ * is never empty and there is always someone to dispatch through.
+ */
+let godId: string | null = GOD_ID
 
 let win: BrowserWindow | null = null
 
@@ -40,6 +54,47 @@ let win: BrowserWindow | null = null
 const send = (channel: string, ...args: unknown[]): void => {
   if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
   win.webContents.send(channel, ...args)
+}
+
+/**
+ * Spawn one agent: sandbox it, give it a mailbox and a view of the floor, and
+ * leave a pidfile so a crash does not strand the process.
+ */
+function spawnAgent(spec: AgentSpec): ReturnType<PtyManager['spawn']> {
+  const cwd = resolve(spec.cwd)
+  // The sandbox is the only thing standing between an agent and the rest of
+  // the disk, so refuse the two directories that would make it meaningless.
+  if (cwd === app.getPath('home') || cwd === resolve('/')) {
+    throw new Error(`refusing to sandbox an agent at ${cwd} - pick a scratch directory`)
+  }
+  spec = { ...spec, cwd }
+  mkdirSync(spec.cwd, { recursive: true })
+  hive.register(spec.id)
+  activity.push('spawn', spec.id, `spawned ${spec.id} in ${cwd}`)
+  approvals.setSandbox(spec.id, spec.cwd)
+
+  const agentHome = join(AGENTS_HOME, spec.id)
+  const settingsPath = approvals.installHook(spec.id, agentHome)
+
+  const state = ptys.spawn({
+    ...spec,
+    args: [...(spec.args ?? []), '--settings', settingsPath],
+    env: {
+      ...spec.env,
+      BULLPEN_MAILBOX: hive.agentDir(spec.id),
+      BULLPEN_FLOOR: floorPath(BULLPEN_HOME)
+    }
+  })
+
+  // The settings path is unique to this agent and appears verbatim in its
+  // command line, so it doubles as the identity check the reaper needs.
+  writePid(agentHome, {
+    pid: state.pid,
+    marker: settingsPath,
+    cwd: state.cwd,
+    startedAt: state.startedAt
+  })
+  return state
 }
 
 function createWindow(): void {
@@ -187,38 +242,31 @@ function wire(): void {
     return canceled || !filePaths[0] ? null : filePaths[0]
   })
 
-  ipcMain.handle('agent:spawn', (_e, spec: AgentSpec) => {
-    const cwd = resolve(spec.cwd)
-    // The sandbox is the only thing standing between an agent and the rest of
-    // the disk, so refuse the two directories that would make it meaningless.
-    if (cwd === app.getPath('home') || cwd === resolve('/')) {
-      throw new Error(`refusing to sandbox an agent at ${cwd} - pick a scratch directory`)
-    }
-    spec = { ...spec, cwd }
-    mkdirSync(spec.cwd, { recursive: true })
-    hive.register(spec.id)
-    activity.push('spawn', spec.id, `spawned ${spec.id} in ${cwd}`)
-    approvals.setSandbox(spec.id, spec.cwd)
+  ipcMain.handle('agent:spawn', (_e, spec: AgentSpec) => spawnAgent(spec))
 
-    const agentHome = join(AGENTS_HOME, spec.id)
-    const settingsPath = approvals.installHook(spec.id, agentHome)
-
-    const state = ptys.spawn({
-      ...spec,
-      args: [...(spec.args ?? []), '--settings', settingsPath],
-      env: { ...spec.env, BULLPEN_MAILBOX: hive.agentDir(spec.id) }
-    })
-
-    // The settings path is unique to this agent and appears verbatim in its
-    // command line, so it doubles as the identity check the reaper needs.
-    writePid(agentHome, {
-      pid: state.pid,
-      marker: settingsPath,
-      cwd: state.cwd,
-      startedAt: state.startedAt
-    })
-    return state
+  /**
+   * Michael is the floor's starting state, not a hire: the renderer asks for him
+   * on every launch and gets the running one back if he is already up, so a
+   * reload cannot end up with two.
+   */
+  ipcMain.handle('god:ensure', (_e, size: { cols: number; rows: number }) => {
+    const running = ptys.list().find((a) => a.id === GOD_ID && a.status === 'running')
+    const cwd = godCwd(BULLPEN_HOME)
+    if (running) return { ...running, name: GOD_NAME, alreadyUp: true }
+    mkdirSync(cwd, { recursive: true })
+    writeBriefing(cwd, floorPath(BULLPEN_HOME))
+    const state = spawnAgent({ id: GOD_ID, cwd, cmd: 'claude', args: [], ...size })
+    return { ...state, name: GOD_NAME, alreadyUp: false }
   })
+
+  /**
+   * The renderer holds the only complete picture of the floor - names, projects
+   * and live status - so it is what publishes the snapshot Michael reads. Agents
+   * do not outlive the window, so a stale file cannot describe a live floor.
+   */
+  ipcMain.handle('floor:publish', (_e, agents: FloorAgent[]) =>
+    publishFloor(BULLPEN_HOME, agents, Date.now())
+  )
 
   ipcMain.handle('window:toggleMaximize', () => {
     if (!win) return

@@ -37,19 +37,17 @@ const EMPTY: Draft = {
 
 export function AddAgent({
   taken,
-  hasGod,
   onCancel,
   onSpawn
 }: {
   taken: string[]
-  hasGod: boolean
   onCancel: () => void
   onSpawn: (d: Draft) => Promise<string | null>
 }) {
   const [step, setStep] = useState(0)
-  // With no god on the floor yet, this one is it - that is the agent the
-  // operator talks through, so it should not need a decision to create.
-  const [d, setD] = useState<Draft>({ ...EMPTY, role: hasGod ? 'worker' : 'god' })
+  // Michael already holds the god seat and is spawned on launch, so everyone
+  // hired here is a worker. Nothing to decide.
+  const [d, setD] = useState<Draft>({ ...EMPTY })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -128,18 +126,11 @@ export function AddAgent({
                   id: {id} · becomes their mailbox and settings directory
                 </div>
 
-                <label style={S.roleRow}>
-                  <input
-                    type="checkbox"
-                    checked={d.role === 'god'}
-                    disabled={hasGod && d.role !== 'god'}
-                    onChange={(e) => set('role', e.target.checked ? 'god' : 'worker')}
-                  />
+                <div style={S.roleRow}>
                   <span>
-                    This one is <b>me</b> — the orchestrator every other agent reports to.
-                    {hasGod && d.role !== 'god' && ' One already exists.'}
+                    Reports to <b>Michael</b>, who stands in for you and is already on the floor.
                   </span>
-                </label>
+                </div>
 
                 <div style={LABEL}>Character</div>
                 <div style={S.faces}>
