@@ -31,12 +31,19 @@ export const PANEL_TITLE: Record<PanelId, string> = {
 
 export const DEFAULT_LAYOUT: Layout = {
   columns: [['roster'], ['command'], ['editor'], ['tree', 'shell', 'floor']],
-  // The shell starts hidden: it is a second terminal, and showing two by
-  // default is a wall of terminal before anyone has asked for one.
-  hidden: ['shell'],
-  colWeight: [0.62, 2, 2, 1.25],
-  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, shell: 1.2, floor: 1 }
+  hidden: [],
+  colWeight: [0.62, 2, 2, 1.4],
+  // The shell takes the slack in that column: the work tree is a list and the
+  // office floor is capped, so anything left over is terminal.
+  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, shell: 1.6, floor: 1 }
 }
+
+/**
+ * Panels with a size of their own. The office floor is capped at four rows of
+ * desks, so a divider above it could only add empty space or cut the room in
+ * half - it takes the corner it needs and gives the rest back.
+ */
+export const FIXED: ReadonlySet<PanelId> = new Set<PanelId>(['floor'])
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
 
@@ -63,14 +70,21 @@ export function normalise(raw: unknown): Layout {
     if (stack.length) columns.push(stack)
   }
   // A panel the config never mentions goes back where it started rather than
-  // vanishing with no toggle able to bring it back.
-  for (const p of PANELS) {
-    if (seen.has(p)) continue
-    const home = DEFAULT_LAYOUT.columns.findIndex((c) => c.includes(p))
-    if (columns[home]) columns[home].push(p)
-    else columns.push([p])
+  // vanishing with no toggle able to bring it back. "Where it started" is the
+  // company it keeps, not a column index: an index shifts as soon as an earlier
+  // column is missing, which put the shell in the work tree's column.
+  // Walked in default column order, so panels appended as new columns land in
+  // the order the default puts them rather than the order PANELS lists them.
+  for (const col of DEFAULT_LAYOUT.columns) {
+    for (const p of col) {
+      if (seen.has(p)) continue
+      const mates = col.filter((q) => q !== p)
+      const home = columns.find((c) => c.some((q) => mates.includes(q)))
+      if (home) home.push(p)
+      else columns.push([p])
+      seen.add(p)
+    }
   }
-  if (columns.length === 0) columns.push([...PANELS])
 
   const colWeight = columns.map((_, i) => {
     const w = (Array.isArray(l.colWeight) ? l.colWeight : [])[i]

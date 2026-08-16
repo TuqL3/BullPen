@@ -4,6 +4,7 @@ import {
   assignDesks,
   buildOffice,
   findPath,
+  DESK_ROWS,
   MAX_COLS,
   MAX_ROWS,
   MIN_COLS,
@@ -76,6 +77,17 @@ for (const [cols, rows] of SIZES) {
     assert.ok(o.cols <= MAX_COLS && o.rows <= MAX_ROWS)
   })
 }
+
+test('at full size the office is exactly four rows of desks', () => {
+  // Asked for explicitly: more rows is a wall of empty desks, fewer wastes the
+  // panel. The cap has to produce the count, not merely allow it.
+  const o = buildOffice(MAX_COLS, MAX_ROWS)
+  const rows = new Set(o.desks.map((d) => d.desk.y))
+  assert.equal(rows.size, DESK_ROWS, [...rows].join(','))
+  // And a panel larger than the cap gets the same office, not a bigger one.
+  const huge = buildOffice(500, 500)
+  assert.equal(new Set(huge.desks.map((d) => d.desk.y)).size, DESK_ROWS)
+})
 
 test('a path is contiguous, walkable, and ends where asked', () => {
   const o = buildOffice(36, 26)

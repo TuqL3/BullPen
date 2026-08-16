@@ -12,8 +12,14 @@ export const MIN_ROWS = 14
  * And large enough is enough. Past this the office is not more readable, just
  * more of it: a wall of empty desks nobody sits at, with the agents you are
  * actually watching lost somewhere in the middle.
+ *
+ * The row cap is four rows of desks and nothing more. A pod is 4 tall and holds
+ * two desk rows, pods repeat every 6, and the last one has to clear the aisle
+ * inside the bottom wall - so two pods is `podTop + 6 + 3 + 3`, and any larger
+ * number would either add a fifth and sixth row or leave empty floor below.
  */
 export const MAX_COLS = 34
+export const DESK_ROWS = 4
 export const MAX_ROWS = 24
 
 export type Cell =

@@ -7,7 +7,6 @@ import {
   MAX_COLS,
   MAX_ROWS,
   MIN_COLS,
-  MIN_ROWS,
   findPath,
   randomWalkable,
   rng,
@@ -63,15 +62,21 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
     if (!wrap || !canvas) return
     const fit = (): void => {
       const cols = Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(wrap.clientWidth / TILE)))
-      // Measured, not assumed: the caption wraps to three lines in a narrow
-      // panel, and a constant guess left the floor short by two tiles.
-      const spare = wrap.clientHeight - (legendRef.current?.offsetHeight ?? 0)
-      const rows = Math.min(MAX_ROWS, Math.max(MIN_ROWS, Math.floor(spare / TILE)))
-      if (cols === office.current.cols && rows === office.current.rows) return
-      office.current = buildOffice(cols, rows)
-      canvas.width = office.current.cols * TILE
-      canvas.height = office.current.rows * TILE
-      canvas.getContext('2d')!.imageSmoothingEnabled = false
+      // Height is not negotiable: the floor is four rows of desks, and its panel
+      // is sized by that rather than the other way round. Measuring the panel
+      // here would be circular now that the panel takes its size from this.
+      const rows = MAX_ROWS
+      const changed = cols !== office.current.cols || rows !== office.current.rows
+      if (changed) office.current = buildOffice(cols, rows)
+      // Always assign, even when the grid did not change: the canvas element
+      // carries no width/height attributes, so skipping this on the first pass
+      // left it at the 300x150 default and the office was drawn into a corner.
+      if (changed || canvas.width !== office.current.cols * TILE) {
+        canvas.width = office.current.cols * TILE
+        canvas.height = office.current.rows * TILE
+        canvas.getContext('2d')!.imageSmoothingEnabled = false
+      }
+      if (!changed) return
       // Desks moved, so every walk in progress is now a path across a grid that
       // no longer exists. Dropping the bodies re-enters everyone at the door.
       bodies.current.clear()
@@ -300,8 +305,6 @@ const S: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    height: '100%',
-    minHeight: 0,
     padding: 12,
     overflow: 'hidden',
     background: 'var(--sunk)'
@@ -311,9 +314,6 @@ const S: Record<string, React.CSSProperties> = {
     // draws at its natural size and only shrinks when the panel is smaller than
     // that. Stretching it to fill a tall panel is what made a wall of desks.
     maxWidth: '100%',
-    maxHeight: '100%',
-    minHeight: 0,
-    objectFit: 'contain',
     imageRendering: 'pixelated',
     border: '1px solid var(--line)',
     cursor: 'pointer'

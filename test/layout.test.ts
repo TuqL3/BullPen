@@ -14,11 +14,12 @@ import {
 
 const cols = (l: { columns: string[][] }): string => l.columns.map((c) => c.join('+')).join('|')
 
-test('the default is the arrangement asked for: four columns, a stack in the last', () => {
+test('the default is the arrangement asked for, with the floor bottom right', () => {
   assert.equal(cols(DEFAULT_LAYOUT), 'roster|command|editor|tree+shell+floor')
-  // The shell is a second terminal; two on screen by default is a wall of them.
-  assert.deepEqual(DEFAULT_LAYOUT.hidden, ['shell'])
-  assert.equal(visible(DEFAULT_LAYOUT).at(-1)?.panels.join('+'), 'tree+floor')
+  assert.deepEqual(DEFAULT_LAYOUT.hidden, [])
+  const last = visible(DEFAULT_LAYOUT).at(-1)!
+  assert.deepEqual(last.panels, ['tree', 'shell', 'floor'])
+  assert.equal(last.panels.at(-1), 'floor', 'the office floor sits at the bottom right')
 })
 
 test('a panel can be dropped above or below the one it lands on', () => {
@@ -102,7 +103,7 @@ test('hiding a panel drops its column but not its place in the layout', () => {
   const off = toggle(DEFAULT_LAYOUT, 'editor')
   assert.equal(visible(off).length, 3)
   assert.equal(cols(off), cols(DEFAULT_LAYOUT))
-  assert.deepEqual(toggle(off, 'editor').hidden, ['shell'])
+  assert.deepEqual(toggle(off, 'editor').hidden, [])
   // Hiding one of a stack leaves the column, holding the rest.
-  assert.deepEqual(visible(toggle(DEFAULT_LAYOUT, 'floor')).at(-1)?.panels, ['tree'])
+  assert.deepEqual(visible(toggle(DEFAULT_LAYOUT, 'floor')).at(-1)?.panels, ['tree', 'shell'])
 })

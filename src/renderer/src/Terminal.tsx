@@ -116,7 +116,12 @@ function TerminalHost({ id, visible }: { id: string; visible: boolean }) {
     const el = host.current
     if (!el) return
     const { term, fit } = get(id)
-    if (!el.hasChildNodes()) term.open(el)
+    // open() only works once: xterm keeps the element it was given, and calling
+    // it again on a terminal that already has one does nothing. A remount hands
+    // us a fresh host, so the terminal has to be moved into it - re-creating it
+    // instead would throw away the scrollback this map exists to preserve.
+    if (!term.element) term.open(el)
+    else if (term.element.parentElement !== el) el.appendChild(term.element)
 
     const resize = () => {
       // A hidden or unlaid-out pane measures near zero. Fitting to that sends

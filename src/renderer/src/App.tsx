@@ -17,6 +17,7 @@ import { FilePanel, openFile, WorkTree, type OpenFile } from './Code'
 import { isShellId, Shell } from './Shell'
 import {
   DEFAULT_LAYOUT,
+  FIXED,
   moveTo,
   moveToNewColumn,
   normalise,
@@ -751,13 +752,14 @@ function Column({
   onResize: (above: PanelId, below: PanelId, dy: number, height: number) => void
 }) {
   const col = useRef<HTMLDivElement>(null)
-  const total = panels.reduce((n, p) => n + layout.rowWeight[p], 0)
+  const total = panels.filter((p) => !FIXED.has(p)).reduce((n, p) => n + layout.rowWeight[p], 0) || 1
 
   return (
     <div ref={col} style={{ ...S.column, flexGrow: weight }}>
       {panels.map((id, i) => (
         <Fragment key={id}>
-          {i > 0 && (
+          {/* No divider above a fixed panel: there is nothing to trade with it. */}
+          {i > 0 && !FIXED.has(id) && !FIXED.has(panels[i - 1]) && (
             <Splitter
               vertical
               dragging={dragging}
@@ -872,8 +874,9 @@ function Pane({
       data-pane={id}
       style={{
         ...S.pane,
-        flexGrow: share,
-        flexBasis: 0,
+        // A fixed panel is sized by its content; everything else divides what
+        // is left over in the column.
+        ...(FIXED.has(id) ? { flex: '0 0 auto' } : { flexGrow: share, flexBasis: 0 }),
         ...(isTarget ? (side === 'above' ? S.paneTargetTop : S.paneTargetBottom) : null)
       }}
       onDragOver={(e) => {
@@ -903,7 +906,7 @@ function Pane({
         <span>{PANEL_TITLE[id]}</span>
         <span style={{ color: 'var(--faint)' }}>⠿</span>
       </div>
-      <div style={S.paneBody}>{children}</div>
+      <div style={FIXED.has(id) ? S.paneBodyFixed : S.paneBody}>{children}</div>
     </section>
   )
 }
@@ -1249,6 +1252,7 @@ const S: Record<string, React.CSSProperties> = {
   },
   paneGripHeld: { opacity: 0.5, cursor: 'grabbing' },
   paneBody: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
+  paneBodyFixed: { flex: 'none', minWidth: 0, display: 'flex', flexDirection: 'column' },
   panelToggle: {
     display: 'flex',
     alignItems: 'center',
