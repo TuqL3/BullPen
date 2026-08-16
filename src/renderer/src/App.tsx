@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
+import { Floor } from './floor/Floor'
 import { AskMe } from './tabs/AskMe'
 import { Graph } from './tabs/Graph'
 import { Memory } from './tabs/Memory'
@@ -60,6 +61,7 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
+  const [floorOn, setFloorOn] = useState(true)
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
@@ -186,9 +188,14 @@ export default function App() {
 
   return (
     <div style={{ ...(VARS[mode] as React.CSSProperties), ...S.app }}>
-      <TitleBar mode={mode} onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')} />
+      <TitleBar
+        mode={mode}
+        onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
+        floorOn={floorOn}
+        onToggleFloor={() => setFloorOn(!floorOn)}
+      />
 
-      <div style={S.body}>
+      <div style={floorOn ? S.bodyWithFloor : S.body}>
         <aside style={S.roster}>
           <button style={{ ...S.btn, width: '100%', marginBottom: 12 }} onClick={() => setAdding(true)}>
             + agent
@@ -213,6 +220,12 @@ export default function App() {
             )
           })}
         </aside>
+
+        {floorOn && (
+          <div style={S.floorPane}>
+            <Floor mode={mode} onSelect={select} />
+          </div>
+        )}
 
         <main style={S.main}>
           <header style={S.header}>
@@ -342,13 +355,33 @@ export default function App() {
   )
 }
 
-function TitleBar({ mode, onToggle }: { mode: Mode; onToggle: () => void }) {
+function TitleBar({
+  mode,
+  onToggle,
+  floorOn,
+  onToggleFloor
+}: {
+  mode: Mode
+  onToggle: () => void
+  floorOn: boolean
+  onToggleFloor: () => void
+}) {
   return (
     <div style={S.titlebar}>
       {/* Leaves room for the macOS traffic lights, which stay native. */}
       <div style={{ width: 72 }} />
       <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 11, fontWeight: 700 }}>Bullpen</div>
       <div style={{ flex: 1 }} />
+      <button
+        style={{
+          ...S.iconBtn,
+          WebkitAppRegion: 'no-drag',
+          color: floorOn ? 'var(--accent-ink)' : 'var(--muted)'
+        } as React.CSSProperties}
+        onClick={onToggleFloor}
+      >
+        floor
+      </button>
       {/* Text, not glyphs: ☾/⛶ fall back to tofu in most monospace faces. */}
       <button style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties} onClick={onToggle}>
         {mode === 'light' ? 'dark' : 'light'}
@@ -476,6 +509,7 @@ const S: Record<string, React.CSSProperties> = {
     display: 'grid',
     gridTemplateRows: '34px 1fr 74px',
     height: '100vh',
+    overflow: 'hidden',
     background: 'var(--bg)',
     color: 'var(--ink)',
     font: `12px ${MONO}`
@@ -498,6 +532,9 @@ const S: Record<string, React.CSSProperties> = {
     padding: '2px 6px'
   },
   body: { display: 'grid', gridTemplateColumns: '204px 1fr', minHeight: 0 },
+  // Floor on the left, command centre on the right - the windowed layout.
+  bodyWithFloor: { display: 'grid', gridTemplateColumns: '204px 1.35fr 1fr', minHeight: 0 },
+  floorPane: { minWidth: 0, minHeight: 0, borderRight: '1px solid var(--line)', overflow: 'hidden' },
   roster: {
     borderRight: '1px solid var(--line)',
     background: 'var(--panel)',
@@ -552,7 +589,16 @@ const S: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: 'var(--muted)'
   },
-  tabs: { display: 'flex', gap: 2, padding: '0 10px', borderBottom: '1px solid var(--line)' },
+  // Ten tabs in a pane that shrinks when the floor is open: scroll rather than
+  // wrap, so a tab never splits across two lines or falls off the edge unseen.
+  tabs: {
+    display: 'flex',
+    gap: 2,
+    padding: '0 10px',
+    borderBottom: '1px solid var(--line)',
+    overflowX: 'auto',
+    scrollbarWidth: 'thin'
+  },
   tab: {
     ...LABEL,
     display: 'flex',
@@ -562,6 +608,8 @@ const S: Record<string, React.CSSProperties> = {
     border: 'none',
     padding: '7px 11px',
     margin: '5px 0',
+    flex: '0 0 auto',
+    whiteSpace: 'nowrap',
     cursor: 'pointer',
     font: `10px ${MONO}`,
     textTransform: 'uppercase',
