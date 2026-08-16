@@ -2,23 +2,47 @@ import { useEffect, useState } from 'react'
 import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
+import { AskMe } from './tabs/AskMe'
+import { Graph } from './tabs/Graph'
+import { Memory } from './tabs/Memory'
+import { Monitor } from './tabs/Monitor'
+import { Tasks } from './tabs/Tasks'
+import { Triggers } from './tabs/Triggers'
+import { Workers } from './tabs/Workers'
 import { slug } from './avatar'
 import { setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
 import { LABEL, MONO, VARS, type Mode } from './theme'
 import { useStore, type Agent, type Approval } from './store'
 
-// Only tabs with real data behind them. An empty tab bar full of placeholders
-// reads worse than a short one - the rest arrive with their features.
-const TABS = ['terminal', 'approvals', 'activity', 'commands'] as const
+const TABS = [
+  'terminal',
+  'monitor',
+  'tasks',
+  'ask me',
+  'triggers',
+  'memory',
+  'graph',
+  'activity',
+  'commands',
+  'workers'
+] as const
 type Tab = (typeof TABS)[number]
 
-// Grouping mirrors what you actually scan for: who needs you, who is busy,
-// who is done. Not org-chart teams - the roster is a queue, not a hierarchy.
-const GROUPS: { label: string; of: (a: Agent) => boolean }[] = [
-  { label: 'on the floor', of: (a) => a.status === 'running' && a.activity !== 'blocked' },
-  { label: 'waiting on you', of: (a) => a.status === 'running' && a.activity === 'blocked' },
-  { label: 'clocked out', of: (a) => a.status === 'exited' }
-]
+/**
+ * Roster grouping is by workspace folder: agents sharing a directory are
+ * working on the same thing, which is the question you actually ask when
+ * scanning the list.
+ */
+function byFolder(agents: Agent[]): { label: string; rows: Agent[] }[] {
+  const groups = new Map<string, Agent[]>()
+  for (const a of agents) {
+    const label = a.cwd.split(/[/\\]/).filter(Boolean).pop() ?? a.cwd
+    groups.set(label, [...(groups.get(label) ?? []), a])
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, rows]) => ({ label, rows }))
+}
 
 const DOT: Record<string, string> = {
   working: 'var(--ok)',
@@ -27,8 +51,11 @@ const DOT: Record<string, string> = {
   exited: 'var(--faint)'
 }
 
+/** Module scope so throttling survives re-renders without a ref per agent. */
+const lastTouch: Record<string, number> = {}
+
 export default function App() {
-  const { agents, approvals, mail, queue, steers, selected, select } = useStore()
+  const { agents, approvals, mail, queue, steers, lastSeen, selected, select } = useStore()
   const store = useStore.getState
 
   const [mode, setMode] = useState<Mode>('light')
@@ -41,7 +68,16 @@ export default function App() {
 
   useEffect(() => {
     const off = [
-      window.bullpen.onData((id, chunk) => writeToTerminal(id, chunk)),
+      window.bullpen.onData((id, chunk) => {
+        writeToTerminal(id, chunk)
+        // Throttled: pty output arrives dozens of times a second, and a store
+        // write per chunk would re-render the whole tree continuously.
+        const now = Date.now()
+        if (now - (lastTouch[id] ?? 0) > 2000) {
+          lastTouch[id] = now
+          store().touch(id, now)
+        }
+      }),
       window.bullpen.onExit((id, code) =>
         store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
       ),
@@ -82,7 +118,7 @@ export default function App() {
 
   // Anything waiting on a human outranks whatever tab you were reading.
   useEffect(() => {
-    if (approvals.length > 0) setTab('approvals')
+    if (approvals.length > 0) setTab('ask me')
   }, [approvals.length])
 
   const current = agents.find((a) => a.id === selected) ?? null
@@ -104,6 +140,7 @@ export default function App() {
         color: d.color,
         cwd: state.cwd,
         pid: state.pid,
+        startedAt: state.startedAt,
         status: 'running',
         // A freshly booted agent is sitting at its prompt, not working. It has
         // submitted nothing, so no Stop hook will ever arrive to correct an
@@ -158,9 +195,7 @@ export default function App() {
           </button>
 
           {agents.length === 0 && <div style={S.empty}>No one hired yet.</div>}
-          {GROUPS.map(({ label, of }) => {
-            const rows = agents.filter(of)
-            if (rows.length === 0) return null
+          {byFolder(agents).map(({ label, rows }) => {
             return (
               <div key={label} style={{ marginBottom: 10 }}>
                 <div style={{ ...LABEL, color: 'var(--faint)', margin: '0 0 4px 4px' }}>{label}</div>
@@ -228,7 +263,7 @@ export default function App() {
                 style={{ ...S.tab, ...(tab === t ? S.tabActive : null) }}
               >
                 {t}
-                {t === 'approvals' && approvals.length > 0 && <span style={S.badge}>{approvals.length}</span>}
+                {t === 'ask me' && approvals.length > 0 && <span style={S.badge}>{approvals.length}</span>}
               </button>
             ))}
           </nav>
@@ -239,9 +274,15 @@ export default function App() {
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
             </div>
-            {tab === 'approvals' && <Approvals approvals={approvals} />}
+            {tab === 'monitor' && <Monitor agents={agents} lastSeen={lastSeen} />}
+            {tab === 'tasks' && <Tasks agent={current} />}
+            {tab === 'ask me' && <AskMe approvals={approvals} agents={agents} />}
+            {tab === 'triggers' && <Triggers agent={current} />}
+            {tab === 'memory' && <Memory agent={current} />}
+            {tab === 'graph' && <Graph agents={agents} mail={mail} />}
             {tab === 'activity' && <Activity mail={mail} />}
             {tab === 'commands' && <Commands />}
+            {tab === 'workers' && <Workers agents={agents} onSelect={select} />}
           </section>
 
           {tab === 'terminal' && selected && (
@@ -361,36 +402,6 @@ function RosterRow({
           ×
         </span>
       )}
-    </div>
-  )
-}
-
-function Approvals({ approvals }: { approvals: Approval[] }) {
-  if (approvals.length === 0)
-    return <div style={{ ...S.empty, padding: 18 }}>Nothing waiting. Agents are running unblocked.</div>
-
-  return (
-    <div style={{ padding: 14, overflowY: 'auto', height: '100%' }}>
-      {approvals.map((a) => (
-        <div key={a.id} style={S.card}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-            <Avatar id={a.agentId} size={24} />
-            <span style={{ ...LABEL, color: 'var(--ink)', fontSize: 10 }}>{a.agentId}</span>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>wants</span>
-            <span style={{ ...LABEL, color: 'var(--ink)', fontSize: 10 }}>{a.toolName}</span>
-          </div>
-          <div style={{ color: 'var(--warn)', fontSize: 12, marginBottom: 8 }}>{a.reason}</div>
-          <pre style={S.detail}>{a.detail}</pre>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button style={{ ...S.btn, ...S.btnDanger, flex: 1 }} onClick={() => window.bullpen.decide(a.id, 'deny')}>
-              deny
-            </button>
-            <button style={{ ...S.btn, flex: 1 }} onClick={() => window.bullpen.decide(a.id, 'allow')}>
-              allow once
-            </button>
-          </div>
-        </div>
-      ))}
     </div>
   )
 }

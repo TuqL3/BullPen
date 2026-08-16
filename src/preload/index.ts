@@ -34,6 +34,19 @@ const api = {
   onPending: (fn: (p: unknown) => void) => on('approvals:pending', fn),
   onResolved: (fn: (p: unknown, decision: string) => void) => on('approvals:resolved', fn),
 
+  tasks: (id?: string) => ipcRenderer.invoke('board:tasks', id),
+  addTask: (id: string, text: string) => ipcRenderer.invoke('board:addTask', id, text),
+  toggleTask: (id: string) => ipcRenderer.invoke('board:toggleTask', id),
+  removeTask: (id: string) => ipcRenderer.invoke('board:removeTask', id),
+  triggers: (id?: string) => ipcRenderer.invoke('board:triggers', id),
+  addTrigger: (id: string, prompt: string, mins: number) =>
+    ipcRenderer.invoke('board:addTrigger', id, prompt, mins),
+  toggleTrigger: (id: string) => ipcRenderer.invoke('board:toggleTrigger', id),
+  removeTrigger: (id: string) => ipcRenderer.invoke('board:removeTrigger', id),
+  onTriggerFired: (fn: (id: string, prompt: string) => void) => on('agent:trigger-fired', fn),
+  memory: (cwd: string): Promise<{ name: string; text: string } | null> =>
+    ipcRenderer.invoke('agent:memory', cwd),
+
   sendMail: (msg: { from: string; to: string; subject: string; body: string }) =>
     ipcRenderer.invoke('hive:send', msg),
   inbox: (id: string) => ipcRenderer.invoke('hive:inbox', id),

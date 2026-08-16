@@ -13,6 +13,8 @@ export type Agent = {
   face: string
   /** Shirt colour override, so two agents sharing a face stay distinguishable. */
   color?: string
+  /** Epoch ms the pty was spawned; drives uptime in monitor and workers. */
+  startedAt?: number
   exitCode?: number
 }
 
@@ -31,6 +33,8 @@ type State = {
   agents: Agent[]
   approvals: Approval[]
   mail: MailEvent[]
+  /** agentId -> epoch ms of the last pty output, throttled. */
+  lastSeen: Record<string, number>
   /** agentId -> messages typed while that agent was busy, oldest first. */
   queue: Record<string, string[]>
   /** agentId -> steer notes accepted by main but not yet delivered. */
@@ -48,6 +52,7 @@ type State = {
   removeQueued: (agentId: string, index: number) => void
   clearQueue: (agentId: string) => void
   setSteers: (agentId: string, notes: string[]) => void
+  touch: (agentId: string, ts: number) => void
 }
 
 /**
@@ -59,6 +64,7 @@ export const useStore = create<State>((set, get) => ({
   agents: [],
   approvals: [],
   mail: [],
+  lastSeen: {},
   queue: {},
   steers: {},
   selected: null,
@@ -130,5 +136,9 @@ export const useStore = create<State>((set, get) => ({
 
   clearQueue: (agentId) => set((s) => ({ queue: { ...s.queue, [agentId]: [] } })),
 
-  setSteers: (agentId, notes) => set((s) => ({ steers: { ...s.steers, [agentId]: notes } }))
+  setSteers: (agentId, notes) => set((s) => ({ steers: { ...s.steers, [agentId]: notes } })),
+
+  // Throttled by the caller: pty output arrives dozens of times a second and
+  // every write here would re-render the whole tree.
+  touch: (agentId, ts) => set((s) => ({ lastSeen: { ...s.lastSeen, [agentId]: ts } }))
 }))

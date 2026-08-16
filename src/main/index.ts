@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
+import { Board, boardPath } from './board.ts'
 import { Hive } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
@@ -12,6 +13,7 @@ const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
 const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
+const board = new Board(boardPath(BULLPEN_HOME))
 
 let win: BrowserWindow | null = null
 
@@ -146,6 +148,39 @@ function wire(): void {
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => ptys.resize(id, cols, rows))
 
+  // Triggers only fire at an idle agent. Injecting a scheduled prompt into a
+  // turn in progress would corrupt whatever it was doing.
+  board.start((t) => {
+    if (!ptys.isRunning(t.agentId)) return
+    ptys.write(t.agentId, t.prompt.replace(/\r?\n/g, ' ') + '\r')
+    console.log(`[bullpen] trigger fired for ${t.agentId}: ${t.prompt.slice(0, 60)}`)
+    send('agent:trigger-fired', t.agentId, t.prompt)
+  })
+
+  ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
+  ipcMain.handle('board:addTask', (_e, id: string, text: string) => board.addTask(id, text))
+  ipcMain.handle('board:toggleTask', (_e, id: string) => board.toggleTask(id))
+  ipcMain.handle('board:removeTask', (_e, id: string) => board.removeTask(id))
+  ipcMain.handle('board:triggers', (_e, id?: string) => board.triggers(id))
+  ipcMain.handle('board:addTrigger', (_e, id: string, prompt: string, mins: number) =>
+    board.addTrigger(id, prompt, mins)
+  )
+  ipcMain.handle('board:toggleTrigger', (_e, id: string) => board.toggleTrigger(id))
+  ipcMain.handle('board:removeTrigger', (_e, id: string) => board.removeTrigger(id))
+
+  // Read-only on purpose: this shows an agent what instructions it is carrying.
+  // Editing it is a job for a real editor, not a panel in a monitoring app.
+  ipcMain.handle('agent:memory', (_e, cwd: string) => {
+    for (const name of ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md']) {
+      try {
+        return { name, text: readFileSync(join(resolve(cwd), name), 'utf8').slice(0, 200_000) }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+    return null
+  })
+
   ipcMain.handle('agent:steer', (_e, id: string, note: string) => approvals.steer(id, note))
   ipcMain.handle('agent:steers', (_e, id: string) => approvals.pendingSteers(id))
 
@@ -184,6 +219,7 @@ const shutdown = (): void => {
   ptys.killAll()
   approvals.stop()
   hive.stop()
+  board.stop()
 }
 app.on('window-all-closed', () => {
   shutdown()

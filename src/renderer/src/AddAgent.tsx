@@ -81,7 +81,7 @@ export function AddAgent({
   }
 
   return (
-    <div style={S.overlay} onClick={onCancel}>
+    <div data-modal="add-agent" style={S.overlay} onClick={onCancel}>
       <div style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 12, fontWeight: 700, marginBottom: 16 }}>
           Add agent
@@ -109,6 +109,7 @@ export function AddAgent({
                 <div style={LABEL}>Name</div>
                 <input
                   autoFocus
+                  data-field="name"
                   style={S.input}
                   value={d.name}
                   spellCheck={false}
