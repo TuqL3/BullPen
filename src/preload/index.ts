@@ -122,6 +122,8 @@ const api = {
     | { id: string; name: string; cwd: string; pid: number; startedAt: number; cols: number; rows: number }
   > => ipcRenderer.invoke('god:move', dir, size),
   godCwd: (): Promise<string> => ipcRenderer.invoke('god:cwd'),
+  /** Has a workspace been chosen for Michael yet, and what to suggest if not. */
+  godSetup: (): Promise<{ chosen: boolean; cwd: string }> => ipcRenderer.invoke('god:setup'),
   /** Publish the roster to the file Michael reads. */
   publishFloor: (agents: FloorAgent[]): Promise<boolean> =>
     ipcRenderer.invoke('floor:publish', agents),

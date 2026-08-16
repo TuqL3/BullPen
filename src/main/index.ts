@@ -309,6 +309,16 @@ function wire(): void {
   ipcMain.handle('god:cwd', () => currentGodCwd())
 
   /**
+   * First run has no answer to "where should Michael work", and picking one
+   * silently is how an agent ends up writing somewhere the operator never
+   * looked. `chosen` is false until they say; `cwd` is only a suggestion.
+   */
+  ipcMain.handle('god:setup', () => ({
+    chosen: Boolean(readConfig(BULLPEN_HOME).godCwd),
+    cwd: currentGodCwd()
+  }))
+
+  /**
    * The renderer holds the only complete picture of the floor - names, projects
    * and live status - so it is what publishes the snapshot Michael reads. Agents
    * do not outlive the window, so a stale file cannot describe a live floor.

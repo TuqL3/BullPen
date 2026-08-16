@@ -128,48 +128,58 @@ main -> renderer traffic passes through, plus dropping the reference on
 `closed`. Verified by closing the window mid-stream with two live agents: exit
 code 0, no crash lines, no orphans.
 
-**B. Spawned agents inherit the main process's file descriptors. — MEASURED, NOT FIXED.**
+**B. Spawned agents inherit the main process's file descriptors. — FIXED.**
 
 Measured directly from `/proc/<pid>/fd`, three agents spawned in order:
 
-| agent | spawn order | `/dev/ptmx` handles held |
-|---|---|---|
-| michael | 1st | 0 |
-| dwight | 2nd | 1 |
-| andy | 3rd | 2 |
+| agent | spawn order | `/dev/ptmx` held (before) | (after) |
+|---|---|---|---|
+| michael | 1st | 0 | 0 |
+| dwight | 2nd | 1 | 0 |
+| andy | 3rd | 2 | 0 |
 
-Each agent inherits the pty **master** of every agent spawned before it. Two
-consequences:
+Each agent inherited the pty **master** of every agent spawned before it, plus
+Electron's own sockets, config handles and Chromium shared-memory segments —
+68 to 73 descriptors past stdio, now 22 to 23. What remains is opened by the
+CLI itself after `exec` (its own `/proc/self/statm`, `/dev/urandom`, node's
+epoll, its API sockets); none of it comes from Electron.
 
-- the earlier agent never sees EOF when Bullpen dies, so it can outlive the app
-  still holding shell access — this is the non-deterministic half of defect A,
-  and explains why the orphan could not be reproduced on demand
+Two consequences, both gone:
+
+- the earlier agent never saw EOF when Bullpen died, so it could outlive the
+  app still holding shell access — the non-deterministic half of defect A, and
+  why the orphan could not be reproduced on demand
 - holding another agent's pty master is a write channel into that agent's
   terminal, bypassing the hive mailbox and the approvals hook entirely
 
-The listening sockets are **not** leaked. An earlier `ss -ltnp` reading that
+The listening sockets were **not** leaked. An earlier `ss -ltnp` reading that
 suggested otherwise was misattributed; `listening on: none` for every agent.
 
-**Attempted fix, reverted.** Launch each agent through `/bin/sh -c` that closes
-every descriptor above stdio and then `exec`s the real command. It works in
-isolation — verified closing an explicitly inherited fd, and preserving
-arguments containing spaces — but every variant exits 127 inside the app, where
-the shell inherits ~70 descriptors instead of one. Enumerating and closing that
-many descriptors also closes the ones `dash` keeps for its own redirection
-bookkeeping, and it kills itself before reaching `exec`. Three variants failed:
-per-eval redirect, snapshot-the-list-first, and numeric-range. A fourth bug
-found along the way and worth remembering: an unmatched `/dev/fd/*` glob leaves
-the literal string, so `n` becomes `*` and dash reads `exec *>&-` as "exec the
-file named `*`".
+**The fix.** node-pty's Unix path is `forkpty()` + `execvp()`, and `fork`
+copies the parent's whole descriptor table. The child now closes everything
+above stdio before `exec` — `close_range(2)` where the kernel has it, a bounded
+`close()` walk otherwise, since a container can report an open-file limit in
+the millions. Only async-signal-safe calls, because it runs between fork and
+exec. Upstream's macOS path already does this via `POSIX_SPAWN_CLOEXEC_DEFAULT`,
+so the patch is guarded exactly like the fork branch it serves.
 
-Shipping a launcher that cannot start an agent is far worse than an unfixed
-hygiene issue whose main consequence the reaper already covers, so the wrapper
-is out and `PtyManager` spawns directly.
+Applied by `scripts/patch-node-pty.mjs` before `electron-rebuild`, which this
+project already runs, so it is compiled in rather than reapplied at runtime.
+Idempotent, and it exits non-zero if node-pty moves an anchor — a silent no-op
+would look exactly like a fixed leak.
 
-*Real fixes, in order of preference:* set `FD_CLOEXEC` on the pty master inside
-node-pty (a native change - upstream, or a patched build); or spawn agents from
-a small dedicated child process, since Node's own `child_process` does not leak
-descriptors. Neither is a config change.
+**Earlier attempt, reverted, kept because the failure is instructive.** Launch
+each agent through `/bin/sh -c` that closes every descriptor above stdio and
+then `exec`s the real command. It worked in isolation but every variant exited
+127 inside the app, where the shell inherits ~70 descriptors instead of one:
+closing that many also closes the ones `dash` keeps for its own redirection
+bookkeeping, and it kills itself before reaching `exec`. A fourth bug found
+along the way: an unmatched `/dev/fd/*` glob leaves the literal string, so
+`exec *>&-` reads as "exec the file named `*`".
+
+**What this costs.** A patched dependency has to be re-checked on every node-pty
+upgrade. The script failing loudly is what makes that a build error rather than
+a silent regression.
 
 ## Unverified — needs a real run
 

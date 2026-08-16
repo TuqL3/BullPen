@@ -67,6 +67,8 @@ export default function App() {
   const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
   const [moveError, setMoveError] = useState('')
+  // Set on first run only: the suggested workspace, awaiting an answer.
+  const [setupCwd, setSetupCwd] = useState<string | null>(null)
 
   useEffect(() => setTerminalTheme(mode), [mode])
 
@@ -122,31 +124,51 @@ export default function App() {
     return () => off.forEach((fn) => fn())
   }, [])
 
+  /** Put Michael in the store and open his terminal. */
+  const adoptGod = (g: {
+    id: string
+    name: string
+    cwd: string
+    pid: number
+    startedAt: number
+    cols: number
+    rows: number
+  }): void => {
+    store().upsertAgent({
+      id: g.id,
+      role: 'god',
+      project: '',
+      name: g.name,
+      face: g.id,
+      cwd: g.cwd,
+      pid: g.pid,
+      startedAt: g.startedAt,
+      cols: g.cols,
+      rows: g.rows,
+      status: 'running',
+      exitCode: undefined,
+      activity: 'idle'
+    })
+    select(g.id)
+  }
+
   // Michael is the floor's starting state, not a hire. Bringing him up here
   // rather than in the wizard is what makes "open the app and he is there"
   // true; main hands back the running one if this fires twice.
+  //
+  // On the very first run there is no answer yet to where he should work, and
+  // picking one silently is how an agent ends up writing somewhere the operator
+  // never looked - so that run asks first and starts nothing until it is told.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      const setup = await window.bullpen.godSetup()
+      if (cancelled) return
+      if (!setup.chosen) return setSetupCwd(setup.cwd)
       const { cols, rows } = paneSize(document.querySelector('section'))
       try {
         const g = await window.bullpen.ensureGod({ cols, rows })
-        if (cancelled) return
-        store().upsertAgent({
-          id: g.id,
-          role: 'god',
-          project: '',
-          name: g.name,
-          face: g.id,
-          cwd: g.cwd,
-          pid: g.pid,
-          startedAt: g.startedAt,
-          cols: g.cols,
-          rows: g.rows,
-          status: 'running',
-          activity: 'idle'
-        })
-        select(g.id)
+        if (!cancelled) adoptGod(g)
       } catch (err) {
         // A floor with no Michael still works - dispatch is what stops working,
         // and it already says so - but silence would look like he never existed.
@@ -263,17 +285,17 @@ export default function App() {
     const { cols, rows } = paneSize(document.querySelector('section'))
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return setMoveError(res.error)
-    store().upsertAgent({
-      id: res.id,
-      cwd: res.cwd,
-      pid: res.pid,
-      startedAt: res.startedAt,
-      cols: res.cols,
-      rows: res.rows,
-      status: 'running',
-      exitCode: undefined,
-      activity: 'idle'
-    })
+    adoptGod(res)
+  }
+
+  /** First run: accept a workspace for Michael and bring him up in it. */
+  const chooseGodHome = async (dir: string): Promise<string | null> => {
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    const res = await window.bullpen.moveGod(dir, { cols, rows })
+    if ('error' in res) return res.error
+    adoptGod(res)
+    setSetupCwd(null)
+    return null
   }
 
   const steer = (): void => {
@@ -477,6 +499,8 @@ export default function App() {
           onSpawn={spawnFrom}
         />
       )}
+
+      {setupCwd !== null && <FirstRun suggested={setupCwd} onChoose={chooseGodHome} />}
     </div>
   )
 }
@@ -561,6 +585,70 @@ function Icon({
     <svg {...common} aria-hidden>
       <path d="M6 1.5H1.5V6M10 1.5h4.5V6M10 14.5h4.5V10M6 14.5H1.5V10" />
     </svg>
+  )
+}
+
+/**
+ * First run, and the only thing it asks: where Michael works.
+ *
+ * Not skippable. A default would be one machine's home directory imposed on
+ * every other, and an agent writing somewhere the operator never looked is a
+ * worse outcome than one more click on the first launch.
+ */
+function FirstRun({
+  suggested,
+  onChoose
+}: {
+  suggested: string
+  onChoose: (dir: string) => Promise<string | null>
+}) {
+  const [dir, setDir] = useState(suggested)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const go = async (): Promise<void> => {
+    if (!dir.trim()) return setError('Michael needs a directory to work in.')
+    setBusy(true)
+    setError((await onChoose(dir.trim())) ?? '')
+    setBusy(false)
+  }
+
+  return (
+    <div style={S.modalWrap}>
+      <div style={{ ...S.modal, width: 520 }}>
+        <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 12, fontWeight: 700 }}>
+          Where should Michael work?
+        </div>
+        <p style={S.firstRunBlurb}>
+          Michael stands in for you: you dispatch through him and he is the one agent that can
+          see the whole floor. He needs a directory of his own — he may write freely inside it,
+          and nowhere else. You can move him later from his header.
+        </p>
+        <div style={{ display: 'flex', gap: 8, margin: '4px 0 8px' }}>
+          <input
+            data-field="godcwd"
+            style={S.firstRunInput}
+            value={dir}
+            spellCheck={false}
+            onChange={(e) => setDir(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && go()}
+          />
+          <button
+            style={S.btn}
+            onClick={async () => {
+              const picked = await window.bullpen.pickDir()
+              if (picked) setDir(picked)
+            }}
+          >
+            browse
+          </button>
+        </div>
+        {error && <div style={{ color: 'var(--danger)', fontSize: 11, marginBottom: 8 }}>{error}</div>}
+        <button style={{ ...S.btn, ...S.btnPrimary }} disabled={busy} onClick={go}>
+          {busy ? 'starting…' : 'start Michael here'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -889,6 +977,31 @@ const S: Record<string, React.CSSProperties> = {
     font: `11px ${MONO}`
   },
   btnPrimary: { background: 'var(--accent)', color: '#241f1a', borderColor: 'var(--accent)' },
+  modalWrap: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.45)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 50
+  },
+  modal: {
+    background: 'var(--panel)',
+    border: '1px solid var(--line)',
+    padding: 20,
+    font: `12px ${MONO}`,
+    color: 'var(--ink)'
+  },
+  firstRunBlurb: { fontSize: 11, color: 'var(--muted)', lineHeight: 1.6, margin: '10px 0 4px' },
+  firstRunInput: {
+    flex: 1,
+    padding: '7px 9px',
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    font: `12px ${MONO}`
+  },
   btnDanger: { color: 'var(--danger)', borderColor: 'var(--danger)' },
   row: {
     display: 'flex',
