@@ -1,0 +1,41 @@
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+
+const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void) => {
+  const listener = (_e: IpcRendererEvent, ...args: unknown[]) => fn(...(args as T))
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.off(channel, listener)
+}
+
+/**
+ * The renderer gets this and nothing else - no `require`, no fs, no ipcRenderer.
+ * Every capability the UI has is one named function on this object.
+ */
+const api = {
+  pickDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDir'),
+  toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  spawn: (spec: { id: string; cwd: string; cmd?: string; args?: string[] }) =>
+    ipcRenderer.invoke('agent:spawn', spec),
+  listAgents: () => ipcRenderer.invoke('agent:list'),
+  kill: (id: string) => ipcRenderer.invoke('agent:kill', id),
+
+  write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
+  resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
+  onData: (fn: (id: string, chunk: string) => void) => on('pty:data', fn),
+  onExit: (fn: (id: string, code: number) => void) => on('agent:exit', fn),
+  onTrust: (fn: (id: string, sandbox: string) => void) => on('agent:trust', fn),
+  onStatus: (fn: (id: string, status: 'working' | 'idle') => void) => on('agent:status', fn),
+
+  listApprovals: () => ipcRenderer.invoke('approvals:list'),
+  decide: (id: string, decision: 'allow' | 'deny') => ipcRenderer.invoke('approvals:decide', id, decision),
+  onPending: (fn: (p: unknown) => void) => on('approvals:pending', fn),
+  onResolved: (fn: (p: unknown, decision: string) => void) => on('approvals:resolved', fn),
+
+  sendMail: (msg: { from: string; to: string; subject: string; body: string }) =>
+    ipcRenderer.invoke('hive:send', msg),
+  inbox: (id: string) => ipcRenderer.invoke('hive:inbox', id),
+  onDeliver: (fn: (d: unknown) => void) => on('hive:deliver', fn)
+}
+
+contextBridge.exposeInMainWorld('bullpen', api)
+
+export type BullpenApi = typeof api
