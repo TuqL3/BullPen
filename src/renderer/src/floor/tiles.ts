@@ -111,11 +111,16 @@ const px = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: n
  * be consistent, and carry the shading that makes a flat grid read as a room.
  */
 function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
-  const ground = cell === 'rug' ? p.rug : p.floor
-  px(ctx, 0, 0, TILE, TILE, ground)
-  px(ctx, 0, 0, TILE, 1, cell === 'rug' ? p.rugLine : p.floorLine)
-  px(ctx, 0, 0, 1, TILE, cell === 'rug' ? p.rugLine : p.floorLine)
-  if (cell !== 'rug') px(ctx, TILE / 2 - 1, TILE / 2 - 1, 2, 2, p.floorDot)
+  // Only the two ground tiles paint a background. Everything else is drawn on
+  // transparency and blitted over whichever ground it stands on - a chair on a
+  // rug used to bring its own green square with it.
+  if (cell === 'floor' || cell === 'rug') {
+    px(ctx, 0, 0, TILE, TILE, cell === 'rug' ? p.rug : p.floor)
+    px(ctx, 0, 0, TILE, 1, cell === 'rug' ? p.rugLine : p.floorLine)
+    px(ctx, 0, 0, 1, TILE, cell === 'rug' ? p.rugLine : p.floorLine)
+    if (cell !== 'rug') px(ctx, TILE / 2 - 1, TILE / 2 - 1, 2, 2, p.floorDot)
+    return
+  }
 
   switch (cell) {
     // A doorway. Walkable, but framed - a plain floor tile in a wall run reads
@@ -167,6 +172,17 @@ function drawCell(ctx: CanvasRenderingContext2D, cell: Cell, p: Palette): void {
       px(ctx, TILE - 5, 0, 5, TILE, p.wallTop)
       px(ctx, TILE - 5, 0, 1, TILE, p.wallEdge)
       px(ctx, 0, 0, 1, TILE, p.wallEdge)
+      break
+
+    // A screen on a partition, seen from above: the wall cap with a dark panel
+    // hung on the room side of it.
+    case 'tv':
+      px(ctx, 0, 0, TILE, TILE, p.wallTop)
+      px(ctx, 0, 0, 1, TILE, p.wallEdge)
+      px(ctx, TILE - 1, 0, 1, TILE, p.wallEdge)
+      px(ctx, 1, 1, 5, TILE - 2, p.metalDark)
+      px(ctx, 2, 2, 3, TILE - 4, p.screen)
+      px(ctx, 2, 3, 2, TILE - 7, p.screenGlow)
       break
 
     case 'window':
@@ -334,6 +350,7 @@ export function drawChair(ctx: CanvasRenderingContext2D, x: number, y: number, p
 }
 
 const KINDS: Cell[] = [
+  'tv',
   'wallLeft',
   'wallRight',
   'door',

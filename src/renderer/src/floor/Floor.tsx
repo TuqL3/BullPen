@@ -222,7 +222,10 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
 
       for (let y = 0; y < office.current.rows; y++) {
         for (let x = 0; x < office.current.cols; x++) {
+          const under = office.current.ground[y][x]
+          ctx.drawImage(tiles, ATLAS_INDEX[under] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
           const cell = office.current.grid[y][x]
+          if (cell === under) continue
           ctx.drawImage(tiles, ATLAS_INDEX[cell] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
         }
       }

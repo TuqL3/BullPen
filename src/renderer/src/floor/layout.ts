@@ -48,6 +48,7 @@ export type Cell =
   | 'board'
   | 'clock'
   | 'cooler'
+  | 'tv'
   | 'sofa'
   | 'coffee'
   | 'printer'
@@ -73,6 +74,7 @@ const BLOCKED: ReadonlySet<Cell> = new Set<Cell>([
   'shelf',
   'fridge',
   'cooler',
+  'tv',
   'sofa',
   'coffee',
   'printer',
@@ -81,6 +83,13 @@ const BLOCKED: ReadonlySet<Cell> = new Set<Cell>([
 
 export type Office = {
   grid: Cell[][]
+  /**
+   * What is under each tile - floor or rug. Kept apart from `grid` because a
+   * chair standing on a rug is still standing on a rug: with one grid the
+   * furniture tile carried its own ground and painted green squares across the
+   * meeting room carpet.
+   */
+  ground: Cell[][]
   desks: Desk[]
   /**
    * The corner office. Michael stands in for the operator and everything routes
@@ -116,8 +125,18 @@ export function buildOffice(cols: number, rows: number): Office {
   const grid: Cell[][] = Array.from({ length: rows }, () =>
     Array.from({ length: cols }, (): Cell => 'floor')
   )
+  const ground: Cell[][] = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, (): Cell => 'floor')
+  )
   const set = (x: number, y: number, c: Cell): void => {
     if (y >= 0 && y < rows && x >= 0 && x < cols) grid[y][x] = c
+  }
+  /** Lay carpet: the tile on top may later be furniture, the carpet stays. */
+  const carpet = (x: number, y: number): void => {
+    if (y >= 0 && y < rows && x >= 0 && x < cols) {
+      ground[y][x] = 'rug'
+      grid[y][x] = 'rug'
+    }
   }
 
   // Outer shell. The top wall is two tiles: a cap and a face below it, which is
@@ -175,7 +194,7 @@ export function buildOffice(cols: number, rows: number): Office {
     // the bottom wall - one in the other would open into the fridge.
     set(meeting.x0 + 5, roomBottom, 'door')
     for (let y = partTop; y < roomBottom; y++) {
-      for (let x = meeting.x0 - 1; x < meeting.x1; x++) set(x, y, 'rug')
+      for (let x = meeting.x0 - 1; x < meeting.x1; x++) carpet(x, y)
     }
     // Centred both ways. A table pinned to one end of the room reads as
     // furniture that was pushed aside rather than a meeting room.
@@ -183,9 +202,11 @@ export function buildOffice(cols: number, rows: number): Office {
     const inX1 = meeting.x1 - 1
     const inY0 = partTop
     const inY1 = roomBottom - 1
-    // Exactly one tile of floor on every side of the block, which is what the
-    // room is sized for - not a block centred inside whatever space was left.
-    const tableW = inX1 - inX0 - 1
+    // One tile of floor on three sides, three on the screen side: a meeting room
+    // needs somewhere to stand and something to look at, and a table pushed up
+    // against the wall the screen is on leaves neither.
+    const SCREEN_GAP = 3
+    const tableW = inX1 - inX0 + 1 - 1 - SCREEN_GAP
     const tx = inX0 + 1
     const ty = inY0 + 1
     for (let x = tx; x < tx + tableW; x++) {
@@ -214,6 +235,13 @@ export function buildOffice(cols: number, rows: number): Office {
     for (let x = kitchen.x0 + 3; x <= kitchen.x1; x++) set(x, roomBottom - 1, 'shelf')
   }
 
+  // The screen goes on last: it hangs on the wall the two rooms share, and the
+  // kitchen redraws that wall after the meeting room is furnished.
+  if (meeting) {
+    set(meeting.x1, partTop + 2, 'tv')
+    set(meeting.x1, partTop + 3, 'tv')
+  }
+
   // The corner office, bottom right. Needs its own walls, so it is only carved
   // when there is width for it and pods left over beside it.
   // Small on purpose: a corner office the size of the meeting room reads as
@@ -233,7 +261,7 @@ export function buildOffice(cols: number, rows: number): Office {
     // in it. Two tiles in from the bottom so the aisle reaches it.
     set(bossRoom.x0 - 1, bossRoom.y1 - 1, 'door')
     for (let y = bossRoom.y0; y <= bossRoom.y1; y++) {
-      for (let x = bossRoom.x0; x <= bossRoom.x1; x++) set(x, y, 'rug')
+      for (let x = bossRoom.x0; x <= bossRoom.x1; x++) carpet(x, y)
     }
     const bx = bossRoom.x0 + 1
     const by = bossRoom.y0 + 1
@@ -343,7 +371,7 @@ export function buildOffice(cols: number, rows: number): Office {
     decor(cols - 2, y, y % 2 ? 'plant' : 'printer')
   }
 
-  return { grid, desks, door, boss, cols, rows }
+  return { grid, ground, desks, door, boss, cols, rows }
 }
 
 
