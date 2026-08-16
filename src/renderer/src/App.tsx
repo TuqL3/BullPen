@@ -585,7 +585,6 @@ function RosterRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ ...LABEL, color: 'var(--ink)', fontSize: god ? 11 : 10 }}>
           {agent.name}
-          {god && <span style={{ color: 'var(--accent-ink)' }}> · you</span>}
         </div>
         <div
           title={agent.cwd}

@@ -44,7 +44,6 @@ export function Workers({ agents, onSelect }: { agents: Agent[]; onSelect: (id: 
           <Avatar id={a.face} shirt={a.color} size={26} />
           <span style={{ ...LABEL, color: 'var(--ink)', width: 110 }}>
             {a.name}
-            {a.role === 'god' && <span style={{ color: 'var(--accent-ink)' }}> ·you</span>}
           </span>
           <span style={{ width: 110, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {a.role === 'god' ? '—' : a.project || '—'}

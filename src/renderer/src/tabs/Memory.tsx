@@ -71,7 +71,6 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
           {agents.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name}
-              {a.role === 'god' ? ' (you)' : ''}
             </option>
           ))}
         </select>
