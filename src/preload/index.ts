@@ -1,5 +1,22 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
+export type ActivityItem = {
+  id: number
+  ts: number
+  kind: string
+  actor: string
+  text: string
+}
+
+export type Question = {
+  id: string
+  from: string
+  to: string
+  subject: string
+  body: string
+  ts: number
+}
+
 export type AgentCost = {
   input: number
   output: number
@@ -13,10 +30,12 @@ export type AgentCost = {
   complete: boolean
 }
 
-const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void) => {
+const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void): (() => void) => {
   const listener = (_e: IpcRendererEvent, ...args: unknown[]) => fn(...(args as T))
   ipcRenderer.on(channel, listener)
-  return () => ipcRenderer.off(channel, listener)
+  return () => {
+    ipcRenderer.off(channel, listener)
+  }
 }
 
 /**
@@ -53,6 +72,22 @@ const api = {
   onPending: (fn: (p: unknown) => void) => on('approvals:pending', fn),
   onResolved: (fn: (p: unknown, decision: string) => void) => on('approvals:resolved', fn),
 
+  activity: (limit?: number): Promise<ActivityItem[]> => ipcRenderer.invoke('activity:list', limit),
+  onActivity: (fn: (item: ActivityItem) => void) => on('activity:item', fn),
+
+  askList: (): Promise<Question[]> => ipcRenderer.invoke('ask:list'),
+  askAnswer: (qid: string, answer: string) => ipcRenderer.invoke('ask:answer', qid, answer),
+  askDismiss: (qid: string) => ipcRenderer.invoke('ask:dismiss', qid),
+  onAsk: (fn: (qs: Question[]) => void) => on('ask:pending', fn),
+
+  setGod: (id: string) => ipcRenderer.invoke('agent:setGod', id),
+  dispatch: (text: string, owner: string): Promise<string | null> =>
+    ipcRenderer.invoke('agent:dispatch', text, owner),
+  search: (q: string): Promise<{ where: string; text: string }[]> =>
+    ipcRenderer.invoke('search:text', q),
+
+  setTaskStatus: (id: string, status: string) => ipcRenderer.invoke('board:setTaskStatus', id, status),
+  assignTask: (id: string, agentId: string) => ipcRenderer.invoke('board:assignTask', id, agentId),
   tasks: (id?: string) => ipcRenderer.invoke('board:tasks', id),
   addTask: (id: string, text: string) => ipcRenderer.invoke('board:addTask', id, text),
   toggleTask: (id: string) => ipcRenderer.invoke('board:toggleTask', id),

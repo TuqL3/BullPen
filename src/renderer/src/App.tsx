@@ -4,6 +4,7 @@ import { Avatar } from './Avatar'
 import { Commands } from './Commands'
 import { Floor } from './floor/Floor'
 import { AskMe } from './tabs/AskMe'
+import { Activity } from './tabs/Activity'
 import { Graph } from './tabs/Graph'
 import { Memory } from './tabs/Memory'
 import { Monitor } from './tabs/Monitor'
@@ -152,12 +153,15 @@ export default function App() {
         cwd: state.cwd,
         pid: state.pid,
         startedAt: state.startedAt,
+        cols: state.cols,
+        rows: state.rows,
         status: 'running',
         // A freshly booted agent is sitting at its prompt, not working. It has
         // submitted nothing, so no Stop hook will ever arrive to correct an
         // optimistic 'working' - it would stay wrong until its first real turn.
         activity: 'idle'
       })
+      if (d.role === 'god') window.bullpen.setGod(id)
       select(id)
       setTab('terminal')
       setAdding(false)
@@ -315,12 +319,12 @@ export default function App() {
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
             </div>
             {tab === 'monitor' && <Monitor agents={agents} lastSeen={lastSeen} />}
-            {tab === 'tasks' && <Tasks agent={current} />}
+            {tab === 'tasks' && <Tasks agents={agents} />}
             {tab === 'ask me' && <AskMe approvals={approvals} agents={agents} />}
             {tab === 'triggers' && <Triggers agent={current} />}
-            {tab === 'memory' && <Memory agent={current} />}
+            {tab === 'memory' && <Memory agents={agents} selected={selected} />}
             {tab === 'graph' && <Graph agents={agents} mail={mail} />}
-            {tab === 'activity' && <Activity mail={mail} />}
+            {tab === 'activity' && <Activity />}
             {tab === 'commands' && <Commands />}
             {tab === 'workers' && <Workers agents={agents} onSelect={select} />}
           </section>
@@ -549,30 +553,6 @@ function RosterRow({
           ×
         </span>
       )}
-    </div>
-  )
-}
-
-function Activity({ mail }: { mail: { from: string; to: string; subject: string; ts: number }[] }) {
-  if (mail.length === 0) return <div style={{ ...S.empty, padding: 18 }}>Quiet floor. No mail yet.</div>
-  return (
-    <div style={{ padding: 14, overflowY: 'auto', height: '100%' }}>
-      {mail
-        .slice()
-        .reverse()
-        .map((m, i) => (
-          <div key={i} style={S.mailRow}>
-            <Avatar id={m.from} size={20} />
-            <span style={{ ...LABEL, fontSize: 10, color: 'var(--ink)' }}>{m.from}</span>
-            <span style={{ color: 'var(--faint)' }}>→</span>
-            <Avatar id={m.to} size={20} />
-            <span style={{ ...LABEL, fontSize: 10, color: 'var(--ink)' }}>{m.to}</span>
-            <span style={{ flex: 1, fontSize: 12, color: 'var(--muted)' }}>{m.subject}</span>
-            <span style={{ fontSize: 10, color: 'var(--faint)' }}>
-              {new Date(m.ts).toLocaleTimeString()}
-            </span>
-          </div>
-        ))}
     </div>
   )
 }

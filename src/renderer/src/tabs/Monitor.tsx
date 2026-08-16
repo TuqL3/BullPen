@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Avatar } from '../Avatar'
 import { CtxMeter } from '../App'
 import { LABEL, MONO } from '../theme'
@@ -26,6 +27,11 @@ const tokens = (n: number): string =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 
 export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Record<string, number> }) {
+  const [brief, setBrief] = useState('')
+  const [owner, setOwner] = useState('decide')
+  const [sent, setSent] = useState('')
+  const god = agents.find((a) => a.role === 'god')
+
   if (agents.length === 0) return <div style={S.empty}>Nobody on the floor.</div>
 
   const working = agents.filter((a) => a.status === 'running' && a.activity === 'working').length
@@ -45,6 +51,54 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
         <Stat label="working" value={working} color="var(--ok)" />
         <Stat label="waiting on you" value={blocked} color={blocked ? 'var(--warn)' : undefined} />
         <Stat label="stopped" value={agents.filter((a) => a.status === 'exited').length} />
+      </div>
+
+      <div style={S.dispatch}>
+        <div style={{ ...LABEL, color: 'var(--ink)' }}>
+          dispatch {god ? `— via ${god.name}` : '— no clone of you yet'}
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+          <span style={{ ...LABEL, color: 'var(--faint)' }}>suggested owner</span>
+          <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
+            <option value="decide">{god ? `${god.name} decides` : 'decide'}</option>
+            {agents
+              .filter((a) => a.role !== 'god')
+              .map((a) => (
+                <option key={a.id} value={a.name}>
+                  {a.name}
+                </option>
+              ))}
+          </select>
+        </div>
+        <textarea
+          style={S.brief}
+          rows={2}
+          value={brief}
+          placeholder={
+            god
+              ? `Describe the task — ${god.name} decomposes it and assigns`
+              : 'Create a clone of yourself first: tick "This one is me" in the add-agent wizard.'
+          }
+          onChange={(e) => setBrief(e.target.value)}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            style={{ ...S.btn, opacity: god && brief.trim() ? 1 : 0.5 }}
+            onClick={async () => {
+              if (!brief.trim()) return
+              const err = await window.bullpen.dispatch(brief.trim(), owner)
+              setSent(err ?? `handed to ${god?.name}`)
+              if (!err) setBrief('')
+            }}
+          >
+            dispatch
+          </button>
+          {sent && <span style={{ ...LABEL, color: 'var(--muted)' }}>{sent}</span>}
+        </div>
+        <p style={{ ...S.note, marginTop: 8 }}>
+          Dispatch types the brief into your clone&apos;s own prompt. It decides the breakdown and the
+          assignment — Bullpen does not invent a plan of its own and then pretend an agent made it.
+        </p>
       </div>
 
       {costs.length > 0 && (
@@ -70,7 +124,10 @@ export function Monitor({ agents, lastSeen }: { agents: Agent[]; lastSeen: Recor
         return (
           <div key={a.id} style={S.row}>
             <Avatar id={a.face} shirt={a.color} size={26} />
-            <span style={{ ...LABEL, color: 'var(--ink)', width: 110 }}>{a.name}</span>
+            <span style={{ ...LABEL, color: 'var(--ink)', width: 110 }}>
+              {a.name}
+              {a.role === 'god' && <span style={{ color: 'var(--accent-ink)' }}> (god)</span>}
+            </span>
             <span style={{ ...S.dot, background: DOT[status] }} />
             <span style={{ width: 70, color: 'var(--muted)' }}>{status}</span>
             <span style={{ width: 90, color: 'var(--muted)' }}>up {since(a.startedAt ?? 0)}</span>
@@ -121,6 +178,38 @@ function Stat({ label, value, color }: { label: string; value: number; color?: s
 const S: Record<string, React.CSSProperties> = {
   wrap: { padding: 14, overflowY: 'auto', height: '100%', font: `12px ${MONO}` },
   summary: { display: 'flex', gap: 28, padding: '4px 6px 16px' },
+  dispatch: {
+    padding: '10px 12px',
+    marginBottom: 12,
+    background: 'var(--panel)',
+    border: '1px solid var(--line)'
+  },
+  brief: {
+    width: '100%',
+    boxSizing: 'border-box',
+    resize: 'vertical',
+    padding: 8,
+    marginBottom: 8,
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    font: `12px ${MONO}`
+  },
+  select: {
+    padding: '4px 6px',
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    font: `11px ${MONO}`
+  },
+  btn: {
+    padding: '6px 14px',
+    background: 'var(--accent)',
+    color: '#241f1a',
+    border: '1px solid var(--accent)',
+    cursor: 'pointer',
+    font: `11px ${MONO}`
+  },
   spend: {
     padding: '10px 12px',
     marginBottom: 12,

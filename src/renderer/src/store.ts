@@ -23,6 +23,9 @@ export type Agent = {
   color?: string
   /** Epoch ms the pty was spawned; drives uptime in monitor and workers. */
   startedAt?: number
+  /** Live pty dimensions, so a mismatch with the terminal is visible. */
+  cols?: number
+  rows?: number
   /** Context window usage from the agent's own transcript. */
   ctx?: { used: number; limit: number; pct: number; model: string }
   /** Token totals and API-equivalent cost, accumulated from the transcript. */

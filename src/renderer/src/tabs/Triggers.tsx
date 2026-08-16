@@ -40,6 +40,20 @@ export function Triggers({ agent }: { agent: Agent | null }) {
 
   return (
     <div style={S.wrap}>
+      <div style={{ ...LABEL, color: 'var(--faint)', marginBottom: 12 }}>
+        Everything that can start work without you typing.
+      </div>
+
+      <div style={{ ...S.sectionHead, marginTop: 0 }}>
+        <span style={{ ...LABEL, color: 'var(--ink)' }}>schedules</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1 }}>
+          Run a prompt on a repeating clock.
+        </span>
+        <span style={{ ...LABEL, color: 'var(--faint)' }}>
+          {triggers.filter((t) => t.enabled).length} of {triggers.length} on
+        </span>
+      </div>
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
         <input
           style={S.input}
@@ -73,7 +87,12 @@ export function Triggers({ agent }: { agent: Agent | null }) {
           >
             {t.enabled ? 'on' : 'off'}
           </span>
-          <span style={{ width: 80, color: 'var(--muted)' }}>every {t.everyMinutes}m</span>
+          <span style={{ width: 92, color: 'var(--muted)' }}>every {t.everyMinutes}m</span>
+          <span style={{ width: 96, color: 'var(--faint)', fontSize: 10 }}>
+            {t.enabled
+              ? `next in ${Math.max(0, Math.ceil((t.lastRun + t.everyMinutes * 60_000 - Date.now()) / 60_000))}m`
+              : 'paused'}
+          </span>
           <span style={{ flex: 1, color: t.enabled ? 'var(--ink)' : 'var(--faint)' }}>{t.prompt}</span>
           <span style={{ width: 120, color: 'var(--faint)', fontSize: 11 }}>
             {t.lastRun ? `last ${new Date(t.lastRun).toLocaleTimeString()}` : 'not run yet'}
@@ -95,12 +114,49 @@ export function Triggers({ agent }: { agent: Agent | null }) {
         would corrupt whatever it was doing. Each firing is a real turn against your subscription,
         so an hourly trigger is 24 turns a day whether or not there was anything to do.
       </p>
+
+      {/* Named because they are the other ways work can start, and saying "not
+          built" is more useful than leaving the reader to wonder. */}
+      <Stub
+        title="context"
+        blurb="Compact or clear an agent as its context fills."
+        state="not built — watch the ctx meter and use /compact"
+      />
+      <Stub
+        title="webhooks"
+        blurb="Let an outside system post work in."
+        state="not built — no inbound HTTP surface exists"
+      />
+      <Stub
+        title="organisation"
+        blurb="Let a teammate's Bullpen message yours."
+        state="not built — the hive is local to this machine"
+      />
+    </div>
+  )
+}
+
+function Stub({ title, blurb, state }: { title: string; blurb: string; state: string }) {
+  return (
+    <div style={S.sectionHead}>
+      <span style={{ ...LABEL, color: 'var(--muted)' }}>{title}</span>
+      <span style={{ fontSize: 11, color: 'var(--faint)', flex: 1 }}>{blurb}</span>
+      <span style={{ ...LABEL, color: 'var(--faint)' }}>{state}</span>
     </div>
   )
 }
 
 const S: Record<string, React.CSSProperties> = {
   wrap: { padding: 14, overflowY: 'auto', height: '100%', font: `12px ${MONO}` },
+  sectionHead: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 10,
+    marginTop: 16,
+    padding: '8px 10px',
+    background: 'var(--sunk)',
+    border: '1px solid var(--line)'
+  },
   input: {
     flex: 1,
     padding: '6px 9px',

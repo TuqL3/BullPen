@@ -3,10 +3,16 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
+export type TaskStatus = 'todo' | 'doing' | 'blocked' | 'done'
+export const TASK_STATUSES: TaskStatus[] = ['todo', 'doing', 'blocked', 'done']
+
 export type Task = {
   id: string
+  /** Who the card is assigned to. Empty means unassigned. */
   agentId: string
   text: string
+  status: TaskStatus
+  /** Kept so boards written before statuses existed still load. */
   done: boolean
   createdAt: number
 }
@@ -46,7 +52,12 @@ export class Board extends EventEmitter {
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Data>
       this.data = {
-        tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+        // Boards written before statuses existed carry only `done`; derive the
+        // column from it rather than dropping the card into an unknown state.
+        tasks: (Array.isArray(parsed.tasks) ? parsed.tasks : []).map((t) => ({
+          ...t,
+          status: TASK_STATUSES.includes(t?.status) ? t.status : t?.done ? 'done' : 'todo'
+        })),
         triggers: Array.isArray(parsed.triggers) ? parsed.triggers : []
       }
     } catch {
@@ -68,10 +79,17 @@ export class Board extends EventEmitter {
     return this.data.tasks.filter((t) => !agentId || t.agentId === agentId)
   }
 
-  addTask(agentId: string, text: string): Task | null {
+  addTask(agentId: string, text: string, status: TaskStatus = 'todo'): Task | null {
     const clean = text.trim()
     if (!clean) return null
-    const task: Task = { id: randomUUID(), agentId, text: clean, done: false, createdAt: Date.now() }
+    const task: Task = {
+      id: randomUUID(),
+      agentId,
+      text: clean,
+      status,
+      done: status === 'done',
+      createdAt: Date.now()
+    }
     this.data.tasks.push(task)
     this.save()
     return task
@@ -80,7 +98,21 @@ export class Board extends EventEmitter {
   toggleTask(id: string): void {
     const t = this.data.tasks.find((x) => x.id === id)
     if (!t) return
-    t.done = !t.done
+    this.setTaskStatus(id, t.status === 'done' ? 'todo' : 'done')
+  }
+
+  setTaskStatus(id: string, status: TaskStatus): void {
+    const t = this.data.tasks.find((x) => x.id === id)
+    if (!t || !TASK_STATUSES.includes(status)) return
+    t.status = status
+    t.done = status === 'done'
+    this.save()
+  }
+
+  assignTask(id: string, agentId: string): void {
+    const t = this.data.tasks.find((x) => x.id === id)
+    if (!t) return
+    t.agentId = agentId
     this.save()
   }
 

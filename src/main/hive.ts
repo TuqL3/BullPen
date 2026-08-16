@@ -13,6 +13,13 @@ export type Message = {
 export type Delivery = { to: string; msg: Message }
 
 /**
+ * Reserved recipient: mail addressed here is a question for the human, not for
+ * another agent. It is not dead mail - it surfaces in the ask-me queue and the
+ * human's reply is routed back into the asker's inbox like any other message.
+ */
+export const HUMAN = 'you'
+
+/**
  * File-based agent mailbox.
  *
  *   <root>/agents/<id>/outbox/*.json   agent writes here
@@ -99,6 +106,12 @@ export class Hive extends EventEmitter {
         rmSync(path, { force: true })
 
         if (!msg) continue
+
+        if (msg.to === HUMAN) {
+          this.emit('question', msg)
+          continue
+        }
+
         const targets =
           msg.to === '*' ? agents.filter((a) => a !== from) : agents.includes(msg.to) ? [msg.to] : []
 

@@ -96,3 +96,50 @@ test('the file on disk is readable JSON, not an opaque blob', () => {
   assert.equal(raw.tasks[0].text, 'inspectable with cat')
   rmSync(root, { recursive: true, force: true })
 })
+
+test('a card moves between columns and done stays in step', () => {
+  const { board, root } = fresh()
+  const t = board.addTask('michael', 'ship it')!
+  assert.equal(t.status, 'todo')
+
+  board.setTaskStatus(t.id, 'doing')
+  assert.equal(board.tasks()[0].status, 'doing')
+  assert.equal(board.tasks()[0].done, false)
+
+  board.setTaskStatus(t.id, 'done')
+  assert.equal(board.tasks()[0].done, true, 'done must track the column, not drift from it')
+
+  board.setTaskStatus(t.id, 'nonsense' as never)
+  assert.equal(board.tasks()[0].status, 'done', 'an unknown column is ignored')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a board written before statuses existed still loads', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bullpen-board-'))
+  writeFileSync(
+    boardPath(root),
+    JSON.stringify({
+      tasks: [
+        { id: '1', agentId: 'michael', text: 'old open', done: false, createdAt: 1 },
+        { id: '2', agentId: 'michael', text: 'old closed', done: true, createdAt: 2 }
+      ],
+      triggers: []
+    })
+  )
+  const board = new Board(boardPath(root))
+  assert.deepEqual(
+    board.tasks().map((t) => t.status),
+    ['todo', 'done'],
+    'the column is derived from done rather than left undefined'
+  )
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a card can be reassigned', () => {
+  const { board, root } = fresh()
+  const t = board.addTask('michael', 'hand over')!
+  board.assignTask(t.id, 'dwight')
+  assert.equal(board.tasks('dwight').length, 1)
+  assert.equal(board.tasks('michael').length, 0)
+  rmSync(root, { recursive: true, force: true })
+})

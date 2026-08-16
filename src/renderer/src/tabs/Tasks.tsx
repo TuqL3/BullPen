@@ -2,99 +2,127 @@ import { useEffect, useState } from 'react'
 import { LABEL, MONO } from '../theme'
 import type { Agent } from '../store'
 
-type Task = { id: string; agentId: string; text: string; done: boolean; createdAt: number }
+type Status = 'todo' | 'doing' | 'blocked' | 'done'
+type Task = { id: string; agentId: string; text: string; status: Status; createdAt: number }
 
-/** A scratch list per agent, kept in ~/.bullpen/board.json so `cat` still works. */
-export function Tasks({ agent }: { agent: Agent | null }) {
+const COLUMNS: { key: Status; label: string; bar: string }[] = [
+  { key: 'todo', label: 'todo', bar: '#7fc7e8' },
+  { key: 'doing', label: 'doing', bar: '#e8cf6a' },
+  { key: 'blocked', label: 'blocked', bar: '#e8917f' },
+  { key: 'done', label: 'done', bar: '#7fd8a0' }
+]
+
+/** The board is the whole floor's, not one agent's - that is the point of it. */
+export function Tasks({ agents }: { agents: Agent[] }) {
   const [tasks, setTasks] = useState<Task[]>([])
   const [text, setText] = useState('')
+  const [owner, setOwner] = useState('')
 
   const refresh = (): void => {
-    if (!agent) return setTasks([])
-    window.bullpen.tasks(agent.id).then(setTasks)
+    window.bullpen.tasks().then((t) => setTasks(t as Task[]))
   }
-  useEffect(refresh, [agent?.id])
-
-  if (!agent) return <div style={S.empty}>Pick an agent to see its list.</div>
+  useEffect(refresh, [])
 
   const add = async (): Promise<void> => {
     if (!text.trim()) return
-    await window.bullpen.addTask(agent.id, text.trim())
+    await window.bullpen.addTask(owner || agents[0]?.id || '', text.trim())
     setText('')
     refresh()
   }
 
-  const open = tasks.filter((t) => !t.done)
-  const done = tasks.filter((t) => t.done)
+  const move = async (id: string, status: Status): Promise<void> => {
+    await window.bullpen.setTaskStatus(id, status)
+    refresh()
+  }
+
+  const nameOf = (id: string): string => agents.find((a) => a.id === id)?.name ?? id ?? 'unassigned'
 
   return (
     <div style={S.wrap}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+      <div style={S.addRow}>
         <input
           style={S.input}
           value={text}
-          placeholder={`what should ${agent.name} get to?`}
+          placeholder="add a card"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && add()}
         />
+        <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
+          <option value="">unassigned</option>
+          {agents.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
         <button style={S.btn} onClick={add}>
           add
         </button>
+        <span style={{ ...LABEL, color: 'var(--faint)', marginLeft: 'auto' }}>
+          {tasks.length} task{tasks.length === 1 ? '' : 's'}
+        </span>
       </div>
 
-      {tasks.length === 0 && <div style={S.empty}>Nothing on the list.</div>}
-
-      {open.map((t) => (
-        <Row key={t.id} task={t} onChange={refresh} />
-      ))}
-      {done.length > 0 && <div style={{ ...LABEL, color: 'var(--faint)', margin: '14px 0 4px' }}>done</div>}
-      {done.map((t) => (
-        <Row key={t.id} task={t} onChange={refresh} />
-      ))}
+      <div style={S.board}>
+        {COLUMNS.map((col) => {
+          const cards = tasks.filter((t) => t.status === col.key)
+          return (
+            <div key={col.key} style={S.column}>
+              <div style={{ ...S.colHead, background: col.bar }}>
+                <span style={{ ...LABEL, color: '#241f1a', fontWeight: 700 }}>{col.label}</span>
+                <span style={{ ...LABEL, color: '#241f1a' }}>{cards.length}</span>
+              </div>
+              <div style={S.cards}>
+                {cards.map((t) => (
+                  <div key={t.id} style={{ ...S.card, borderLeft: `3px solid ${col.bar}` }}>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <span style={{ flex: 1, lineHeight: 1.45 }}>{t.text}</span>
+                      <button
+                        style={S.linkBtn}
+                        title="delete card"
+                        onClick={async () => {
+                          await window.bullpen.removeTask(t.id)
+                          refresh()
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div style={S.cardFoot}>
+                      <span style={{ ...LABEL, color: 'var(--accent-ink)' }}>{nameOf(t.agentId)}</span>
+                      <span style={{ flex: 1 }} />
+                      {COLUMNS.filter((c) => c.key !== t.status).map((c) => (
+                        <button
+                          key={c.key}
+                          style={S.moveBtn}
+                          title={`move to ${c.label}`}
+                          onClick={() => move(t.id, c.key)}
+                        >
+                          {c.label[0]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {cards.length === 0 && <div style={S.emptyCol}>—</div>}
+              </div>
+            </div>
+          )
+        })}
+      </div>
 
       <p style={S.note}>
-        This list is yours, not the agent&apos;s: nothing here is sent anywhere. To make an agent act
-        on something, message it, or set a trigger.
+        Cards are yours: nothing here is sent to an agent on its own. Assigning names an owner for
+        your own tracking — to make an agent act, message it, dispatch through your clone, or set a
+        trigger.
       </p>
     </div>
   )
 }
 
-function Row({ task, onChange }: { task: Task; onChange: () => void }) {
-  return (
-    <div style={S.row}>
-      <input
-        type="checkbox"
-        checked={task.done}
-        onChange={async () => {
-          await window.bullpen.toggleTask(task.id)
-          onChange()
-        }}
-      />
-      <span
-        style={{
-          flex: 1,
-          color: task.done ? 'var(--faint)' : 'var(--ink)',
-          textDecoration: task.done ? 'line-through' : 'none'
-        }}
-      >
-        {task.text}
-      </span>
-      <button
-        style={S.linkBtn}
-        onClick={async () => {
-          await window.bullpen.removeTask(task.id)
-          onChange()
-        }}
-      >
-        ×
-      </button>
-    </div>
-  )
-}
-
 const S: Record<string, React.CSSProperties> = {
-  wrap: { padding: 14, overflowY: 'auto', height: '100%', font: `12px ${MONO}` },
+  wrap: { padding: 14, height: '100%', overflowY: 'auto', font: `12px ${MONO}` },
+  addRow: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 },
   input: {
     flex: 1,
     padding: '6px 9px',
@@ -102,6 +130,13 @@ const S: Record<string, React.CSSProperties> = {
     color: 'var(--ink)',
     border: '1px solid var(--line)',
     font: `12px ${MONO}`
+  },
+  select: {
+    padding: '6px',
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    font: `11px ${MONO}`
   },
   btn: {
     padding: '6px 12px',
@@ -111,12 +146,33 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     font: `11px ${MONO}`
   },
-  row: {
+  board: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
+  column: { minWidth: 0 },
+  colHead: {
     display: 'flex',
     alignItems: 'center',
-    gap: 10,
-    padding: '6px 2px',
-    borderTop: '1px solid var(--line)'
+    gap: 8,
+    padding: '5px 8px'
+  },
+  cards: { display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6 },
+  card: {
+    background: 'var(--panel)',
+    border: '1px solid var(--line)',
+    padding: '7px 8px',
+    fontSize: 11
+  },
+  cardFoot: { display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 },
+  moveBtn: {
+    width: 16,
+    height: 16,
+    lineHeight: '14px',
+    textAlign: 'center',
+    background: 'var(--sunk)',
+    color: 'var(--faint)',
+    border: '1px solid var(--line)',
+    cursor: 'pointer',
+    font: `9px ${MONO}`,
+    padding: 0
   },
   linkBtn: {
     background: 'transparent',
@@ -125,6 +181,6 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     font: `12px ${MONO}`
   },
-  note: { fontSize: 11, color: 'var(--faint)', marginTop: 18, lineHeight: 1.6 },
-  empty: { color: 'var(--faint)', padding: 18, fontSize: 11 }
+  emptyCol: { color: 'var(--faint)', textAlign: 'center', padding: 8 },
+  note: { fontSize: 11, color: 'var(--faint)', marginTop: 18, lineHeight: 1.6 }
 }

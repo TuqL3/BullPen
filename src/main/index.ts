@@ -1,11 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
-import { Board, boardPath } from './board.ts'
+import { ActivityLog } from './activity.ts'
+import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { readCtx, type Ctx } from './ctx.ts'
-import { Hive } from './hive.ts'
+import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
 
@@ -16,6 +17,14 @@ const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
 const board = new Board(boardPath(BULLPEN_HOME))
+const activity = new ActivityLog()
+
+/** Questions agents have addressed to the human, newest last. */
+const questions = new Map<string, Message & { id: string }>()
+let questionSeq = 0
+
+/** The god agent - the operator's own clone. Dispatch and answers route via it. */
+let godId: string | null = null
 
 let win: BrowserWindow | null = null
 
@@ -116,6 +125,7 @@ function wire(): void {
   // Auto-confirming anything must leave a trace the human can find later.
   ptys.on('trust', (id: string, sandbox: string) => {
     console.log(`[bullpen] auto-accepted workspace trust for ${id} at ${sandbox}`)
+    activity.push('trust', id, `auto-accepted workspace trust at ${sandbox}`)
     send('agent:trust', id, sandbox)
   })
   ptys.on('exit', (id: string, code: number) => {
@@ -123,14 +133,27 @@ function wire(): void {
     // next startup consider killing whatever inherited that pid.
     clearPid(join(AGENTS_HOME, id))
     meters.delete(id)
+    activity.push('exit', id, `${id} exited (code ${code})`)
     send('agent:exit', id, code)
   })
 
   hive.on('deliver', ({ to, msg }) => {
     ptys.deliver(to, msg.from, msg.subject, msg.body)
+    activity.push('message', msg.from, `${msg.from} → ${to}: ${msg.subject}`)
     send('hive:deliver', { to, msg })
   })
-  hive.on('dead', (msg) => send('hive:dead', msg))
+  hive.on('dead', (msg) => {
+    activity.push('dead', msg.from, `undeliverable to ${msg.to}: ${msg.subject}`)
+    send('hive:dead', msg)
+  })
+  hive.on('question', (msg: Message) => {
+    const q = { ...msg, id: `q${++questionSeq}` }
+    questions.set(q.id, q)
+    activity.push('question', msg.from, `${msg.from} asks you: ${msg.subject}`)
+    send('ask:pending', [...questions.values()])
+  })
+
+  activity.on('activity', (item) => send('activity:item', item))
   hive.start()
 
   approvals.on('status', (id: string, status: string) => {
@@ -142,7 +165,13 @@ function wire(): void {
   approvals.on('steer-queued', (id: string, note: string, depth: number) =>
     send('agent:steer-queued', id, note, depth)
   )
-  approvals.on('steer-delivered', (id: string, notes: string[]) => send('agent:steer-delivered', id, notes))
+  approvals.on('steer-delivered', (id: string, notes: string[]) => {
+    activity.push('steer', id, `steer delivered to ${id}: ${notes.join(' | ').slice(0, 80)}`)
+    send('agent:steer-delivered', id, notes)
+  })
+  approvals.on('pending', (p: Pending) =>
+    activity.push('approval', p.agentId, `${p.agentId} needs approval for ${p.toolName}: ${p.reason}`)
+  )
   approvals.on('pending', (p: Pending) => send('approvals:pending', p))
   approvals.on('resolved', (p: Pending, decision: string) => send('approvals:resolved', p, decision))
 
@@ -168,6 +197,7 @@ function wire(): void {
     spec = { ...spec, cwd }
     mkdirSync(spec.cwd, { recursive: true })
     hive.register(spec.id)
+    activity.push('spawn', spec.id, `spawned ${spec.id} in ${cwd}`)
     approvals.setSandbox(spec.id, spec.cwd)
 
     const agentHome = join(AGENTS_HOME, spec.id)
@@ -206,11 +236,80 @@ function wire(): void {
     if (!ptys.isRunning(t.agentId)) return
     ptys.write(t.agentId, t.prompt.replace(/\r?\n/g, ' ') + '\r')
     console.log(`[bullpen] trigger fired for ${t.agentId}: ${t.prompt.slice(0, 60)}`)
+    activity.push('trigger', t.agentId, `scheduled prompt fired: ${t.prompt.slice(0, 80)}`)
     send('agent:trigger-fired', t.agentId, t.prompt)
   })
 
   ipcMain.handle('agent:ctx', (_e, id: string) => currentCtx(id))
   ipcMain.handle('agent:cost', (_e, id: string) => currentCost(id))
+  ipcMain.handle('activity:list', (_e, limit?: number) => activity.list(limit))
+
+  ipcMain.handle('ask:list', () => [...questions.values()])
+  ipcMain.handle('ask:answer', (_e, qid: string, answer: string) => {
+    const q = questions.get(qid)
+    if (!q) return false
+    questions.delete(qid)
+    // The reply travels back through the hive, so the agent receives it exactly
+    // as it receives any other message - no second delivery mechanism.
+    hive.send({ from: HUMAN, to: q.from, subject: `re: ${q.subject}`, body: answer })
+    activity.push('answer', HUMAN, `you answered ${q.from}: ${q.subject}`)
+    send('ask:pending', [...questions.values()])
+    return true
+  })
+  ipcMain.handle('ask:dismiss', (_e, qid: string) => {
+    questions.delete(qid)
+    send('ask:pending', [...questions.values()])
+    return true
+  })
+
+  ipcMain.handle('agent:setGod', (_e, id: string) => {
+    godId = id
+    return godId
+  })
+
+  /**
+   * Dispatch: hand a request to the god agent's own prompt. It is the god that
+   * decomposes and assigns - Bullpen does not invent a plan of its own.
+   */
+  ipcMain.handle('agent:dispatch', (_e, text: string, owner: string) => {
+    const target = godId && ptys.isRunning(godId) ? godId : null
+    if (!target) return 'no god agent is running'
+    const brief =
+      owner && owner !== 'decide'
+        ? `Dispatch: ${text.replace(/\r?\n/g, ' ')} — assign this to ${owner}.`
+        : `Dispatch: ${text.replace(/\r?\n/g, ' ')} — decide who should own it and assign it.`
+    ptys.write(target, brief + '\r')
+    activity.push('message', HUMAN, `you dispatched via ${target}: ${text.slice(0, 80)}`)
+    return null
+  })
+
+  /** Plain substring search over the hive and the board - no index, no server. */
+  ipcMain.handle('search:text', (_e, query: string) => {
+    const q = query.trim().toLowerCase()
+    if (q.length < 2) return []
+    const hits: { where: string; text: string }[] = []
+    for (const t of board.tasks()) {
+      if (t.text.toLowerCase().includes(q)) hits.push({ where: `task · ${t.status}`, text: t.text })
+    }
+    for (const t of board.triggers()) {
+      if (t.prompt.toLowerCase().includes(q)) hits.push({ where: `trigger · ${t.agentId}`, text: t.prompt })
+    }
+    for (const item of activity.list(2000)) {
+      if (item.text.toLowerCase().includes(q)) hits.push({ where: `activity · ${item.kind}`, text: item.text })
+    }
+    for (const id of hive.list()) {
+      for (const msg of hive.peekInbox(id)) {
+        const blob = `${msg.subject} ${msg.body}`
+        if (blob.toLowerCase().includes(q)) hits.push({ where: `inbox · ${id}`, text: blob.slice(0, 300) })
+      }
+    }
+    return hits.slice(0, 200)
+  })
+
+  ipcMain.handle('board:setTaskStatus', (_e, id: string, status: TaskStatus) =>
+    board.setTaskStatus(id, status)
+  )
+  ipcMain.handle('board:assignTask', (_e, id: string, agentId: string) => board.assignTask(id, agentId))
   ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
   ipcMain.handle('board:addTask', (_e, id: string, text: string) => board.addTask(id, text))
   ipcMain.handle('board:toggleTask', (_e, id: string) => board.toggleTask(id))

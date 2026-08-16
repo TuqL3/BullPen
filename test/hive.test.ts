@@ -82,3 +82,32 @@ test('route is idempotent - a delivered message is not re-delivered', () => {
   assert.equal(hive.peekInbox('dwight').length, 1, 'must not duplicate on re-route')
   rmSync(root, { recursive: true, force: true })
 })
+
+test('mail to the human is a question, not dead mail', () => {
+  // The ask-me queue is built on this: an agent addresses `you`, and the
+  // message must not be dead-lettered just because no such agent exists.
+  const { hive, root } = fresh()
+  hive.register('michael')
+
+  const questions: unknown[] = []
+  const dead: unknown[] = []
+  hive.on('question', (m) => questions.push(m))
+  hive.on('dead', (m) => dead.push(m))
+
+  hive.send({ from: 'michael', to: 'you', subject: 'which variant?', body: 'a, b or c' })
+  const made = hive.route()
+
+  assert.equal(made.length, 0, 'nothing is delivered to an agent')
+  assert.equal(dead.length, 0, 'and it is not dead mail')
+  assert.equal(questions.length, 1)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('an answer routes back to the asker like any other message', () => {
+  const { hive, root } = fresh()
+  hive.register('michael')
+  hive.send({ from: 'you', to: 'michael', subject: 'answer', body: 'pick b' })
+  hive.route()
+  assert.equal(hive.drainInbox('michael')[0].body, 'pick b')
+  rmSync(root, { recursive: true, force: true })
+})
