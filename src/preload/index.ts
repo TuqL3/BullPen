@@ -59,6 +59,10 @@ const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void): (()
 const api = {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDir'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  minimize: () => ipcRenderer.invoke('window:minimize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  /** macOS keeps its native traffic lights; everywhere else we draw our own. */
+  isMac: process.platform === 'darwin',
   spawn: (spec: { id: string; cwd: string; cmd?: string; args?: string[]; cols?: number; rows?: number }) =>
     ipcRenderer.invoke('agent:spawn', spec),
   listAgents: () => ipcRenderer.invoke('agent:list'),

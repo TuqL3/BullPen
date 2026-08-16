@@ -317,6 +317,12 @@ function wire(): void {
     publishFloor(BULLPEN_HOME, agents, Date.now())
   )
 
+  // Everywhere but macOS the frame is dropped, so these are the only window
+  // controls there are - without them the window cannot be minimised or closed
+  // except through the desktop's own shortcuts.
+  ipcMain.handle('window:minimize', () => win?.minimize())
+  ipcMain.handle('window:close', () => win?.close())
+
   ipcMain.handle('window:toggleMaximize', () => {
     if (!win) return
     win.isMaximized() ? win.unmaximize() : win.maximize()

@@ -507,7 +507,13 @@ export function CtxMeter({ ctx }: { ctx?: Agent['ctx'] }) {
  * Inline SVG, not font glyphs. ☾/⛶ and friends fall back to tofu in the
  * monospace faces this UI uses - that was a real defect, not a preference.
  */
-function Icon({ name, size = 13 }: { name: 'floor' | 'sun' | 'moon' | 'full'; size?: number }) {
+function Icon({
+  name,
+  size = 13
+}: {
+  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close'
+  size?: number
+}) {
   const common = {
     width: size,
     height: size,
@@ -539,6 +545,18 @@ function Icon({ name, size = 13 }: { name: 'floor' | 'sun' | 'moon' | 'full'; si
         <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2 3.1 3.1" />
       </svg>
     )
+  if (name === 'min')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M2.5 8h11" />
+      </svg>
+    )
+  if (name === 'close')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
+      </svg>
+    )
   return (
     <svg {...common} aria-hidden>
       <path d="M6 1.5H1.5V6M10 1.5h4.5V6M10 14.5h4.5V10M6 14.5H1.5V10" />
@@ -560,7 +578,7 @@ function TitleBar({
   return (
     <div style={S.titlebar}>
       {/* Leaves room for the macOS traffic lights, which stay native. */}
-      <div style={{ width: 72 }} />
+      <div style={{ width: window.bullpen.isMac ? 72 : 14 }} />
       <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 11, fontWeight: 700 }}>Bullpen</div>
       <div style={{ flex: 1 }} />
       <button
@@ -583,6 +601,18 @@ function TitleBar({
       >
         <Icon name={mode === 'light' ? 'moon' : 'sun'} />
       </button>
+      {/* On macOS the native traffic lights already do all three, and drawing
+          a second set beside them is the wrong thing everywhere. */}
+      {!window.bullpen.isMac && (
+        <button
+          title="minimise"
+          aria-label="minimise window"
+          style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          onClick={() => window.bullpen.minimize()}
+        >
+          <Icon name="min" />
+        </button>
+      )}
       <button
         title="maximise"
         aria-label="maximise window"
@@ -591,6 +621,16 @@ function TitleBar({
       >
         <Icon name="full" />
       </button>
+      {!window.bullpen.isMac && (
+        <button
+          title="close"
+          aria-label="close window"
+          style={{ ...S.iconBtn, ...S.closeBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          onClick={() => window.bullpen.closeWindow()}
+        >
+          <Icon name="close" />
+        </button>
+      )}
     </div>
   )
 }
@@ -715,6 +755,9 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     padding: '4px 6px'
   },
+  // Closing is the one titlebar action with no undo, so it does not look like
+  // the toggles beside it.
+  closeBtn: { color: 'var(--danger)', marginRight: 4 },
   body: { display: 'grid', gridTemplateColumns: '204px 1fr', minHeight: 0 },
   // Floor on the left, command centre on the right - the windowed layout.
   bodyWithFloor: { display: 'grid', gridTemplateColumns: '204px 1.35fr 1fr', minHeight: 0 },
