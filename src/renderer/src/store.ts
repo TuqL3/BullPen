@@ -50,8 +50,6 @@ type State = {
   mail: MailEvent[]
   /** agentId -> epoch ms of the last pty output, throttled. */
   lastSeen: Record<string, number>
-  /** agentId -> messages typed while that agent was busy, oldest first. */
-  queue: Record<string, string[]>
   /** agentId -> steer notes accepted by main but not yet delivered. */
   steers: Record<string, string[]>
   selected: string | null
@@ -61,11 +59,6 @@ type State = {
   addApproval: (a: Approval) => void
   removeApproval: (id: string) => void
   addMail: (m: MailEvent) => void
-  enqueue: (agentId: string, text: string) => void
-  /** Remove and return the oldest queued message, or null if there is none. */
-  shift: (agentId: string) => string | null
-  removeQueued: (agentId: string, index: number) => void
-  clearQueue: (agentId: string) => void
   setSteers: (agentId: string, notes: string[]) => void
   touch: (agentId: string, ts: number) => void
 }
@@ -80,7 +73,6 @@ export const useStore = create<State>((set, get) => ({
   approvals: [],
   mail: [],
   lastSeen: {},
-  queue: {},
   steers: {},
   selected: null,
 
@@ -132,26 +124,6 @@ export const useStore = create<State>((set, get) => ({
   // Bounded: an idle overnight run must not grow this array forever.
   addMail: (m) => set((s) => ({ mail: [...s.mail.slice(-199), m] })),
 
-  enqueue: (agentId, text) =>
-    set((s) => ({ queue: { ...s.queue, [agentId]: [...(s.queue[agentId] ?? []), text] } })),
-
-  // Not a zustand action returning state: the caller needs the message itself
-  // to write it to the pty, and it must leave the queue in the same step so a
-  // second idle event cannot send it twice.
-  shift: (agentId) => {
-    const list = get().queue[agentId] ?? []
-    if (list.length === 0) return null
-    const [head, ...rest] = list
-    set((s) => ({ queue: { ...s.queue, [agentId]: rest } }))
-    return head
-  },
-
-  removeQueued: (agentId, index) =>
-    set((s) => ({
-      queue: { ...s.queue, [agentId]: (s.queue[agentId] ?? []).filter((_, i) => i !== index) }
-    })),
-
-  clearQueue: (agentId) => set((s) => ({ queue: { ...s.queue, [agentId]: [] } })),
 
   setSteers: (agentId, notes) => set((s) => ({ steers: { ...s.steers, [agentId]: notes } })),
 

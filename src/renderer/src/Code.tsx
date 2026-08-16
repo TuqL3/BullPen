@@ -9,7 +9,7 @@ import { python } from '@codemirror/lang-python'
 import { Vim, getCM, vim } from '@replit/codemirror-vim'
 import { LABEL, MONO } from './theme'
 import type { Agent } from './store'
-import type { CodeEdit, CodeEntry } from '../../preload/index'
+import type { CodeEdit, CodeEntry, GitChanges } from '../../preload/index'
 
 export type OpenFile = {
   agentId: string
@@ -18,6 +18,8 @@ export type OpenFile = {
   text: string
   truncated: boolean
   binary: boolean
+  /** Unified diff against HEAD, when the workspace is a git repository. */
+  diff?: string
 }
 
 /**
@@ -28,7 +30,12 @@ export type OpenFile = {
  * different columns.
  */
 export async function openFile(agent: Agent, path: string): Promise<OpenFile | string> {
-  const res = await window.bullpen.codeRead(agent.cwd, path)
+  // Both at once: the panel offers file and diff side by side, and fetching the
+  // diff only when that tab is clicked makes the first click feel broken.
+  const [res, d] = await Promise.all([
+    window.bullpen.codeRead(agent.cwd, path),
+    window.bullpen.gitDiff(agent.cwd, path)
+  ])
   if (res.error) return res.error
   return {
     agentId: agent.id,
@@ -36,7 +43,8 @@ export async function openFile(agent: Agent, path: string): Promise<OpenFile | s
     path,
     text: res.text ?? '',
     truncated: !!res.truncated,
-    binary: !!res.binary
+    binary: !!res.binary,
+    diff: d.error ? undefined : d.text
   }
 }
 
@@ -57,26 +65,70 @@ export function WorkTree({
   onOpen: (path: string) => void
 }) {
   const [edits, setEdits] = useState<CodeEdit[]>([])
+  const [git, setGit] = useState<GitChanges | null>(null)
   const [showTree, setShowTree] = useState(true)
-  const [showRecent, setShowRecent] = useState(true)
+  const [showRecent, setShowRecent] = useState(false)
+  const [showChanges, setShowChanges] = useState(true)
 
-  const refreshEdits = (): void => {
-    if (!agent) return setEdits([])
+  const refresh = (): void => {
+    if (!agent) {
+      setEdits([])
+      setGit(null)
+      return
+    }
     window.bullpen.codeEdits(agent.id).then(setEdits)
+    window.bullpen.gitChanges(agent.cwd).then(setGit)
   }
-  useEffect(refreshEdits, [agent?.id])
+  useEffect(refresh, [agent?.id, agent?.cwd])
 
-  // The list is only useful if it keeps up with the agent it is watching.
+  // The lists are only useful if they keep up with the agent they watch. The
+  // hook fires on every write, which is also exactly when git has more to say.
   useEffect(() => {
     return window.bullpen.onEdited((id) => {
-      if (id === agent?.id) refreshEdits()
+      if (id === agent?.id) refresh()
     })
   }, [agent?.id])
+
+  // A Bash command, a rebase or an editor outside Bullpen changes files without
+  // any hook firing, so the list also refreshes on a slow clock.
+  useEffect(() => {
+    const t = setInterval(refresh, 5000)
+    return () => clearInterval(t)
+  }, [agent?.id, agent?.cwd])
 
   if (!agent) return <div style={S.empty}>Pick an agent to see what it is working on.</div>
 
   return (
     <div style={S.side}>
+      <Section
+        title={`changes${git?.branch ? ` · ${git.branch}` : ''}`}
+        open={showChanges}
+        onToggle={() => setShowChanges(!showChanges)}
+      >
+        {!git ? (
+          <div style={S.hint}>Reading…</div>
+        ) : !git.repo ? (
+          <div style={S.hint}>Not a git repository — no baseline to compare against.</div>
+        ) : git.error ? (
+          <div style={S.hint}>{git.error}</div>
+        ) : git.changes.length === 0 ? (
+          <div style={S.hint}>Working tree clean.</div>
+        ) : (
+          git.changes.map((c) => (
+            <button
+              key={c.path}
+              style={{ ...S.row, ...(openPath === c.path ? S.rowActive : null) }}
+              title={`${c.code} ${c.path}`}
+              onClick={() => onOpen(c.path)}
+            >
+              <span style={{ ...S.code, color: STATUS_COLOUR(c.code) }}>{c.code.trim() || 'M'}</span>
+              <span style={S.rowName}>{c.path}</span>
+              {c.staged && <span style={S.rowMeta}>staged</span>}
+            </button>
+          ))
+        )}
+      </Section>
+
       <Section title="recently touched" open={showRecent} onToggle={() => setShowRecent(!showRecent)}>
         {edits.length === 0 ? (
           <div style={S.hint}>Nothing yet — this fills in as {agent.name} writes files.</div>
@@ -113,8 +165,16 @@ export function FilePanel({
   note: string
 }) {
   const [dirty, setDirty] = useState(false)
+  const [view, setView] = useState<'file' | 'diff'>('file')
 
   useEffect(() => setDirty(false), [file?.agentId, file?.path])
+
+  // A file with no diff has nothing to show on that tab, and leaving the panel
+  // on it after opening an unchanged file looks like the diff failed.
+  const hasDiff = Boolean(file?.diff?.trim())
+  useEffect(() => {
+    if (!hasDiff) setView('file')
+  }, [hasDiff, file?.path])
 
   return (
     <div style={S.main}>
@@ -122,12 +182,36 @@ export function FilePanel({
         <span style={{ ...LABEL, color: 'var(--ink)' }}>{file?.path ?? 'no file open'}</span>
         {dirty && <span style={{ ...LABEL, color: 'var(--warn)' }}>unsaved</span>}
         <span style={{ flex: 1 }} />
-        <span style={{ ...LABEL, color: 'var(--faint)' }}>vim · :w saves</span>
+        {file && (
+          <>
+            <button
+              style={{ ...S.tab, ...(view === 'file' ? S.tabOn : null) }}
+              onClick={() => setView('file')}
+            >
+              file
+            </button>
+            <button
+              style={{
+                ...S.tab,
+                ...(view === 'diff' ? S.tabOn : null),
+                ...(hasDiff ? null : { opacity: 0.4, cursor: 'default' })
+              }}
+              title={hasDiff ? 'changes against HEAD' : 'unchanged since the last commit'}
+              onClick={() => hasDiff && setView('diff')}
+            >
+              diff
+            </button>
+          </>
+        )}
+        <span style={{ ...LABEL, color: 'var(--faint)' }}>
+          {view === 'diff' ? 'read-only' : 'vim · :w saves'}
+        </span>
       </div>
       {note && <div style={S.note}>{note}</div>}
       {!file && <div style={S.empty}>Open a file from the work tree.</div>}
       {file?.binary && <div style={S.empty}>{file.path} is binary.</div>}
-      {file && !file.binary && (
+      {file && view === 'diff' && <Diff text={file.diff ?? ''} />}
+      {file && !file.binary && view === 'file' && (
         <Editor
           key={`${file.agentId}:${file.path}`}
           path={file.path}
@@ -141,6 +225,35 @@ export function FilePanel({
       )}
     </div>
   )
+}
+
+/**
+ * A unified diff, coloured per line.
+ *
+ * Plain markup rather than a second CodeMirror: a diff is read, not edited, and
+ * the whole rendering is a colour per line prefix. A diff language mode would be
+ * another dependency to do exactly this.
+ */
+function Diff({ text }: { text: string }) {
+  if (!text.trim()) return <div style={S.empty}>No changes against HEAD.</div>
+  return (
+    <div style={S.diff}>
+      {text.split('\n').map((line, i) => (
+        <div key={i} style={{ color: diffColour(line) }}>
+          {line || ' '}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+const diffColour = (line: string): string => {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'var(--faint)'
+  if (line.startsWith('@@')) return 'var(--accent-ink)'
+  if (line.startsWith('+')) return 'var(--ok)'
+  if (line.startsWith('-')) return 'var(--danger)'
+  if (line.startsWith('diff ') || line.startsWith('index ')) return 'var(--faint)'
+  return 'var(--muted)'
 }
 
 function Section({
@@ -325,6 +438,15 @@ Vim.defineEx('wq', 'wq', () => saveCurrent?.())
 // ex commands above are registered against.
 void getCM
 
+/** Added, deleted and modified must not all read the same at a glance. */
+const STATUS_COLOUR = (code: string): string => {
+  const c = code.trim()
+  if (c === '??' || c.includes('A')) return 'var(--ok)'
+  if (c.includes('D')) return 'var(--danger)'
+  if (c.includes('R') || c.includes('C')) return 'var(--accent-ink)'
+  return 'var(--warn)'
+}
+
 const base = (p: string): string => p.split('/').pop() ?? p
 
 /** Hook payloads carry absolute paths; the panels work in workspace-relative ones. */
@@ -379,6 +501,29 @@ const S: Record<string, React.CSSProperties> = {
   rowActive: { background: 'var(--sunk)', color: 'var(--ink)' },
   rowName: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   rowMeta: { color: 'var(--faint)', fontSize: 10 },
+  code: { width: 18, flexShrink: 0, fontSize: 10, fontWeight: 700 },
+  diff: {
+    flex: 1,
+    minHeight: 0,
+    overflow: 'auto',
+    margin: 0,
+    padding: '6px 10px',
+    font: `12px ${MONO}`,
+    lineHeight: 1.5,
+    whiteSpace: 'pre'
+  },
+  tab: {
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    color: 'var(--faint)',
+    cursor: 'pointer',
+    padding: '2px 4px',
+    font: `10px ${MONO}`,
+    letterSpacing: '0.09em',
+    textTransform: 'uppercase'
+  },
+  tabOn: { color: 'var(--ink)', borderBottomColor: 'var(--accent)' },
   editor: { flex: 1, minHeight: 0, overflow: 'hidden' },
   note: {
     padding: '4px 10px',

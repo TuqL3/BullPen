@@ -72,7 +72,7 @@ const DOT: Record<string, string> = {
 const lastTouch: Record<string, number> = {}
 
 export default function App() {
-  const { agents, approvals, mail, queue, steers, lastSeen, selected, select } = useStore()
+  const { agents, approvals, mail, steers, lastSeen, selected, select } = useStore()
   const store = useStore.getState
 
   const [mode, setMode] = useState<Mode>('light')
@@ -82,7 +82,6 @@ export default function App() {
   // Null when closed; otherwise the fields the wizard opens with. Hiring the
   // second agent into a project should not mean re-answering where it lives.
   const [adding, setAdding] = useState<Partial<Draft> | null>(null)
-  const [draft, setDraft] = useState('')
   const [steerText, setSteerText] = useState('')
   const [moveError, setMoveError] = useState('')
   // Set on first run only: the suggested workspace, awaiting an answer.
@@ -110,16 +109,7 @@ export default function App() {
       window.bullpen.onExit((id, code) =>
         store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
       ),
-      window.bullpen.onStatus((id, status) => {
-        store().upsertAgent({ id, activity: status })
-        // One message per idle transition, not the whole backlog at once:
-        // sending it flips the agent back to working, and the next Stop pulls
-        // the following one.
-        if (status === 'idle') {
-          const next = store().shift(id)
-          if (next) window.bullpen.write(id, next.replace(/\n/g, ' ') + '\r')
-        }
-      }),
+      window.bullpen.onStatus((id, status) => store().upsertAgent({ id, activity: status })),
       window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
       window.bullpen.onCost((id, cost) => store().upsertAgent({ id, cost })),
       window.bullpen.onSteerQueued((id) => {
@@ -294,15 +284,6 @@ export default function App() {
   }
 
   const busy = current?.status === 'running' && current.activity === 'working'
-
-  const send = (): void => {
-    if (!selected || !draft.trim()) return
-    // Typing into a busy agent's prompt drops text into the middle of its turn,
-    // so it waits for the Stop hook instead. Use steer to reach it right now.
-    if (busy) store().enqueue(selected, draft.trim())
-    else window.bullpen.write(selected, draft.replace(/\n/g, ' ') + '\r')
-    setDraft('')
-  }
 
   /**
    * Michael's workspace is a setting, not a fixture. The CLI reads its working
@@ -492,51 +473,6 @@ export default function App() {
             {tab === 'workers' && <Workers agents={agents} onSelect={select} />}
           </section>
 
-          {tab === 'terminal' && selected && (
-            <footer>
-              {(queue[selected]?.length ?? 0) > 0 && (
-                <div style={S.queue}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <span style={{ ...LABEL, color: 'var(--ink)' }}>queue</span>
-                    <span style={{ ...LABEL, color: 'var(--warn)' }}>{queue[selected].length}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1 }}>
-                      {selected} is busy — sent one at a time as it frees up
-                    </span>
-                    <button style={S.linkBtn} onClick={() => store().clearQueue(selected)}>
-                      clear all
-                    </button>
-                  </div>
-                  {queue[selected].map((q, i) => (
-                    <div key={i} style={S.queueRow}>
-                      <span style={{ color: 'var(--faint)' }}>{i + 1}.</span>
-                      <span style={{ flex: 1 }}>{q}</span>
-                      <button style={S.linkBtn} onClick={() => store().removeQueued(selected, i)}>
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={S.composer}>
-                <textarea
-                  style={S.draft}
-                  rows={2}
-                  value={draft}
-                  placeholder={busy ? `${selected} is busy — queue a message` : `message ${selected}`}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      send()
-                    }
-                  }}
-                />
-                <button style={{ ...S.btn, ...S.btnPrimary }} onClick={send}>
-                  {busy ? 'queue' : 'send →'}
-                </button>
-              </div>
-            </footer>
-          )}
         </main>
     )
   }
@@ -1173,7 +1109,15 @@ const S: Record<string, React.CSSProperties> = {
     padding: 10,
     overflowY: 'auto'
   },
-  main: { display: 'grid', gridTemplateRows: 'auto auto auto 1fr auto', minHeight: 0, minWidth: 0 },
+  // flex:1 because the pane body is a flex column - without it the command
+  // centre was sized by its content and left dead space beneath the terminal.
+  main: {
+    display: 'grid',
+    gridTemplateRows: 'auto auto auto 1fr',
+    flex: 1,
+    minHeight: 0,
+    minWidth: 0
+  },
   header: {
     display: 'flex',
     alignItems: 'center',
@@ -1205,21 +1149,6 @@ const S: Record<string, React.CSSProperties> = {
     font: `10px ${MONO}`,
     textTransform: 'uppercase',
     letterSpacing: '0.12em'
-  },
-  queue: {
-    padding: '10px 14px',
-    borderTop: '1px solid var(--line)',
-    background: 'var(--sunk)',
-    maxHeight: 150,
-    overflowY: 'auto'
-  },
-  queueRow: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: 8,
-    padding: '3px 0',
-    fontSize: 11,
-    color: 'var(--muted)'
   },
   // Ten tabs in a pane that shrinks when the floor is open. Wrapping onto a
   // second row keeps every tab visible; a horizontal scroller hid the last ones
@@ -1258,23 +1187,6 @@ const S: Record<string, React.CSSProperties> = {
     letterSpacing: 0
   },
   panel: { minHeight: 0, overflow: 'hidden', background: 'var(--term-bg)' },
-  composer: {
-    display: 'flex',
-    gap: 8,
-    alignItems: 'flex-end',
-    padding: 10,
-    borderTop: '1px solid var(--line)',
-    background: 'var(--panel)'
-  },
-  draft: {
-    flex: 1,
-    resize: 'none',
-    padding: 8,
-    background: 'var(--sunk)',
-    color: 'var(--ink)',
-    border: '1px solid var(--line)',
-    font: `12px ${MONO}`
-  },
   input: {
     width: '100%',
     boxSizing: 'border-box',

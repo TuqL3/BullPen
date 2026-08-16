@@ -31,6 +31,8 @@ export type FloorAgent = {
   costUsd?: number
 }
 
+export type GitChange = { path: string; code: string; staged: boolean; untracked: boolean }
+export type GitChanges = { repo: boolean; changes: GitChange[]; branch?: string; error?: string }
 export type CodeEntry = { name: string; path: string; dir: boolean; size: number }
 export type CodeEdit = { path: string; ts: number; tool: string }
 
@@ -135,6 +137,9 @@ const api = {
   codeWrite: (root: string, rel: string, text: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('code:write', root, rel, text),
   codeEdits: (agentId: string): Promise<CodeEdit[]> => ipcRenderer.invoke('code:edits', agentId),
+  gitChanges: (root: string): Promise<GitChanges> => ipcRenderer.invoke('git:changes', root),
+  gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
+    ipcRenderer.invoke('git:diff', root, rel),
   onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
   layout: (): Promise<unknown> => ipcRenderer.invoke('layout:get'),
   saveLayout: (layout: unknown): Promise<boolean> => ipcRenderer.invoke('layout:set', layout),

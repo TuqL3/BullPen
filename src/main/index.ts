@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, write as writeFile } from './code.ts'
 import { checkWorkspace, readConfig, writeConfig } from './config.ts'
+import { changes as gitChanges, diff as gitDiff } from './git.ts'
 import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
@@ -136,6 +137,10 @@ function createWindow(): void {
       nodeIntegration: false
     }
   })
+  // Opened maximised: the floor plan is four panels wide, and at the default
+  // 1400x900 the first thing anyone does is drag the window bigger.
+  win.maximize()
+
   // Drop the reference as soon as it dies, so send() short-circuits on null
   // rather than repeatedly probing a corpse.
   win.on('closed', () => {
@@ -349,6 +354,8 @@ function wire(): void {
     }
   })
   ipcMain.handle('code:edits', (_e, agentId: string) => edits.get(agentId) ?? [])
+  ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
+  ipcMain.handle('git:diff', (_e, root: string, rel: string) => gitDiff(root, rel))
 
   ipcMain.handle('layout:get', () => readConfig(BULLPEN_HOME).layout ?? null)
   ipcMain.handle('layout:set', (_e, layout: unknown) => {
