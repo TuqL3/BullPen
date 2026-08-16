@@ -11,7 +11,7 @@
     "start": "electron-vite preview",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "verify:hook": "node --experimental-strip-types scripts/verify-hook.ts",
-    "postinstall": "electron-rebuild -f -w node-pty"
+    "postinstall": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty"
   },
   "dependencies": {
     "node-pty": "^1.0.0"
