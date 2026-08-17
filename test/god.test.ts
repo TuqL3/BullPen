@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { floorPath, publishFloor, writeBriefing, type FloorAgent } from '../src/main/god.ts'
+import { floorPath, publishFloor, workerBrief, writeBriefing, type FloorAgent } from '../src/main/god.ts'
 
 const home = (): string => mkdtempSync(join(tmpdir(), 'bp-god-'))
 
@@ -67,4 +67,17 @@ test('the briefing is written once - after that the file is the operator to edit
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('a hired agent is told who it reports to, and how', () => {
+  const brief = workerBrief('morgan', 'michael')
+  // The three things that make a report possible at all: who it is, where the
+  // outbox is, and the exact shape of the message. Agents finished work and
+  // said so only in their own terminal before this existed.
+  assert.match(brief, /"from": "morgan"/)
+  assert.match(brief, /"to": "michael"/)
+  assert.match(brief, /\$BULLPEN_MAILBOX\/outbox/)
+  // Blocked and refused are reports too, or the floor only ever hears the
+  // happy path and silence means two different things.
+  assert.match(brief, /blocked/)
 })

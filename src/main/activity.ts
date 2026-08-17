@@ -12,6 +12,8 @@ export type ActivityKind =
   | 'approval'
   /** An agent finished a turn it was working on, and what it said. */
   | 'done'
+  /** The human threw away a file's changes from the review panel. */
+  | 'discard'
   | 'dead'
 
 export type Activity = {

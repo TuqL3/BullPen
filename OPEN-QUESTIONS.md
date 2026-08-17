@@ -224,12 +224,33 @@ does not exist yet.
 | Circuit breaker (steer → constrain → stop) | an agent actually runs away |
 | Semantic memory | agents visibly repeat work across sessions |
 
+## Known, decided against fixing
+
+- **Theme only reaches an agent at spawn.** Bullpen writes `theme` into each
+  agent's settings file, and switching light/dark rewrites it for every agent
+  already running - but the Claude Code CLI reads it once at startup, verified:
+  an agent started 11:55 kept painting light after the file said `dark` at 13:36.
+  A running agent therefore keeps the theme it was born with, so its prompt block
+  can be a light band in a dark Bullpen. Restarting the CLI is the only thing
+  that would change it, and losing a live session to recolour it is a bad trade -
+  new agents match, that is enough. (Decided 2026-08-17.)
+
 ## Distribution — unresolved, costs money
 
-- `node-pty` is native: no cross-compiling. Shipping macOS/Windows/Linux needs a
-  GitHub Actions matrix. Only Linux is testable from this WSL2 machine.
+- Packaging is wired up: `npm run build:mac` / `npm run build:win`, config in
+  `electron-builder.yml`. Both cross-build from one macOS machine — `node-pty`
+  1.1 is node-api and ships its own Windows prebuilds, so `npmRebuild: false`
+  and no Windows toolchain is needed.
+- **Assumed, not verified:** the Windows package was never launched on Windows.
+  Only the macOS arm64 package was smoke-tested (`node-pty` spawns from inside
+  the asar). If Windows is wrong, it fails at `loadNativeModule`.
+- **Assumed:** the fd-leak patch (`scripts/patch-node-pty.mjs`) compiles only
+  into `build/Release`, which is arm64. An Intel Mac falls back to the unpatched
+  `prebuilds/darwin-x64`, so the descriptor leak returns there. Windows never
+  needed the patch — it is guarded to the fork path.
 - macOS notarization needs Apple Developer, $99/yr, or Gatekeeper blocks the app.
 - Windows code signing cert, ~$100-400/yr, or SmartScreen warns on every install.
+- No app icon yet; both builds use the default Electron icon.
 
 None of this matters for personal use. All of it matters before selling.
 

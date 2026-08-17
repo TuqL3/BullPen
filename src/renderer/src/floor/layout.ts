@@ -27,6 +27,16 @@ export const DESK_ROWS = 4
 export const POD_COLS = 5
 export const MAX_ROWS = 24
 
+/**
+ * The widest the office is ever drawn, in pixels.
+ *
+ * The floor is a pixel grid with a column cap, so past this every extra pixel of
+ * panel is empty carpet. The column it lives in takes this as a ceiling: on a
+ * big monitor it stops here instead of stretching, and on a small one it still
+ * shrinks, because a ceiling is not a fixed width.
+ */
+export const FLOOR_MAX_W = MAX_COLS * TILE
+
 export type Cell =
   | 'floor'
   | 'rug'

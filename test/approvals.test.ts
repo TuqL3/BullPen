@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -137,6 +137,103 @@ test('blank steers are ignored', () => {
   a.steer('dwight', '   ')
   a.steer('dwight', '')
   assert.deepEqual(a.pendingSteers('dwight'), [])
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a write reaches "recently touched" - the hook is installed and the path is read out', async () => {
+  const { a, root, sandbox } = fresh()
+  const port = await a.start()
+  const settings = JSON.parse(readFileSync(a.installHook('dwight', join(root, 'agent')), 'utf8'))
+  assert.ok(settings.hooks.PostToolUse, 'without this subscription nothing ever reports a write')
+
+  const seen: { path: string; tool: string }[] = []
+  a.on('edit', (_id: string, path: string, tool: string) => seen.push({ path, tool }))
+  const tools: string[] = []
+  a.on('tool', (_id: string, tool: string, detail: string) => tools.push(`${tool} ${detail}`))
+
+  const file = join(sandbox, 'src/app.ts')
+  await fetch(`http://127.0.0.1:${port}/event?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      tool_input: { file_path: file }
+    })
+  })
+  assert.deepEqual(seen, [{ path: file, tool: 'Write' }])
+
+  // A Read is not a write, or the list would mean "recently looked at".
+  await fetch(`http://127.0.0.1:${port}/event?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: file }
+    })
+  })
+  assert.equal(seen.length, 1)
+
+  // A Read is not an edit, but it is still what the agent is doing - the
+  // monitor says so, which is the difference between "working" and "working on
+  // what". Both tool calls are reported, only one of them as a write.
+  assert.deepEqual(tools, [`Write ${file}`, `Read ${file}`])
+
+  a.stop()
+  rmSync(root, { recursive: true, force: true })
+})
+
+test("the agent's CLI is told which theme to draw in", async () => {
+  const { a, root } = fresh()
+  await a.start()
+  const read = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(a.installHook('dwight', join(root, 'agent')), 'utf8'))
+
+  // Without this the CLI takes the operator's ~/.claude theme - usually dark -
+  // and paints a black prompt block down a light terminal.
+  assert.equal(read().theme, 'light')
+  a.setTheme('dark')
+  assert.equal(read().theme, 'dark')
+
+  a.stop()
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('an agent stopped on its own question is reported, then cleared', async () => {
+  const { a, root } = fresh()
+  const port = await a.start()
+  const waiting: string[] = []
+  let answered = 0
+  a.on('waiting', (_id: string, asked: string) => waiting.push(asked))
+  a.on('answered', () => answered++)
+
+  // AskUserQuestion is allowed - Bullpen has nothing to decide - so before this
+  // it passed through silently and the agent read as "working" while blocked.
+  const res = await fetch(`http://127.0.0.1:${port}/hook?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify({
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'Which directory is project seo?' }] }
+    })
+  })
+  assert.equal((await res.json()).hookSpecificOutput.permissionDecision, 'allow')
+  assert.deepEqual(waiting, ['Which directory is project seo?'])
+  assert.equal(answered, 0, 'still waiting until the human answers in the terminal')
+
+  await fetch(`http://127.0.0.1:${port}/event?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'AskUserQuestion' })
+  })
+  assert.equal(answered, 1)
+
+  // A turn that ends without an answer must not leave the agent stuck as
+  // "waiting on you" forever.
+  await fetch(`http://127.0.0.1:${port}/event?token=${a.token}&agent=dwight`, {
+    method: 'POST',
+    body: JSON.stringify({ hook_event_name: 'Stop' })
+  })
+  assert.equal(answered, 2)
+
+  a.stop()
   rmSync(root, { recursive: true, force: true })
 })
 

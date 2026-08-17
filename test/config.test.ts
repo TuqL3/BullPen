@@ -32,6 +32,38 @@ test('a corrupt or empty config falls back to the default rather than throwing',
   }
 })
 
+test('a resized window survives a restart, and a nonsense one does not', () => {
+  const dir = home()
+  try {
+    writeConfig(dir, { window: { width: 1234, height: 987, x: 40, y: 80, maximized: true } })
+    assert.deepEqual(readConfig(dir).window, {
+      width: 1234,
+      height: 987,
+      x: 40,
+      y: 80,
+      maximized: true
+    })
+
+    // Position is all-or-nothing: half a coordinate cannot place a window.
+    writeFileSync(configPath(dir), JSON.stringify({ window: { width: 1400, height: 900, x: 10 } }))
+    assert.deepEqual(readConfig(dir).window, { width: 1400, height: 900 })
+
+    // A window too small to use, or one whose size is not a number, is dropped
+    // rather than restored - it would open unusable and look like a crash.
+    for (const bad of [
+      { width: 20, height: 20 },
+      { width: '1400', height: 900 },
+      { width: Number.NaN, height: 900 },
+      null
+    ]) {
+      writeFileSync(configPath(dir), JSON.stringify({ window: bad }))
+      assert.equal(readConfig(dir).window, undefined, JSON.stringify(bad))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('the two directories that would make a sandbox meaningless are refused', () => {
   const dir = home()
   try {

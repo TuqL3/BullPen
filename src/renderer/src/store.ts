@@ -17,6 +17,14 @@ export type Agent = {
   status: 'running' | 'exited'
   /** Set when a mail or approval arrives; drives the badge, and later the avatar. */
   activity: 'idle' | 'working' | 'blocked'
+  /** The last tool it finished, so a working agent can say what it is doing. */
+  doing?: { tool: string; detail: string; at: number }
+  /**
+   * The question the agent is stopped on inside its own terminal, if any.
+   * Distinct from an approval: Bullpen has nothing to decide here, the CLI is
+   * waiting on a keystroke and all the UI can do is say so.
+   */
+  asked?: string | null
   /** Avatar seed - the preset the human picked, not the id. */
   face: string
   /** Shirt colour override, so two agents sharing a face stay distinguishable. */

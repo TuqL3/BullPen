@@ -1,4 +1,4 @@
-import { faceFor, FACE_SIZE } from './avatar'
+import { faceFor, FACE_SIZE } from './roster'
 
 /**
  * SVG rather than canvas: no ref juggling, scales to any size, and

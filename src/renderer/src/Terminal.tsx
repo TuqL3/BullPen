@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
-import { Terminal as Xterm } from '@xterm/xterm'
+import { Terminal as Xterm, type ITheme } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import type { Mode } from './theme'
 
@@ -12,9 +12,61 @@ import type { Mode } from './theme'
 const terms = new Map<string, { term: Xterm; fit: FitAddon }>()
 let mode: Mode = 'light'
 
-const THEMES: Record<Mode, { background: string; foreground: string; cursor: string; selectionBackground: string }> = {
-  light: { background: '#ffffff', foreground: '#2a2a26', cursor: '#2a2a26', selectionBackground: '#f0e2b0' },
-  dark: { background: '#0c0d13', foreground: '#d9dce2', cursor: '#d9dce2', selectionBackground: '#31364a' }
+/**
+ * Background, foreground AND the 16 ANSI colours.
+ *
+ * Setting only the first two was the bug: xterm's stock palette is drawn for a
+ * dark terminal, so on the light background the CLI's yellows, cyans and its
+ * dim grey - which is `brightBlack`, and which it uses for most of its own
+ * chrome - came out too pale to read. Each mode gets colours picked against its
+ * own background instead.
+ */
+const THEMES: Record<Mode, ITheme> = {
+  light: {
+    background: '#ffffff',
+    foreground: '#2a2a26',
+    cursor: '#2a2a26',
+    selectionBackground: '#f0e2b0',
+    black: '#2a2a26',
+    red: '#b23b3b',
+    green: '#2f7a3f',
+    yellow: '#8a6200',
+    blue: '#1f5fa8',
+    magenta: '#8a3f8a',
+    cyan: '#12706e',
+    white: '#c9c6bc',
+    brightBlack: '#6b6a60',
+    brightRed: '#d64c4c',
+    brightGreen: '#3f8f57',
+    brightYellow: '#a67c00',
+    brightBlue: '#2b6ca3',
+    brightMagenta: '#9c4c9c',
+    brightCyan: '#1a8481',
+    brightWhite: '#8c8b80'
+  },
+  dark: {
+    background: '#0c0d13',
+    foreground: '#d9dce2',
+    cursor: '#d9dce2',
+    selectionBackground: '#31364a',
+    // Not #000: an agent printing black text would otherwise be invisible.
+    black: '#3a3f4b',
+    red: '#e05a5a',
+    green: '#4caf6d',
+    yellow: '#e0a800',
+    blue: '#6fb8f0',
+    magenta: '#c3a0f5',
+    cyan: '#5fc9bd',
+    white: '#d9dce2',
+    brightBlack: '#7c8290',
+    brightRed: '#ff8080',
+    brightGreen: '#79d99a',
+    brightYellow: '#f0c95a',
+    brightBlue: '#8fd0ff',
+    brightMagenta: '#d8b6ff',
+    brightCyan: '#86e0d5',
+    brightWhite: '#ffffff'
+  }
 }
 
 function get(id: string): { term: Xterm; fit: FitAddon } {

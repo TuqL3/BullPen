@@ -1,0 +1,46 @@
+appId: com.bullpen.app
+productName: BullPen
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - '!src/**'
+  - '!test/**'
+  - '!scripts/**'
+  - '!OPEN-QUESTIONS.md'
+  - '!electron.vite.config.ts'
+  - '!tsconfig.json'
+  # 28 MB of Windows debug symbols that ship inside node-pty's prebuilds.
+  - '!node_modules/node-pty/prebuilds/**/*.pdb'
+  - '!node_modules/node-pty/build/Release/obj.target/**'
+
+# node-pty is native, plus winpty ships a .dll and an .exe that must be real
+# files on disk - nothing here can be read from inside the asar.
+asarUnpack:
+  - '**/node_modules/node-pty/**'
+
+# node-pty 1.1 is node-api, so its shipped prebuilds load on Electron as-is and
+# a cross-platform build needs no toolchain. The macOS package still prefers the
+# locally rebuilt build/Release (see scripts/patch-node-pty.mjs); on Windows that
+# copy fails to load and node-pty falls through to prebuilds/win32-*.
+npmRebuild: false
+
+afterPack: scripts/after-pack.mjs
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

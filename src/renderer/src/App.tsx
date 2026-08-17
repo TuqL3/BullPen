@@ -4,6 +4,7 @@ import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
 import { Floor } from './floor/Floor'
+import { FLOOR_MAX_W } from './floor/layout'
 import { AskMe } from './tabs/AskMe'
 import { Activity } from './tabs/Activity'
 import { Graph } from './tabs/Graph'
@@ -12,9 +13,10 @@ import { Monitor } from './tabs/Monitor'
 import { Tasks } from './tabs/Tasks'
 import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
-import { projectOf, slug } from './avatar'
+import { projectOf, slug } from './roster'
+import type { Question } from '../../preload/index'
 import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
-import { FilePanel, openFile, WorkTree, type OpenFile } from './Code'
+import { FilePanel, openFile, Review, WorkTree, type OpenFile } from './Code'
 import { isShellId, Shell } from './Shell'
 import {
   DEFAULT_LAYOUT,
@@ -36,6 +38,7 @@ import { useStore, type Agent, type Approval } from './store'
 
 const TABS = [
   'terminal',
+  'shell',
   'monitor',
   'tasks',
   'ask me',
@@ -80,6 +83,8 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>('light')
   const [tab, setTab] = useState<Tab>('terminal')
+  const shellSeen = useRef(false)
+  if (tab === 'shell') shellSeen.current = true
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
   const [dragging, setDragging] = useState<PanelId | null>(null)
   // Null when closed; otherwise the fields the wizard opens with. Hiring the
@@ -94,8 +99,41 @@ export default function App() {
   // above both rather than inside either.
   const [file, setFile] = useState<OpenFile | null>(null)
   const [fileNote, setFileNote] = useState('')
+  /** How much of the command panel the review takes, when it is open. */
+  const [reviewShare, setReviewShare] = useState(0.4)
+  const [reviewing, setReviewing] = useState(false)
+  /** How the rest divides between the command centre and an open file. */
+  const [fileHalf, setFileHalf] = useState(0.5)
+  /** Files collapsed in the review, held here so closing it does not forget. */
+  const [reviewShut, setReviewShut] = useState<string[]>([])
+  const body = useRef<HTMLDivElement>(null)
+  const [bodyW, setBodyW] = useState(0)
+  useEffect(() => {
+    const el = body.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setBodyW(el.clientWidth))
+    ro.observe(el)
+    setBodyW(el.clientWidth)
+    return () => ro.disconnect()
+  }, [])
+  /** Bumped on every save, so the review re-reads instead of waiting for its poll. */
+  const [savedTick, setSavedTick] = useState(0)
+  // Held here rather than in the tab that shows them: the tab badge has to
+  // count them while that tab is unmounted, which is exactly when it matters.
+  const [questions, setQuestions] = useState<Question[]>([])
+
+  useEffect(() => {
+    window.bullpen.askList().then(setQuestions)
+    return window.bullpen.onAsk(setQuestions)
+  }, [])
 
   useEffect(() => setTerminalTheme(mode), [mode])
+
+  // Remembered in main, not here: an agent's CLI is handed the same value when
+  // it spawns, so main has to be the one that knows it.
+  useEffect(() => {
+    window.bullpen.mode().then((saved) => saved && setMode(saved))
+  }, [])
 
   useEffect(() => {
     const off = [
@@ -116,6 +154,12 @@ export default function App() {
         store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
       }),
       window.bullpen.onStatus((id, status) => store().upsertAgent({ id, activity: status })),
+      window.bullpen.onTool((id, tool, detail) =>
+        store().upsertAgent({ id, doing: { tool, detail, at: Date.now() } })
+      ),
+      window.bullpen.onWaiting((id, asked) =>
+        store().upsertAgent({ id, asked, activity: asked ? 'blocked' : 'working' })
+      ),
       window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
       window.bullpen.onCost((id, cost) => store().upsertAgent({ id, cost })),
       window.bullpen.onSteerQueued((id) => {
@@ -324,9 +368,9 @@ export default function App() {
     adoptGod(res)
   }
 
-  const open = async (path: string): Promise<void> => {
+  const open = async (path: string, line?: number): Promise<void> => {
     if (!current) return
-    const res = await openFile(current, path)
+    const res = await openFile(current, path, line)
     if (typeof res === 'string') return setFileNote(res)
     setFile(res)
     setFileNote(res.truncated ? 'Showing the first 1 MB — saving is refused for this file.' : '')
@@ -337,6 +381,7 @@ export default function App() {
     if (!file || file.truncated) return
     const res = await window.bullpen.codeWrite(file.root, file.path, text)
     setFileNote(res.error ?? `saved ${file.path}`)
+    if (!res.error) setSavedTick((n) => n + 1)
   }
 
   /** First run: accept a workspace for Michael and bring him up in it. */
@@ -354,6 +399,13 @@ export default function App() {
     window.bullpen.steer(selected, steerText.trim())
     setSteerText('')
   }
+
+  // Everything the ask me tab lists: a held tool call, a question mailed to
+  // you, and an agent stopped on a prompt in its own terminal. Declared above
+  // `panes`: the tab bar is built inside it, so a const below is still dead.
+  const askCount = approvals.length + questions.length + agents.filter((a) => a.asked).length
+  /** What is left for the command centre and an open file to share. */
+  const leftTotal = reviewing ? 1 - reviewShare : 1
 
   const panes: Record<PanelId, React.ReactNode> = {
     roster: (
@@ -411,10 +463,12 @@ export default function App() {
     ),
     floor: <Floor mode={mode} onSelect={select} />,
     tree: <WorkTree agent={current} openPath={file?.path ?? null} onOpen={open} />,
-    editor: <FilePanel file={file} onSave={saveFile} note={fileNote} />,
-    shell: <Shell agent={current} />,
     command: (
-        <main style={S.main}>
+      // A file opens beside the command centre rather than in a panel of its
+      // own: it is read while working, and a panel for it sat empty the rest of
+      // the time. Closing the file gives the width straight back.
+      <div style={S.commandSplit}>
+        <main style={{ ...S.main, flexGrow: leftTotal * (file ? 1 - fileHalf : 1), flexBasis: 0 }}>
           <header style={S.header}>
             {current ? <Avatar id={current.face} shirt={current.color} size={30} /> : <div style={{ width: 30 }} />}
             <div style={{ flex: 1 }}>
@@ -431,6 +485,18 @@ export default function App() {
               </div>
               {moveError && (
                 <div style={{ fontSize: 11, color: 'var(--danger)' }}>{moveError}</div>
+              )}
+              {/* The file panel carries this while a file is open; with none
+                  open there is nowhere else for "could not read that" to go. */}
+              {fileNote && !file && (
+                <div style={{ fontSize: 11, color: 'var(--warn)' }}>{fileNote}</div>
+              )}
+              {/* The CLI drew this question in the agent's own terminal and is
+                  blocked on a keystroke there - Bullpen can only point at it. */}
+              {current?.asked && (
+                <div style={{ fontSize: 11, color: 'var(--warn)' }}>
+                  waiting on you in the terminal — {current.asked}
+                </div>
               )}
             </div>
             <div>{current && <CtxMeter ctx={current.ctx} />}</div>
@@ -474,7 +540,7 @@ export default function App() {
                 style={{ ...S.tab, ...(tab === t ? S.tabActive : null) }}
               >
                 {t}
-                {t === 'ask me' && approvals.length > 0 && <span style={S.badge}>{approvals.length}</span>}
+                {t === 'ask me' && askCount > 0 && <span style={S.badge}>{askCount}</span>}
               </button>
             ))}
           </nav>
@@ -485,9 +551,41 @@ export default function App() {
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
             </div>
-            {tab === 'monitor' && <Monitor agents={agents} lastSeen={lastSeen} />}
+            {/* Mounted from the first visit and kept mounted: unmounting drops
+                the scrollback, but mounting up front would start a real shell
+                per agent for a tab nobody opened. */}
+            <div style={{ height: '100%', display: tab === 'shell' ? 'block' : 'none' }}>
+              {shellSeen.current && <Shell agent={current} />}
+            </div>
+            {tab === 'monitor' && (
+              <Monitor
+                agents={agents}
+                lastSeen={lastSeen}
+                questions={questions}
+                // Ask me is where everything waiting on a human is collected,
+                // so that is where a waiting agent leads - not the terminal.
+                onSelect={(id) => {
+                  select(id)
+                  setTab('ask me')
+                }}
+                onOpenTerminal={(id) => {
+                  select(id)
+                  setTab('terminal')
+                }}
+              />
+            )}
             {tab === 'tasks' && <Tasks agents={agents} />}
-            {tab === 'ask me' && <AskMe approvals={approvals} agents={agents} />}
+            {tab === 'ask me' && (
+              <AskMe
+                approvals={approvals}
+                agents={agents}
+                questions={questions}
+                onOpenTerminal={(id) => {
+                  select(id)
+                  setTab('terminal')
+                }}
+              />
+            )}
             {tab === 'triggers' && <Triggers agent={current} />}
             {tab === 'memory' && <Memory agents={agents} selected={selected} />}
             {tab === 'graph' && <Graph agents={agents} mail={mail} />}
@@ -497,21 +595,91 @@ export default function App() {
           </section>
 
         </main>
+        {file && (
+          <>
+            {/* This divider splits the command centre with the file. The review
+                keeps its own width either way: opening a file is not a reason
+                to shrink what you were reading it against. */}
+            <Splitter onDrag={(f) => setFileHalf((w) => clampShare(w - f))} />
+            <div style={{ ...S.half, flexGrow: leftTotal * fileHalf }}>
+              <FilePanel
+                file={file}
+                onSave={saveFile}
+                note={fileNote}
+                onClose={() => {
+                  setFile(null)
+                  setFileNote('')
+                }}
+              />
+            </div>
+          </>
+        )}
+        {reviewing && (
+          <>
+            <Splitter onDrag={(f) => setReviewShare((w) => clampShare(w - f))} />
+            <div style={{ ...S.half, flexGrow: reviewShare }}>
+              <Review
+                agent={current}
+                onOpen={open}
+                onClose={() => setReviewing(false)}
+                shut={reviewShut}
+                setShut={setReviewShut}
+                reload={savedTick}
+              />
+            </div>
+          </>
+        )}
+      </div>
     )
   }
 
   const cols = visibleColumns(layout)
+  // What one unit of column weight is worth in pixels, so a column can tell
+  // whether its share would overrun the office floor's own width.
+  const perWeight = bodyW / (cols.reduce((n, c) => n + c.weight, 0) || 1)
+
+  /**
+   * Bring the office floor's stored weight down to what its cap actually uses.
+   *
+   * Without this a column whose weight asks for 830px but is drawn at 464 eats
+   * the first several hundred pixels of any drag before anything moves - the
+   * divider works, and looks broken. Corrected once, with a pixel of tolerance
+   * so the correction cannot chase itself.
+   */
+  useEffect(() => {
+    if (perWeight <= 0) return
+    const floorCol = cols.find((c) => c.panels.includes('floor'))
+    if (!floorCol) return
+    const want = FLOOR_MAX_W / perWeight
+    if (floorCol.weight <= want + 1 / perWeight) return
+    const colWeight = [...layout.colWeight]
+    colWeight[floorCol.index] = want
+    applyLayout({ ...layout, colWeight })
+  }, [perWeight, layout])
 
   return (
-    <div style={{ ...(VARS[mode] as React.CSSProperties), ...S.app }}>
+    // color-scheme is what repaints the native scrollbars, which are drawn by
+    // the browser and ignore every variable above - in dark mode they stayed
+    // light grey down the side of every scrolling panel.
+    <div style={{ ...(VARS[mode] as React.CSSProperties), colorScheme: mode, ...S.app }}>
       <TitleBar
         mode={mode}
-        onToggle={() => setMode(mode === 'light' ? 'dark' : 'light')}
+        onToggle={() => {
+          const next = mode === 'light' ? 'dark' : 'light'
+          setMode(next)
+          window.bullpen.setMode(next)
+        }}
         layout={layout}
         onTogglePanel={(id) => applyLayout(togglePanel(layout, id))}
+        reviewing={reviewing}
+        onToggleReview={() => setReviewing(!reviewing)}
       />
 
-      <div data-layout={cols.map((c) => c.panels.join('+')).join('|')} style={S.body}>
+      <div
+        ref={body}
+        data-layout={cols.map((c) => c.panels.join('+')).join('|')}
+        style={S.body}
+      >
         {cols.map((col, i) => (
           // Keyed by the column's lead panel, not its contents: keying by
           // contents remounted the whole column whenever a panel in it was
@@ -519,8 +687,8 @@ export default function App() {
           <Fragment key={col.panels[0]}>
             {i > 0 && (
               <Splitter
-                onDrag={(dx) => applyLayout(resizeColumns(layout, i - 1, dx / (window.innerWidth || 1)))}
-                onDropPanel={(from) => applyLayout(moveToNewColumn(layout, from, i))}
+                onDrag={(f) => applyLayout(resizeColumns(layout, cols[i - 1].index, col.index, f))}
+                onDropPanel={(from) => isPanel(from) && applyLayout(moveToNewColumn(layout, from, i))}
                 dragging={dragging}
               />
             )}
@@ -533,14 +701,14 @@ export default function App() {
               onDragStart={setDragging}
               onDragEnd={() => setDragging(null)}
               onDropOn={(from, target, side) => applyLayout(moveTo(layout, from, target, side))}
-              onResize={(above, below, dy, h) => applyLayout(resizeRows(layout, above, below, dy / h))}
+              onResize={(above, below, f) => applyLayout(resizeRows(layout, above, below, f))}
             />
           </Fragment>
         ))}
         {/* A panel dragged past the last column becomes a column of its own. */}
         <Splitter
           onDrag={() => {}}
-          onDropPanel={(from) => applyLayout(moveToNewColumn(layout, from, cols.length))}
+          onDropPanel={(from) => isPanel(from) && applyLayout(moveToNewColumn(layout, from, cols.length))}
           dragging={dragging}
         />
       </div>
@@ -566,15 +734,22 @@ export default function App() {
  * from its terminal. Blank until the agent has completed a turn - there is no
  * usage record before then, and a fabricated zero would read as "plenty left".
  */
-export function CtxMeter({ ctx }: { ctx?: Agent['ctx'] }) {
+/** `compact` drops the used/limit text - in a table row it does not fit beside
+ *  everything else, and the tooltip still carries the numbers. */
+export function CtxMeter({ ctx, compact = false }: { ctx?: Agent['ctx']; compact?: boolean }) {
   if (!ctx) return <span style={{ ...LABEL, color: 'var(--faint)' }}>ctx —</span>
   const k = (n: number) => `${Math.round(n / 1000)}k`
   const colour = ctx.pct >= 85 ? 'var(--danger)' : ctx.pct >= 60 ? 'var(--warn)' : 'var(--ok)'
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={ctx.model}>
-      <span style={{ ...LABEL, color: 'var(--muted)' }}>
-        ctx {k(ctx.used)}/{k(ctx.limit)}
-      </span>
+    <div
+      style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+      title={`${ctx.model} · ${k(ctx.used)}/${k(ctx.limit)}`}
+    >
+      {!compact && (
+        <span style={{ ...LABEL, color: 'var(--muted)' }}>
+          ctx {k(ctx.used)}/{k(ctx.limit)}
+        </span>
+      )}
       <div style={S.meterTrack}>
         <div style={{ ...S.meterBar, width: `${Math.max(2, ctx.pct)}%`, background: colour }} />
       </div>
@@ -591,7 +766,7 @@ function Icon({
   name,
   size = 13
 }: {
-  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'editor' | 'tree' | 'shell'
+  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'tree' | 'review'
   size?: number
 }) {
   const common = {
@@ -639,17 +814,12 @@ function Icon({
         <path d="M4 6l2.2 2L4 10M8.2 10.5h3.6" />
       </svg>
     )
-  if (name === 'editor')
+  if (name === 'review')
     return (
       <svg {...common} aria-hidden>
-        <path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5" />
-      </svg>
-    )
-  if (name === 'shell')
-    return (
-      <svg {...common} aria-hidden>
-        <rect x="1.5" y="2.5" width="13" height="11" />
-        <path d="M4 6.5l2 1.5-2 1.5" />
+        <rect x="1.5" y="1.5" width="7" height="10" />
+        <rect x="7.5" y="4.5" width="7" height="10" />
+        <path d="M9.5 9.5h3M11 8v3" />
       </svg>
     )
   if (name === 'tree')
@@ -769,11 +939,24 @@ function Column({
   onDragStart: (id: PanelId) => void
   onDragEnd: () => void
   onDropOn: (from: PanelId, target: PanelId, side: 'above' | 'below') => void
-  onResize: (above: PanelId, below: PanelId, dy: number, height: number) => void
+  /** `delta` is a fraction of the two panels' combined height. */
+  onResize: (above: PanelId, below: PanelId, delta: number) => void
 }) {
   const col = useRef<HTMLDivElement>(null)
   const total = panels.filter((p) => !FIXED.has(p)).reduce((n, p) => n + layout.rowWeight[p], 0) || 1
 
+  /**
+   * Weight only - no maximum, no fixed pixels.
+   *
+   * A `max-width` here was what moved the roster: a flex item held at its
+   * maximum hands the space it cannot use to every other item that can grow,
+   * so dragging the divider on the right changed a column on the far left.
+   * Mixing fixed pixels in was worse - the pixel width of every other column is
+   * computed from the total weight, so pinning one changed all of them.
+   *
+   * The office floor is kept inside its own width by its weight instead: the
+   * panel above normalises it once it would overrun. See `FLOOR_MAX_W`.
+   */
   return (
     <div ref={col} style={{ ...S.column, flexGrow: weight }}>
       {panels.map((id, i) => (
@@ -783,7 +966,7 @@ function Column({
             <Splitter
               vertical
               dragging={dragging}
-              onDrag={(dy) => onResize(panels[i - 1], id, dy, col.current?.clientHeight ?? 1)}
+              onDrag={(f) => onResize(panels[i - 1], id, f)}
             />
           )}
           <Pane
@@ -802,22 +985,47 @@ function Column({
   )
 }
 
+/** Neither half may be dragged away entirely - there would be no grip back. */
+const clampShare = (n: number): number => Math.min(0.85, Math.max(0.15, n))
+
+const isPanel = (id: string): id is PanelId => (PANELS as readonly string[]).includes(id)
+
+/** Combined size of the panels either side of a divider, in pixels. */
+// eslint-disable-next-line
+function pairSize(el: HTMLElement, vertical: boolean): number {
+  const before = el.previousElementSibling as HTMLElement | null
+  const after = el.nextElementSibling as HTMLElement | null
+  const size = (n: HTMLElement | null): number =>
+    n ? (vertical ? n.getBoundingClientRect().height : n.getBoundingClientRect().width) : 0
+  return size(before) + size(after)
+}
+
 /**
  * A divider you drag to resize, and drop a panel on to split off a new column.
  *
  * Pointer capture rather than mousemove on window: the pointer leaves the 5px
  * track immediately, and without capture the drag stops the moment it does.
+ *
+ * Reports how far it moved as a fraction of the two neighbours it sits between,
+ * measured from the DOM. That is the denominator the weights are expressed in;
+ * dividing by the window (or by the whole column) made the divider move a
+ * fraction of the distance the pointer did, so it slid out from under the
+ * cursor and the panels either side kept resizing after it.
  */
-function Splitter({
+export function Splitter({
   onDrag,
   onDropPanel,
   dragging,
-  vertical = false
+  vertical = false,
+  kind = 'text/panel'
 }: {
+  /** Movement as a fraction of the two neighbouring panels' combined size. */
   onDrag: (delta: number) => void
-  onDropPanel?: (from: PanelId) => void
-  dragging?: PanelId | null
+  onDropPanel?: (from: string) => void
+  dragging?: string | null
   vertical?: boolean
+  /** dataTransfer type this divider accepts - panels here, shells in Shell. */
+  kind?: string
 }) {
   const last = useRef(0)
   const [over, setOver] = useState(false)
@@ -838,7 +1046,8 @@ function Splitter({
       onPointerMove={(e) => {
         if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
         const now = vertical ? e.clientY : e.clientX
-        onDrag(now - last.current)
+        const pair = pairSize(e.currentTarget, vertical)
+        if (pair > 0) onDrag((now - last.current) / pair)
         last.current = now
       }}
       onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)}
@@ -851,8 +1060,8 @@ function Splitter({
       onDrop={(e) => {
         e.preventDefault()
         setOver(false)
-        const from = e.dataTransfer.getData('text/panel') as PanelId
-        if (onDropPanel && PANELS.includes(from)) onDropPanel(from)
+        const from = e.dataTransfer.getData(kind)
+        if (onDropPanel && from) onDropPanel(from)
       }}
     />
   )
@@ -935,12 +1144,16 @@ function TitleBar({
   mode,
   onToggle,
   layout,
-  onTogglePanel
+  onTogglePanel,
+  reviewing,
+  onToggleReview
 }: {
   mode: Mode
   onToggle: () => void
   layout: Layout
   onTogglePanel: (id: PanelId) => void
+  reviewing: boolean
+  onToggleReview: () => void
 }) {
   return (
     <div style={S.titlebar}>
@@ -970,6 +1183,19 @@ function TitleBar({
         )
       })}
       <button
+        title="review uncommitted changes"
+        aria-label="toggle review"
+        style={{
+          ...S.panelToggle,
+          WebkitAppRegion: 'no-drag',
+          color: reviewing ? 'var(--accent-ink)' : 'var(--faint)',
+          borderColor: reviewing ? 'var(--accent-ink)' : 'transparent'
+        } as React.CSSProperties}
+        onClick={onToggleReview}
+      >
+        <Icon name="review" />
+      </button>
+      <button
         title={mode === 'light' ? 'switch to dark' : 'switch to light'}
         aria-label="toggle theme"
         style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -990,10 +1216,10 @@ function TitleBar({
         </button>
       )}
       <button
-        title="maximise"
-        aria-label="maximise window"
+        title="full screen"
+        aria-label="toggle full screen"
         style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        onClick={() => window.bullpen.toggleMaximize()}
+        onClick={() => window.bullpen.toggleFullscreen()}
       >
         <Icon name="full" />
       </button>
@@ -1085,7 +1311,7 @@ function Dock({
             onClick={() => onSelect(a.id)}
             style={{ ...S.dockCard, ...(selected === a.id ? S.dockCardActive : null) }}
           >
-            <Avatar id={a.face} shirt={a.color} size={38} />
+            <Avatar id={a.face} shirt={a.color} size={30} />
             <div style={{ minWidth: 0 }}>
               <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 10 }}>{a.name}</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -1106,7 +1332,7 @@ function Dock({
 const S: Record<string, React.CSSProperties> = {
   app: {
     display: 'grid',
-    gridTemplateRows: '34px 1fr 74px',
+    gridTemplateRows: '34px 1fr 52px',
     height: '100vh',
     overflow: 'hidden',
     background: 'var(--bg)',
@@ -1146,6 +1372,11 @@ const S: Record<string, React.CSSProperties> = {
   },
   // flex:1 because the pane body is a flex column - without it the command
   // centre was sized by its content and left dead space beneath the terminal.
+  commandSplit: { display: 'flex', height: '100%', minWidth: 0, minHeight: 0 },
+  // Its own style, not the command centre's: S.main is a four-row grid, and a
+  // panel dropped into its first row is as tall as its own content - which is
+  // why a short file left the scrollbar hanging in the middle of the panel.
+  half: { display: 'flex', flexDirection: 'column', flexBasis: 0, minWidth: 0, minHeight: 0 },
   main: {
     display: 'grid',
     gridTemplateRows: 'auto auto auto 1fr',
@@ -1236,7 +1467,8 @@ const S: Record<string, React.CSSProperties> = {
     padding: '6px 10px',
     background: 'var(--sunk)',
     color: 'var(--ink)',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     cursor: 'pointer',
     font: `11px ${MONO}`
   },
@@ -1277,7 +1509,12 @@ const S: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     background: 'transparent',
-    border: '1px solid transparent',
+    // Longhand, not `border: 1px solid transparent`: the active state overrides
+    // borderColor alone, and React clears that longhand when the state drops -
+    // leaving border-color at `currentcolor`, which drew a white box on the
+    // panel you had just switched away from.
+    border: '1px solid',
+    borderColor: 'transparent',
     cursor: 'pointer',
     padding: '3px 5px'
   },
@@ -1328,7 +1565,8 @@ const S: Record<string, React.CSSProperties> = {
     gap: 8,
     padding: '6px 6px',
     marginBottom: 2,
-    border: '1px solid transparent',
+    border: '1px solid',
+    borderColor: 'transparent',
     cursor: 'pointer'
   },
   rowActive: { background: 'var(--sunk)', borderColor: 'var(--line)' },
@@ -1374,15 +1612,16 @@ const S: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '8px 10px',
-    border: '1px solid var(--line)',
+    padding: '4px 8px',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     background: 'var(--bg)',
     cursor: 'pointer',
     flex: '0 0 auto',
     minWidth: 132
   },
   dockCardActive: { borderColor: 'var(--accent)' },
-  meter: { height: 3, background: 'var(--line)', marginTop: 4, width: 76 },
+  meter: { height: 3, background: 'var(--line)', marginTop: 3, width: 76 },
   meterTrack: { width: 90, height: 6, background: 'var(--line)', flex: '0 0 auto' },
   meterBar: { height: '100%' },
   meterFill: { height: '100%' }

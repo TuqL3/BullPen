@@ -6,7 +6,7 @@
  * office floor, both beside the editor", and it costs no recursive renderer, no
  * per-node split ratios and no drop zones on four edges of every node.
  */
-export const PANELS = ['roster', 'command', 'editor', 'tree', 'shell', 'floor'] as const
+export const PANELS = ['roster', 'command', 'tree', 'floor'] as const
 export type PanelId = (typeof PANELS)[number]
 
 export type Layout = {
@@ -23,19 +23,17 @@ export type Layout = {
 export const PANEL_TITLE: Record<PanelId, string> = {
   roster: 'roster',
   command: 'command center',
-  editor: 'file · vim',
   tree: 'work tree',
-  shell: 'shell',
   floor: 'office floor'
 }
 
 export const DEFAULT_LAYOUT: Layout = {
-  columns: [['roster'], ['command'], ['editor'], ['tree', 'shell', 'floor']],
+  columns: [['roster'], ['command'], ['tree', 'floor']],
   hidden: [],
-  colWeight: [0.62, 2, 2, 1.4],
-  // The shell takes the slack in that column: the work tree is a list and the
-  // office floor is capped, so anything left over is terminal.
-  rowWeight: { roster: 1, command: 1, editor: 1, tree: 1, shell: 1.6, floor: 1 }
+  colWeight: [0.62, 3.2, 1.4],
+  // The work tree takes the slack in that column: it is a list that grows, and
+  // the office floor below it is capped at four rows of desks.
+  rowWeight: { roster: 1, command: 1, tree: 1.6, floor: 1 }
 }
 
 /**
@@ -117,12 +115,18 @@ export function normalise(raw: unknown): Layout {
   }
 }
 
-/** Columns with every hidden panel removed, and empty columns dropped. */
-export function visible(l: Layout): { panels: PanelId[]; weight: number }[] {
-  const out: { panels: PanelId[]; weight: number }[] = []
+/**
+ * Columns with every hidden panel removed, and empty columns dropped.
+ *
+ * `index` is where the column sits in `l.columns`, which is NOT its position on
+ * screen once a column is hidden. Resizing has to address the stored column, or
+ * dragging a divider silently resizes a different pair - including a hidden one.
+ */
+export function visible(l: Layout): { panels: PanelId[]; weight: number; index: number }[] {
+  const out: { panels: PanelId[]; weight: number; index: number }[] = []
   l.columns.forEach((col, i) => {
     const panels = col.filter((p) => !l.hidden.includes(p))
-    if (panels.length) out.push({ panels, weight: l.colWeight[i] ?? 1 })
+    if (panels.length) out.push({ panels, weight: l.colWeight[i] ?? 1, index: i })
   })
   return out
 }
@@ -173,23 +177,28 @@ export const toggle = (l: Layout, id: PanelId): Layout => ({
 })
 
 /**
- * Drag the divider between two columns. `delta` is the fraction of the window
- * width the boundary moved; the pair keeps its combined weight so columns
- * further along do not shift while one edge is being dragged.
+ * Drag the divider between two columns. `delta` is the fraction of the two
+ * columns' own width that the boundary moved; the pair keeps its combined
+ * weight, so columns further along do not shift while one edge is dragged.
+ *
+ * Both indices are given rather than `left` and `left + 1`: with a column
+ * hidden, the two columns either side of a divider are not adjacent in storage,
+ * and assuming they were resized a pair nobody was touching.
  */
-export function resizeColumns(l: Layout, left: number, delta: number): Layout {
+export function resizeColumns(l: Layout, left: number, right: number, delta: number): Layout {
   const a = l.colWeight[left]
-  const b = l.colWeight[left + 1]
-  if (a === undefined || b === undefined) return l
+  const b = l.colWeight[right]
+  if (a === undefined || b === undefined || left === right) return l
   const total = a + b
   const next = clamp(a + delta * total, total * MIN_SHARE, total * (1 - MIN_SHARE))
   const colWeight = [...l.colWeight]
   colWeight[left] = next
-  colWeight[left + 1] = total - next
+  colWeight[right] = total - next
   return { ...l, colWeight }
 }
 
-/** The same, vertically, between two panels stacked in one column. */
+/** The same, vertically, between two panels stacked in one column. `delta` is
+ *  the fraction of the pair's own height, for the same reason. */
 export function resizeRows(l: Layout, above: PanelId, below: PanelId, delta: number): Layout {
   const total = l.rowWeight[above] + l.rowWeight[below]
   const next = clamp(l.rowWeight[above] + delta * total, total * MIN_SHARE, total * (1 - MIN_SHARE))

@@ -71,6 +71,30 @@ const PATH_KEYS = ['file_path', 'path', 'notebook_path'] as const
  *  make "recently touched" mean "recently looked at". */
 const WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 
+/**
+ * Tools that stop the agent until a person answers *in its terminal*.
+ *
+ * These are allowed - Bullpen has nothing to decide about them - so nothing
+ * used to mark them, and an agent sitting on a question read as "working"
+ * forever. The CLI blocks on a keystroke it draws itself; all Bullpen can do is
+ * say who is waiting and on what.
+ */
+const WAITING_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode'])
+
+/** The question itself, for the roster and the log. Shape varies by tool. */
+function askedAbout(payload: HookPayload): string {
+  const input = (payload.tool_input ?? {}) as Record<string, unknown>
+  const questions = input.questions
+  if (Array.isArray(questions)) {
+    const asked = questions
+      .map((q) => (q && typeof q === 'object' ? (q as Record<string, unknown>).question : null))
+      .filter((q): q is string => typeof q === 'string')
+    if (asked.length) return asked.join(' · ')
+  }
+  if (typeof input.plan === 'string') return 'approve the plan'
+  return payload.tool_name ?? 'a question'
+}
+
 /** Which lifecycle hooks mean the agent started or finished a turn. */
 const LIFECYCLE_STATUS: Record<string, 'working' | 'idle' | undefined> = {
   UserPromptSubmit: 'working',
@@ -92,12 +116,26 @@ export class Approvals extends EventEmitter {
   private steers = new Map<string, string[]>()
   /** agentId -> the transcript the CLI reported in its last hook payload */
   private transcripts = new Map<string, string>()
+  /**
+   * Which theme the agent's own CLI should draw in.
+   *
+   * The CLI paints its prompt block and its chrome from a theme of its own,
+   * read from settings. Left alone it takes the operator's ~/.claude setting -
+   * usually dark - and drew a black band down a light Bullpen. The per-agent
+   * settings file outranks that, so the two always agree.
+   */
+  private theme: 'light' | 'dark' = 'light'
 
   constructor(root: string) {
     super()
     this.root = resolve(root)
     this.token = randomBytes(24).toString('hex')
     mkdirSync(this.root, { recursive: true })
+  }
+
+  /** Applies to agents spawned from here on; a running CLI keeps its own. */
+  setTheme(mode: 'light' | 'dark'): void {
+    this.theme = mode
   }
 
   setSandbox(agentId: string, dir: string): void {
@@ -247,6 +285,11 @@ export class Approvals extends EventEmitter {
             return
           }
           this.noteTranscript(agentId, payload)
+          // Announced before the reply: the CLI draws its prompt the moment the
+          // hook returns, so telling the UI afterwards would race the block.
+          if (WAITING_TOOLS.has(payload.tool_name ?? '')) {
+            this.emit('waiting', agentId, askedAbout(payload), payload.tool_name)
+          }
           const { verdict, reason } = this.classify(agentId, payload)
           // Steers ride out on whichever tool call comes next, but only when it
           // is actually allowed to run - a denied call is not a delivery.
@@ -298,7 +341,7 @@ export class Approvals extends EventEmitter {
 
     // Observation only, so they get their own short-timeout script that can
     // never block a turn - unlike the PreToolUse hook, which must.
-    const observe = (): unknown => ({
+    const observe = () => ({
       hooks: [{ type: 'command', command: `node ${JSON.stringify(eventPath)}`, timeout: 10 }]
     })
 
@@ -316,10 +359,16 @@ export class Approvals extends EventEmitter {
             ]
           }
         ],
+        // The only event that reports the path an agent just wrote, so without
+        // it "recently touched" stays empty forever - onLifecycle handles
+        // PostToolUse, it was simply never subscribed to. Matched like
+        // PreToolUse: a tool event without a matcher is not worth relying on.
+        PostToolUse: [{ matcher, ...observe() }],
         UserPromptSubmit: [observe()],
         Stop: [observe()],
         SessionEnd: [observe()]
       },
+      theme: this.theme,
       env: { BULLPEN_APPROVALS_URL: url, BULLPEN_EVENT_URL: eventUrl }
     }
     const settingsPath = join(agentDir, 'settings.json')
@@ -349,6 +398,30 @@ export class Approvals extends EventEmitter {
     }
     const status = LIFECYCLE_STATUS[event]
     if (status) this.emit('status', agentId, status, event)
+
+    // The answer landed (PostToolUse), or the turn ended without one - either
+    // way nobody is waiting on the human any more.
+    if (event === 'PostToolUse') {
+      try {
+        const tool = (JSON.parse(body) as HookPayload).tool_name ?? ''
+        if (WAITING_TOOLS.has(tool)) this.emit('answered', agentId)
+      } catch {
+        // Reported by the status parse above.
+      }
+    }
+    if (status === 'idle') this.emit('answered', agentId)
+
+    // What it is doing, tool by tool. The monitor shows the last one: "working"
+    // for four minutes says nothing, "Bash - npm test" says what to expect.
+    if (event === 'PostToolUse') {
+      try {
+        const payload = JSON.parse(body) as HookPayload
+        const tool = payload.tool_name ?? ''
+        if (tool) this.emit('tool', agentId, tool, this.describe(payload).slice(0, 120))
+      } catch {
+        // Reported by the status parse above.
+      }
+    }
 
     // What the agent just wrote. PostToolUse fires after the write landed, so
     // the file on disk already reflects it - no need to carry the content.

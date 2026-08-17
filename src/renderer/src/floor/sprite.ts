@@ -1,4 +1,4 @@
-import { faceFor } from '../avatar'
+import { faceFor } from '../roster'
 
 export type Facing = 'down' | 'up' | 'left' | 'right'
 

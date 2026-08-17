@@ -18,6 +18,41 @@ export type Config = {
    * to keep in step.
    */
   layout?: unknown
+  /**
+   * Light or dark. Persisted because an agent's CLI is told the same thing
+   * when it spawns - the terminal chrome it draws itself has to match the
+   * terminal it is drawn into.
+   */
+  mode?: 'light' | 'dark'
+  /**
+   * Where the window was last, so resizing it survives a restart. Position is
+   * optional: a window saved on a monitor that is now unplugged has to fall
+   * back to centred rather than open off-screen.
+   */
+  window?: { width: number; height: number; x?: number; y?: number; maximized?: boolean }
+}
+
+/** Smaller than this and the four panels have nowhere to go. */
+const MIN_SIZE = 600
+
+/** A hand-edited or stale config must not be able to open an unusable window. */
+export function readWindow(raw: unknown): Config['window'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const w = raw as Record<string, unknown>
+  const num = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : undefined
+  const width = num(w.width)
+  const height = num(w.height)
+  if (width === undefined || height === undefined) return undefined
+  if (width < MIN_SIZE || height < MIN_SIZE) return undefined
+  const x = num(w.x)
+  const y = num(w.y)
+  return {
+    width,
+    height,
+    ...(x !== undefined && y !== undefined ? { x, y } : {}),
+    ...(w.maximized === true ? { maximized: true } : {})
+  }
 }
 
 export const configPath = (home: string): string => join(home, 'config.json')
@@ -29,6 +64,9 @@ export function readConfig(home: string): Config {
     // A path written by hand can be anything; only a non-empty string is usable.
     if (typeof raw.godCwd === 'string' && raw.godCwd.trim()) out.godCwd = raw.godCwd
     if (raw.layout !== undefined) out.layout = raw.layout
+    if (raw.mode === 'light' || raw.mode === 'dark') out.mode = raw.mode
+    const win = readWindow(raw.window)
+    if (win) out.window = win
     return out
   } catch {
     return {}

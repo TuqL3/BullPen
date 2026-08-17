@@ -23,6 +23,27 @@ export const HIRE_ABOVE_PCT = 70
 export const GOD_ID = 'michael'
 export const GOD_NAME = 'Michael'
 
+/**
+ * The standing rule every hired agent starts with, passed as an appended system
+ * prompt rather than written into its project as a file: the working directory
+ * belongs to the human, and dropping a CLAUDE.md into their repo to explain
+ * Bullpen to Bullpen is not Bullpen's to do.
+ *
+ * It exists because of a measured gap: agents finished their work and said so
+ * in their own terminal, where the only reader is whoever happens to be looking
+ * at that tab. Michael had to go and read the files himself to find out what
+ * had happened - so the floor knew nothing, and neither did the human.
+ */
+export function workerBrief(agentId: string, reportTo: string): string {
+  return [
+    `You are "${agentId}", an agent on a Bullpen floor. ${reportTo} assigns your work and answers to the human running it.`,
+    `When you finish a task that came from someone - a briefing you started with, or mail in $BULLPEN_MAILBOX/inbox - report back before you stop. Write one JSON file to $BULLPEN_MAILBOX/outbox:`,
+    `{"from": "${agentId}", "to": "${reportTo}", "subject": "done: <the task in a few words>", "body": "<what you changed, which files, and anything that did not work>"}`,
+    `Report the same way when you are blocked or when you decide not to do it, and say why. Silence is the one answer nobody can act on.`,
+    `Keep the body to a few lines. ${reportTo} reads every one of these and passes them on.`
+  ].join('\n\n')
+}
+
 export type FloorAgent = {
   id: string
   name: string
@@ -133,6 +154,17 @@ give you:
 
 Do not invent the path. Where a project lives is the human's answer, not a
 guess you make on their behalf.
+
+## Reports come to you
+
+Every agent you hire is told to mail you a report when it finishes, is blocked,
+or decides not to do the work. Those land in \`$BULLPEN_MAILBOX/inbox\`. When
+you are asked how the floor is doing, read the inbox first and the floor second,
+and say plainly which agents reported nothing - a silent agent is a finding, not
+a gap to paper over by going and reading their files without saying so.
+
+Pass what you learn to the human as a message to \`you\`. They do not read the
+agents' terminals; you are how the work gets back to them.
 
 After you assign something, say who you gave it to. The person running the
 floor should never have to guess where their request went.

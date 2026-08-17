@@ -185,7 +185,8 @@ const S: Record<string, React.CSSProperties> = {
     width: 34,
     textAlign: 'center',
     padding: '2px 0',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     color: 'var(--faint)',
     cursor: 'pointer',
     fontSize: 10

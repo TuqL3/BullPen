@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Avatar } from '../Avatar'
 import { LABEL, MONO } from '../theme'
 import type { Question } from '../../../preload/index'
@@ -7,20 +7,27 @@ import type { Agent, Approval } from '../store'
 /**
  * Everything waiting on a human, from any agent, in one queue.
  *
- * Two kinds land here and they are different things. An **approval** is the
+ * Three kinds land here and they are different things. An **approval** is the
  * safety hook holding a tool call open - answer it and the call proceeds or
  * dies. A **question** is an agent that addressed `you` through the hive; the
  * reply is routed back into its inbox like any other message, so there is no
- * second delivery path to keep working.
+ * second delivery path to keep working. A **terminal question** is the CLI's
+ * own prompt: it is waiting on a keystroke in that agent's pty, so it is listed
+ * here to be seen, and answered where it was asked.
  */
-export function AskMe({ approvals, agents }: { approvals: Approval[]; agents: Agent[] }) {
-  const [questions, setQuestions] = useState<Question[]>([])
+export function AskMe({
+  approvals,
+  agents,
+  questions,
+  onOpenTerminal
+}: {
+  approvals: Approval[]
+  agents: Agent[]
+  /** Owned by App: the tab badge counts these while this tab is unmounted. */
+  questions: Question[]
+  onOpenTerminal: (id: string) => void
+}) {
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-
-  useEffect(() => {
-    window.bullpen.askList().then(setQuestions)
-    return window.bullpen.onAsk(setQuestions)
-  }, [])
 
   const agentOf = (id: string) => agents.find((a) => a.id === id)
   const nameOf = (id: string) => agentOf(id)?.name ?? id
@@ -32,7 +39,8 @@ export function AskMe({ approvals, agents }: { approvals: Approval[]; agents: Ag
     setDrafts((d) => ({ ...d, [q.id]: '' }))
   }
 
-  const nothing = approvals.length === 0 && questions.length === 0
+  const asking = agents.filter((a) => a.asked)
+  const nothing = approvals.length === 0 && questions.length === 0 && asking.length === 0
 
   return (
     <div style={S.wrap}>
@@ -43,6 +51,26 @@ export function AskMe({ approvals, agents }: { approvals: Approval[]; agents: Ag
           <code>$BULLPEN_MAILBOX/outbox</code> addressed to <code>you</code>.
         </div>
       )}
+
+      {/* First: these are already blocking a turn, and unlike the rest of this
+          queue they cannot be answered from here. */}
+      {asking.map((a) => (
+        <div key={`asked-${a.id}`} style={{ ...S.card, borderColor: 'var(--warn)' }}>
+          <div style={S.head}>
+            <Avatar id={a.face} shirt={a.color} size={22} />
+            <span style={{ ...LABEL, color: 'var(--ink)' }}>{a.name}</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>asks, in its terminal</span>
+          </div>
+          <pre style={S.body}>{a.asked}</pre>
+          <div style={{ color: 'var(--faint)', marginBottom: 8 }}>
+            The CLI drew this prompt itself and is waiting on a keystroke there — pick an option in
+            its terminal.
+          </div>
+          <button style={{ ...S.btn, ...S.btnPrimary }} onClick={() => onOpenTerminal(a.id)}>
+            open its terminal
+          </button>
+        </div>
+      ))}
 
       {questions.map((q) => {
         const agent = agentOf(q.from)
@@ -119,7 +147,8 @@ export function AskMe({ approvals, agents }: { approvals: Approval[]; agents: Ag
 
 const S: Record<string, React.CSSProperties> = {
   wrap: { padding: 14, overflowY: 'auto', height: '100%', font: `12px ${MONO}` },
-  card: { border: '1px solid var(--line)', background: 'var(--panel)', padding: 12, marginBottom: 12 },
+  card: { border: '1px solid',
+    borderColor: 'var(--line)', background: 'var(--panel)', padding: 12, marginBottom: 12 },
   head: { display: 'flex', alignItems: 'center', gap: 8 },
   body: {
     whiteSpace: 'pre-wrap',
@@ -149,7 +178,8 @@ const S: Record<string, React.CSSProperties> = {
     padding: '6px 12px',
     background: 'var(--sunk)',
     color: 'var(--ink)',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     cursor: 'pointer',
     font: `11px ${MONO}`
   },

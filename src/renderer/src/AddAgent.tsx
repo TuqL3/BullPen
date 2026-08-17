@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Avatar } from './Avatar'
-import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './avatar'
+import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './roster'
 import { LABEL, MONO } from './theme'
 
 export type Draft = {
@@ -363,7 +363,8 @@ const S: Record<string, React.CSSProperties> = {
     padding: '6px 12px',
     background: 'var(--sunk)',
     color: 'var(--ink)',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     cursor: 'pointer',
     font: `11px ${MONO}`
   },

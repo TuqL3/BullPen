@@ -35,6 +35,32 @@ export type GitChange = { path: string; code: string; staged: boolean; untracked
 export type GitChanges = { repo: boolean; changes: GitChange[]; branch?: string; error?: string }
 export type CodeEntry = { name: string; path: string; dir: boolean; size: number }
 export type CodeEdit = { path: string; ts: number; tool: string }
+export type Hit = {
+  path: string
+  line: number
+  text: string
+  /** Where the query matched inside `text`, for highlighting. */
+  ranges: [number, number][]
+}
+export type FileHits = { path: string; count: number }
+
+export type SearchResult = {
+  /** The first slice of matches, for rendering. */
+  hits: Hit[]
+  /** Every matching file, complete even when the rows are capped. */
+  matched: FileHits[]
+  /** Every match found, which is usually more than `hits` carries. */
+  total: number
+  /** How many distinct files matched. */
+  files: number
+  scanned: number
+  /** True when there are more matches than `hits` holds. */
+  capped: boolean
+  /** True when the walk stopped on its time budget. */
+  timedOut: boolean
+  /** Set when the query itself was the problem - an unfinished regex. */
+  error?: string
+}
 
 export type AgentCost = {
   input: number
@@ -63,7 +89,10 @@ const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void): (()
  */
 const api = {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDir'),
-  toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
+  /** Light or dark, remembered across restarts and handed to every agent's CLI. */
+  mode: (): Promise<'light' | 'dark' | null> => ipcRenderer.invoke('ui:mode'),
+  setMode: (mode: 'light' | 'dark'): Promise<boolean> => ipcRenderer.invoke('ui:setMode', mode),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   /** macOS keeps its native traffic lights; everywhere else we draw our own. */
@@ -81,6 +110,10 @@ const api = {
   onExit: (fn: (id: string, code: number) => void) => on('agent:exit', fn),
   onTrust: (fn: (id: string, sandbox: string) => void) => on('agent:trust', fn),
   onStatus: (fn: (id: string, status: 'working' | 'idle') => void) => on('agent:status', fn),
+  /** The last tool an agent finished, so "working" can say what it is doing. */
+  onTool: (fn: (id: string, tool: string, detail: string) => void) => on('agent:tool', fn),
+  /** `asked` is null once the agent is no longer stopped on its own question. */
+  onWaiting: (fn: (id: string, asked: string | null) => void) => on('agent:waiting', fn),
   ctx: (id: string): Promise<{ used: number; limit: number; pct: number; model: string } | null> =>
     ipcRenderer.invoke('agent:ctx', id),
   onCtx: (fn: (id: string, ctx: { used: number; limit: number; pct: number; model: string }) => void) =>
@@ -142,15 +175,52 @@ const api = {
   codeWrite: (root: string, rel: string, text: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('code:write', root, rel, text),
   codeEdits: (agentId: string): Promise<CodeEdit[]> => ipcRenderer.invoke('code:edits', agentId),
+  /** Plain text search across the agent's workspace. Bounded; see code.ts. */
+  codeSearch: (
+    root: string,
+    query: string,
+    caseSensitive = false,
+    regex = false,
+    /** Restrict to these paths - used to fetch one file's lines on demand. */
+    only?: string[]
+  ): Promise<SearchResult> =>
+    ipcRenderer.invoke('code:search', root, query, caseSensitive, regex, only),
+  /** `fresh` starts another shell beside the ones already open, rather than
+   *  handing back the one that is running. */
   openShell: (
     agentId: string,
     cwd: string,
-    size: { cols: number; rows: number }
+    size: { cols: number; rows: number },
+    fresh = false
   ): Promise<{ id: string; cwd: string; pid: number; status: string }> =>
-    ipcRenderer.invoke('shell:open', agentId, cwd, size),
+    ipcRenderer.invoke('shell:open', agentId, cwd, size, fresh),
   gitChanges: (root: string): Promise<GitChanges> => ipcRenderer.invoke('git:changes', root),
   gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
     ipcRenderer.invoke('git:diff', root, rel),
+  /** Throw away one file's changes. Irreversible: a tracked file goes back to
+   *  HEAD, an untracked one is deleted. Ask before calling it. */
+  /** Per-file added/deleted counts: one call that says which diffs went stale. */
+  gitStats: (root: string): Promise<Record<string, string>> => ipcRenderer.invoke('git:stats', root),
+  gitDiscard: (root: string, rel: string): Promise<{ ok?: true; error?: string }> =>
+    ipcRenderer.invoke('git:discard', root, rel),
+  /** The same for one block of touching changed lines - what you point at. */
+  gitDiscardBlock: (
+    root: string,
+    rel: string,
+    hunk: number,
+    block: number,
+    marker: string
+  ): Promise<{ ok?: true; error?: string }> =>
+    ipcRenderer.invoke('git:discardBlock', root, rel, hunk, block, marker),
+  /** The same for one hunk. `marker` is the `@@` line the panel is showing, so
+   *  a stale panel cannot revert the wrong part of the file. */
+  gitDiscardHunk: (
+    root: string,
+    rel: string,
+    index: number,
+    marker: string
+  ): Promise<{ ok?: true; error?: string }> =>
+    ipcRenderer.invoke('git:discardHunk', root, rel, index, marker),
   onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
   /** An agent Michael hired: main spawned it, the roster has never seen it. */
   onHired: (

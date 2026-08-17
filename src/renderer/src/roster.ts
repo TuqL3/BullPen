@@ -95,37 +95,10 @@ export function projectOf(cwd: string): string {
   return cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd
 }
 
-/** The roster you pick from in the add-agent wizard. */
-export const PRESETS = [
-  'Michael',
-  'Jim',
-  'Pam',
-  'Dwight',
-  'Kevin',
-  'Angela',
-  'Oscar',
-  'Stanley',
-  'Phyllis',
-  'Andy',
-  'Ryan',
-  'Toby',
-  'Creed',
-  'Meredith'
-] as const
+/** Names and the id rules that go with them live next to the hire path in
+ *  main, so a hired agent and a wizard agent can never drift apart. */
+export { PRESETS, slug } from '../../names.ts'
 
 /** Shirt colours offered in the wizard. Kept few on purpose - a picker with a
  *  hundred swatches makes the roster harder to read, not easier. */
 export const SHIRT_CHOICES = ['#d4685f', '#5f9e63', '#3e8fa8', '#d4a72c', '#8a7ac9', '#d98b4a']
-
-/** Filesystem- and id-safe name. Agent ids become directory names. */
-export function slug(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 32) || 'agent'
-  )
-}

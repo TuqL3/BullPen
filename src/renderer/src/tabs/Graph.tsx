@@ -1,4 +1,4 @@
-import { faceFor } from '../avatar'
+import { faceFor } from '../roster'
 import { LABEL, MONO } from '../theme'
 import type { Agent, MailEvent } from '../store'
 

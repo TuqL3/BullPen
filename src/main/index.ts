@@ -1,10 +1,17 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
-import { list as listDir, read as readFile, write as writeFile } from './code.ts'
+import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
 import { checkWorkspace, readConfig, writeConfig } from './config.ts'
-import { changes as gitChanges, diff as gitDiff } from './git.ts'
+import {
+  changes as gitChanges,
+  diff as gitDiff,
+  discard as gitDiscard,
+  discardBlock as gitDiscardBlock,
+  discardHunk as gitDiscardHunk,
+  stats as gitStats
+} from './git.ts'
 import { ActivityLog } from './activity.ts'
 import { Board, boardPath, type TaskStatus } from './board.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
@@ -12,6 +19,7 @@ import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
 import {
   GOD_ID,
   GOD_NAME,
+  workerBrief,
   HIRE_ABOVE_PCT,
   REUSE_BELOW_PCT,
   floorPath,
@@ -23,6 +31,16 @@ import {
 import { Hive, HIRE, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
+import { hireName, slug as nameId } from '../names.ts'
+
+// Unpackaged, Electron names itself and the dock says "Electron" with the
+// default icon. The packaged app gets both from electron-builder; this is only
+// so a dev run is the same app. Set before getPath(), which uses the name.
+const ICON = join(import.meta.dirname, '../../build/icon.png')
+if (!app.isPackaged) {
+  app.setName('BullPen')
+  app.whenReady().then(() => app.dock?.setIcon(ICON))
+}
 
 const BULLPEN_HOME = process.env.BULLPEN_HOME ?? join(app.getPath('home'), '.bullpen')
 const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
@@ -44,6 +62,9 @@ const activity = new ActivityLog()
  */
 const edits = new Map<string, { path: string; ts: number; tool: string }[]>()
 const EDIT_CAP = 60
+
+/** agentId -> the question it is stopped on in its own terminal, if any. */
+const waiting = new Map<string, string>()
 
 /** Questions agents have addressed to the human, newest last. */
 const questions = new Map<string, Message & { id: string }>()
@@ -93,11 +114,18 @@ function spawnAgent(spec: AgentSpec): ReturnType<PtyManager['spawn']> {
   const agentHome = join(AGENTS_HOME, spec.id)
   const settingsPath = approvals.installHook(spec.id, agentHome)
 
+  // Michael has his own briefing file and answers to the human directly;
+  // everyone else answers to Michael, and has to be told so at spawn - an
+  // agent that is never told to report simply does not.
+  const brief =
+    spec.id === GOD_ID ? [] : ['--append-system-prompt', workerBrief(spec.id, spec.reportTo ?? GOD_ID)]
+
   const state = ptys.spawn({
     ...spec,
-    args: [...(spec.args ?? []), '--settings', settingsPath],
+    args: [...(spec.args ?? []), ...brief, '--settings', settingsPath],
     env: {
       ...spec.env,
+      BULLPEN_AGENT_ID: spec.id,
       BULLPEN_MAILBOX: hive.agentDir(spec.id),
       BULLPEN_FLOOR: floorPath(BULLPEN_HOME)
     }
@@ -161,14 +189,19 @@ function projectCwd(project: string): string | null {
   return null
 }
 
-/** `seo-2`, `seo-3`, ... - readable, and never colliding with a live agent. */
+/**
+ * A name off the roster for a new hire, skipping anyone already on the floor.
+ *
+ * `hires` as well as the running ptys: an agent hired seconds ago may not have
+ * reached `isRunning` yet, and two hires in the same turn used to be able to
+ * claim the same name.
+ */
 function nextHireName(project: string): string {
-  const base = slug(project) || 'agent'
-  for (let n = 2; n < 100; n++) {
-    const name = `${base}-${n}`
-    if (!ptys.isRunning(slugId(name))) return name
-  }
-  return `${base}-${Date.now()}`
+  // nameId, not the project slug above: it is the same function hireName uses
+  // to derive the candidate id, and two spellings of "taken" would let a name
+  // through twice.
+  const claimed = new Set([...hires.values()].map((h) => nameId(h.name)))
+  return hireName(project, (id) => id === GOD_ID || claimed.has(id) || ptys.isRunning(id))
 }
 
 /** The roster as the renderer last published it - what Michael reads too. */
@@ -176,6 +209,39 @@ let lastFloor: FloorAgent[] = []
 
 /** Agents seen working, so a Stop hook can be told from a turn that mattered. */
 const working = new Set<string>()
+
+/**
+ * Whether a round of dispatched work still owes the operator a report.
+ *
+ * Armed when work is handed out, spent when the floor next falls quiet. Without
+ * it the only trace of a finished round is one activity line per agent, which
+ * says what each one stopped doing and nothing about where the work stands.
+ */
+let reportDue = false
+
+/**
+ * Ask the god agent to report, once every agent it dispatched has gone quiet.
+ *
+ * An agent only acts when prompted, so "report when the work is done" cannot be
+ * a standing instruction in the briefing - something has to notice the floor is
+ * idle and say so. Disarmed before the prompt goes out: the report is itself a
+ * turn, and re-arming on its own idle would loop forever.
+ */
+function reportWhenQuiet(): void {
+  if (!reportDue || working.size > 0) return
+  if (!godId || !ptys.isRunning(godId)) return
+  reportDue = false
+  submitPrompt(
+    godId,
+    'Everyone is idle now. Read $BULLPEN_MAILBOX/inbox first - agents mail you a ' +
+      'report when they finish - then $BULLPEN_FLOOR for anyone who sent nothing. ' +
+      'Report to me: one line per agent, who they are, what project, and where ' +
+      'their task stands. Say plainly which ones never reported and what you did ' +
+      'to find out instead. Send it by writing a message to "you" in ' +
+      '$BULLPEN_MAILBOX/outbox, not to the terminal.'
+  )
+  activity.push('message', GOD_ID, 'asked for a progress report - the floor went quiet')
+}
 
 /**
  * Say that an agent finished, and what it said.
@@ -214,12 +280,34 @@ function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType
   return spawnAgent({ id: GOD_ID, cwd, cmd: 'claude', args: [], ...size })
 }
 
+/**
+ * Where to open, given what was saved last time.
+ *
+ * The saved position is only honoured if it still lands on a screen that is
+ * actually attached - a window restored onto an unplugged monitor is invisible
+ * and looks exactly like a window that failed to open.
+ */
+function startBounds(): { width: number; height: number; x?: number; y?: number } {
+  const saved = readConfig(BULLPEN_HOME).window
+  if (!saved) return { width: 1700, height: 1000 }
+  const { width, height, x, y } = saved
+  if (x === undefined || y === undefined) return { width, height }
+  const onScreen = screen.getAllDisplays().some((d) => {
+    const w = d.workArea
+    return x + width > w.x && x < w.x + w.width && y + height > w.y && y < w.y + w.height
+  })
+  return onScreen ? { width, height, x, y } : { width, height }
+}
+
 function createWindow(): void {
+  const saved = readConfig(BULLPEN_HOME).window
   win = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    ...startBounds(),
     backgroundColor: '#faf9f5',
     autoHideMenuBar: true,
+    // Windows and Linux take the icon from the window; packaged builds get it
+    // from the executable instead, and build/ is not shipped.
+    ...(app.isPackaged ? {} : { icon: ICON }),
     // macOS keeps its native traffic lights, inset over our own title bar.
     // Everywhere else there is nothing worth keeping, so drop the frame.
     ...(process.platform === 'darwin'
@@ -232,13 +320,32 @@ function createWindow(): void {
       nodeIntegration: false
     }
   })
-  // Opened maximised: the floor plan is four panels wide, and at the default
-  // 1400x900 the first thing anyone does is drag the window bigger.
-  win.maximize()
+  if (saved?.maximized) win.maximize()
+
+  // Remember the size and place across restarts. getNormalBounds() rather than
+  // getBounds(): while maximised or full screen the latter reports the screen,
+  // which would be restored as the "normal" size and could never be undone.
+  let pending: NodeJS.Timeout | null = null
+  const persistBounds = (): void => {
+    if (!win || win.isDestroyed()) return
+    const next = { ...win.getNormalBounds(), maximized: win.isMaximized() }
+    writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), window: next })
+  }
+  // A drag fires these continuously; writing the file per pixel is pointless.
+  const schedule = (): void => {
+    if (pending) clearTimeout(pending)
+    pending = setTimeout(persistBounds, 400)
+    pending.unref?.()
+  }
+  win.on('resize', schedule)
+  win.on('move', schedule)
+  // The debounce loses the last drag if the window closes inside 400ms of it.
+  win.on('close', persistBounds)
 
   // Drop the reference as soon as it dies, so send() short-circuits on null
   // rather than repeatedly probing a corpse.
   win.on('closed', () => {
+    if (pending) clearTimeout(pending)
     win = null
   })
 
@@ -346,7 +453,9 @@ function wire(): void {
     send('hive:dead', msg)
   })
   hive.on('question', (msg: Message) => {
-    const q = { ...msg, id: `q${++questionSeq}` }
+    // Stamped here: an agent writes the json itself and rarely sets `ts`, so
+    // without this every question reads as "— ago" wherever it is shown.
+    const q = { ...msg, id: `q${++questionSeq}`, ts: msg.ts || Date.now() }
     questions.set(q.id, q)
     activity.push('question', msg.from, `${msg.from} asks you: ${msg.subject}`)
     send('ask:pending', [...questions.values()])
@@ -382,8 +491,19 @@ function wire(): void {
     }
     const name = nextHireName(project)
     try {
-      const state = spawnAgent({ id: slugId(name), cwd, cmd: 'claude', args: [], cols: 100, rows: 30 })
+      const state = spawnAgent({
+        id: slugId(name),
+        cwd,
+        cmd: 'claude',
+        args: [],
+        cols: 100,
+        rows: 30,
+        // Whoever asked for the hire is who the work comes back to.
+        reportTo: msg.from
+      })
       hires.set(state.id, { name, project })
+      // A hire is work starting, even when nobody dispatched it from the UI.
+      reportDue = true
       activity.push('spawn', msg.from, `${msg.from} hired ${name} onto ${project}${known ? '' : ' (new project)'}`)
       send('agent:hired', { ...state, name, project })
       // The briefing is what the new agent is for; it arrives as its first turn.
@@ -413,8 +533,27 @@ function wire(): void {
       // something. The report is what it last said - the closest thing to one
       // that exists without asking the model to write it.
       if (working.delete(id)) reportFinished(id)
+      reportWhenQuiet()
     }
   })
+  // An agent stopped at its own question. Bullpen cannot answer it - the CLI is
+  // waiting on a keystroke in that terminal - so the job here is to say who is
+  // stuck and on what, rather than leave it reading as "working".
+  approvals.on('waiting', (id: string, asked: string) => {
+    if (waiting.get(id) === asked) return
+    waiting.set(id, asked)
+    activity.push('question', id, `${id} is waiting on you: ${asked}`)
+    send('agent:waiting', id, asked)
+  })
+  approvals.on('answered', (id: string) => {
+    if (!waiting.delete(id)) return
+    send('agent:waiting', id, null)
+  })
+
+  approvals.on('tool', (id: string, tool: string, detail: string) =>
+    send('agent:tool', id, tool, detail)
+  )
+
   approvals.on('transcript', (id: string) => pushCtxSoon(id))
   approvals.on('steer-queued', (id: string, note: string, depth: number) =>
     send('agent:steer-queued', id, note, depth)
@@ -520,6 +659,16 @@ function wire(): void {
     }
   })
   ipcMain.handle('code:edits', (_e, agentId: string) => edits.get(agentId) ?? [])
+  ipcMain.handle(
+    'code:search',
+    (_e, root: string, query: string, caseSensitive: boolean, regex: boolean, only?: string[]) => {
+      try {
+        return searchCode(root, query, { caseSensitive, regex, only })
+      } catch (err) {
+        return { hits: [], files: 0, scanned: 0, capped: false, error: String(err) }
+      }
+    }
+  )
   /**
    * A plain shell in an agent's workspace.
    *
@@ -528,10 +677,20 @@ function wire(): void {
    * giving it an agent's control plane would put its every command through the
    * approvals gate that exists to police agents.
    */
-  ipcMain.handle('shell:open', (_e, agentId: string, cwd: string, size: { cols: number; rows: number }) => {
-    const id = SHELL_PREFIX + agentId
-    const running = ptys.list().find((a) => a.id === id && a.status === 'running')
-    if (running) return running
+  ipcMain.handle(
+    'shell:open',
+    (_e, agentId: string, cwd: string, size: { cols: number; rows: number }, fresh = false) => {
+    const base = SHELL_PREFIX + agentId
+    // Without `fresh`, opening the panel reattaches to the shell already there
+    // rather than starting a second one behind the first. With it, "new shell"
+    // means what it says - it used to hand back the running shell, so the
+    // button looked broken.
+    if (!fresh) {
+      const running = ptys.list().find((a) => a.id.startsWith(base) && a.status === 'running')
+      if (running) return running
+    }
+    let id = base
+    for (let n = 2; ptys.isRunning(id) && n < 50; n++) id = `${base}#${n}`
     return ptys.spawn({
       id,
       cwd: resolve(cwd),
@@ -540,10 +699,52 @@ function wire(): void {
       ...size,
       env: { BULLPEN_FLOOR: floorPath(BULLPEN_HOME) }
     })
-  })
+    }
+  )
 
   ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
   ipcMain.handle('git:diff', (_e, root: string, rel: string) => gitDiff(root, rel))
+  ipcMain.handle('git:stats', (_e, root: string) => gitStats(root))
+  // Destructive and irreversible - the confirmation is the renderer's job, and
+  // the path guard in git.ts is what keeps it inside the agent's workspace.
+  ipcMain.handle('git:discard', async (_e, root: string, rel: string) => {
+    const res = await gitDiscard(root, rel)
+    if (res.ok) activity.push('discard', HUMAN, `you discarded changes to ${rel}`)
+    return res
+  })
+  ipcMain.handle(
+    'git:discardBlock',
+    async (_e, root: string, rel: string, hunk: number, block: number, marker: string) => {
+      const res = await gitDiscardBlock(root, rel, hunk, block, marker)
+      if (res.ok) activity.push('discard', HUMAN, `you discarded one block of ${rel}`)
+      return res
+    }
+  )
+  ipcMain.handle(
+    'git:discardHunk',
+    async (_e, root: string, rel: string, index: number, marker: string) => {
+      const res = await gitDiscardHunk(root, rel, index, marker)
+      if (res.ok) activity.push('discard', HUMAN, `you discarded one hunk of ${rel}`)
+      return res
+    }
+  )
+
+  // The CLI draws its own prompt block and chrome from a theme of its own, so
+  // it has to be told which one Bullpen is in - otherwise a dark ~/.claude
+  // setting paints a black band down a light terminal.
+  ipcMain.handle('ui:mode', () => readConfig(BULLPEN_HOME).mode ?? null)
+  ipcMain.handle('ui:setMode', (_e, mode: 'light' | 'dark') => {
+    if (mode !== 'light' && mode !== 'dark') return false
+    writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), mode })
+    approvals.setTheme(mode)
+    // Rewrite what is on disk for every agent already running. Their CLI keeps
+    // the theme it started with, but a restarted one - and the next hire - will
+    // not be left mismatched until the config is touched again.
+    for (const id of ptys.list().map((a) => a.id)) {
+      if (!isShell(id)) approvals.installHook(id, join(AGENTS_HOME, id))
+    }
+    return true
+  })
 
   ipcMain.handle('layout:get', () => readConfig(BULLPEN_HOME).layout ?? null)
   ipcMain.handle('layout:set', (_e, layout: unknown) => {
@@ -577,9 +778,11 @@ function wire(): void {
   ipcMain.handle('window:minimize', () => win?.minimize())
   ipcMain.handle('window:close', () => win?.close())
 
-  ipcMain.handle('window:toggleMaximize', () => {
+  // Full screen rather than maximise: maximise stops at the work area, which is
+  // the thing that made this button look broken.
+  ipcMain.handle('window:toggleFullscreen', () => {
     if (!win) return
-    win.isMaximized() ? win.unmaximize() : win.maximize()
+    win.setFullScreen(!win.isFullScreen())
   })
 
   // Used for the first briefing, which has the same paste problem.
@@ -645,7 +848,8 @@ function wire(): void {
       'treat them as not free even if idle, because what is left of their window ' +
       'is not enough to work in and everything they still carry is charged again ' +
       'every turn. Missing ctxPct means a fresh agent, not a full one. ' +
-      'Send them the task through $BULLPEN_MAILBOX/outbox. ' +
+      'Send them the task through $BULLPEN_MAILBOX/outbox, and say in it that ' +
+      'they must mail you a report when they are done or blocked. ' +
       'If the project has nobody free by that rule, hire one: write a message to ' +
       '"hire" with the project as the subject and the task as the body. If the ' +
       'floor has never heard of the project, it has no directory yet - ask me ' +
@@ -657,6 +861,7 @@ function wire(): void {
         ? `Dispatch: ${task} — assign this to ${owner}.${where} ${HOW}`
         : `Dispatch: ${task} —${where} ${HOW}`
     submitPrompt(target, brief)
+    reportDue = true
     activity.push('message', HUMAN, `you dispatched via ${target}: ${text.slice(0, 80)}`)
     return null
   })
@@ -732,6 +937,7 @@ app.whenReady().then(async () => {
   if (reaped.length) console.log('[bullpen] reaped orphans:', JSON.stringify(reaped))
   if (killed.length) setTimeout(() => forceKill(killed), 2000).unref?.()
 
+  approvals.setTheme(readConfig(BULLPEN_HOME).mode ?? 'light')
   await approvals.start()
   wire()
   createWindow()

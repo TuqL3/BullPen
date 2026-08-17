@@ -1,6 +1,7 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { inside } from './code.ts'
+import { blockPatch, blocks, parseDiff } from '../diff.ts'
 
 const run = promisify(execFile)
 
@@ -31,6 +32,26 @@ const git = async (cwd: string, args: string[]): Promise<string> => {
   const { stdout } = await run('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 })
   return stdout
 }
+
+/**
+ * The same, for a command that reads a patch on stdin.
+ *
+ * Spawned rather than execFile'd: execFile has no way to write to the child, so
+ * `git apply -` sat waiting for input that never came and the call hung.
+ */
+const gitStdin = (cwd: string, args: string[], input: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    child.on('error', reject)
+    child.on('close', (code) =>
+      code === 0 ? resolve(out) : reject(new Error(err.trim() || `git ${args[0]} exited ${code}`))
+    )
+    child.stdin.end(input)
+  })
 
 export async function isRepo(cwd: string): Promise<boolean> {
   try {
@@ -106,5 +127,175 @@ export async function diff(cwd: string, rel: string): Promise<{ text: string; er
     return { text }
   } catch (err) {
     return { text: '', error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * How many lines each tracked file has added and deleted, in one call.
+ *
+ * A cheap way to notice that a file's content moved: re-reading every open
+ * diff on a timer is one `git diff` per file per tick, and comparing counts is
+ * one `git diff --numstat` for the whole workspace.
+ */
+export async function stats(cwd: string): Promise<Record<string, string>> {
+  try {
+    if (!(await isRepo(cwd))) return {}
+    const raw = await git(cwd, ['diff', 'HEAD', '--numstat', '-z'])
+    const out: Record<string, string> = {}
+    // -z: `adds\tdels\t\0path\0`, and a rename adds two more NUL fields.
+    const parts = raw.split('\0')
+    for (let i = 0; i < parts.length; i++) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.*)$/.exec(parts[i])
+      if (!m) continue
+      const path = m[3] || parts[++i] || ''
+      if (path) out[path] = `${m[1]}-${m[2]}`
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Throw away the changes to one path.
+ *
+ * Irreversible, and two different operations wearing one name: a tracked file
+ * goes back to HEAD, an untracked one is deleted. Nothing here can recover
+ * either, so the caller is expected to have asked a human first - main only
+ * refuses what it can prove is wrong.
+ */
+export async function discard(cwd: string, rel: string): Promise<{ ok?: true; error?: string }> {
+  try {
+    // Throws if the path escapes the workspace; the renderer never picks the cwd.
+    inside(cwd, rel)
+    if (!(await isRepo(cwd))) return { error: 'not a git repository' }
+
+    const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', rel])
+      .then(() => true)
+      .catch(() => false)
+
+    if (!tracked) {
+      // -f because git refuses to delete without it, and never -x: an ignored
+      // file is not a change under review and must not be swept up with one.
+      await git(cwd, ['clean', '-f', '--', rel])
+      return { ok: true }
+    }
+
+    // Staged and unstaged together: restoring only the worktree on a staged
+    // file leaves the change sitting in the index, which reads as "discarded"
+    // in the panel and commits anyway.
+    await git(cwd, ['restore', '--staged', '--worktree', '--', rel]).catch(async () => {
+      // git older than 2.23 has no `restore`.
+      await git(cwd, ['reset', '-q', 'HEAD', '--', rel]).catch(() => '')
+      await git(cwd, ['checkout', '--', rel])
+    })
+    return { ok: true }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Throw away one block of changed lines, leaving everything else alone.
+ *
+ * A block is a run of touching +/- lines. Git's hunks are wider than that - it
+ * merges anything less than six lines apart - so reverting a hunk on a file
+ * whose edits are close together throws away the lot, which is exactly what it
+ * looked like when it happened.
+ *
+ * The diff is re-read here rather than taken from the panel: the panel's copy
+ * can be seconds old, and a patch built on stale text lands on the wrong lines.
+ * `marker` is the `@@` line the panel showed, and nothing is applied unless the
+ * hunk at that index still starts with it.
+ */
+export async function discardBlock(
+  cwd: string,
+  rel: string,
+  hunkIndex: number,
+  blockIndex: number,
+  marker: string
+): Promise<{ ok?: true; error?: string }> {
+  try {
+    inside(cwd, rel)
+    if (!(await isRepo(cwd))) return { error: 'not a git repository' }
+    const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', rel])
+      .then(() => true)
+      .catch(() => false)
+    if (!tracked) return { error: 'this file is not tracked - discard it whole, or delete it' }
+
+    const parsed = parseDiff(await git(cwd, ['diff', 'HEAD', '--', rel]))
+    const hunk = parsed.hunks[hunkIndex]
+    if (!hunk) return { error: 'that block is gone - the file changed' }
+    if (hunk.marker !== marker) return { error: 'the file changed under the panel - reopen it' }
+
+    const inHunk = blocks(parsed).filter((b) => b.hunk === hunkIndex)
+    const block = inHunk[blockIndex]
+    if (!block) return { error: 'that block is gone - the file changed' }
+
+    const patch = blockPatch(parsed, block, rel)
+    if (!patch) return { error: 'nothing to revert in that block' }
+
+    // Applied forwards, because the patch is written against the file as it is.
+    // --index keeps a staged copy in step; worktree-only is the fallback when
+    // the index holds something the patch cannot be applied to.
+    await gitStdin(cwd, ['apply', '--index', '--unidiff-zero', '-'], patch).catch(() =>
+      gitStdin(cwd, ['apply', '--unidiff-zero', '-'], patch)
+    )
+    return { ok: true }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Throw away one hunk, leaving the rest of the file's changes alone.
+ *
+ * A file is rarely one change. Discarding all of it to get rid of one wrong
+ * edit is why people copy the good parts out to a scratch file first.
+ *
+ * The patch is rebuilt here from a fresh `git diff` rather than sent in from
+ * the renderer: the panel's copy can be seconds old, and a patch built from
+ * stale text applies cleanly to the wrong lines. `marker` is the `@@` line the
+ * panel showed - if the hunk at that index no longer starts with it, the file
+ * moved under the panel and nothing is reverted.
+ */
+export async function discardHunk(
+  cwd: string,
+  rel: string,
+  index: number,
+  marker: string
+): Promise<{ ok?: true; error?: string }> {
+  try {
+    inside(cwd, rel)
+    if (!(await isRepo(cwd))) return { error: 'not a git repository' }
+
+    const tracked = await git(cwd, ['ls-files', '--error-unmatch', '--', rel])
+      .then(() => true)
+      .catch(() => false)
+    if (!tracked) return { error: 'this file is not tracked - discard it whole, or delete it' }
+
+    const text = await git(cwd, ['diff', 'HEAD', '--', rel])
+    const at = text.indexOf('\n@@')
+    if (at === -1) return { error: 'nothing to discard' }
+    const header = text.slice(0, at + 1)
+    const hunks = text
+      .slice(at + 1)
+      .split(/\n(?=@@ )/)
+      .map((h) => (h.endsWith('\n') ? h : h + '\n'))
+
+    const hunk = hunks[index]
+    if (!hunk) return { error: 'that hunk is gone - the file changed' }
+    if (!hunk.startsWith(marker)) return { error: 'the file changed under the panel - reopen it' }
+
+    // --index reverses the change in the index as well, so a partially staged
+    // file does not keep the discarded hunk staged and commit it anyway. It
+    // needs the patch to apply to both; worktree-only is the fallback.
+    const patch = header + hunk
+    await gitStdin(cwd, ['apply', '--reverse', '--index', '-'], patch).catch(() =>
+      gitStdin(cwd, ['apply', '--reverse', '-'], patch)
+    )
+    return { ok: true }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
   }
 }

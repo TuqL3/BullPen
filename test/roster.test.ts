@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { FACE_SIZE, faceFor, PRESETS, slug } from '../src/renderer/src/avatar.ts'
+import { FACE_SIZE, faceFor, PRESETS, slug } from '../src/renderer/src/roster.ts'
 
 const CAST = ['michael', 'dwight', 'jim', 'pam', 'stanley', 'kevin', 'angela', 'oscar', 'toby']
 

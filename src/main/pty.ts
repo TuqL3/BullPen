@@ -14,6 +14,8 @@ export type AgentSpec = {
   env?: Record<string, string>
   cols?: number
   rows?: number
+  /** Who this agent reports to when it finishes. Defaults to the god agent. */
+  reportTo?: string
 }
 
 export type AgentState = {
