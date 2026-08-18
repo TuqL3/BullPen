@@ -41,6 +41,33 @@ export type ContextRule = {
 }
 
 /** A brief the operator handed to the god agent, before he wrapped it in orders. */
+/**
+ * The floor's shape, as the renderer sees it.
+ *
+ * Structural rather than imported from main: preload is the only thing both
+ * sides share, and re-declaring the four fields the UI actually reads is
+ * cheaper than dragging main's module graph into the renderer.
+ */
+export type WorkflowInfo = {
+  name: string
+  description: string
+  dispatch: string
+  entry: string
+  reuseBelowPct: number
+  hireAbovePct: number
+  roles: Record<
+    string,
+    {
+      can: string[]
+      label: string
+      fixed?: { id: string; name: string }
+      hireable?: boolean
+      brief: string
+    }
+  >
+  talksTo: Record<string, string[]>
+}
+
 export type Dispatch = { text: string; owner: string; project: string; ts: number }
 
 /** Where the work stands, as the god agent last described it. */
@@ -186,20 +213,80 @@ const api = {
   setGod: (id: string) => ipcRenderer.invoke('agent:setGod', id),
   /** Say what a hand-made agent is for: it decides how its cards move. */
   setRole: (id: string, role: string) => ipcRenderer.invoke('agent:setRole', id, role),
-  /** Bring the analyst up, or hand back the one already running. */
-  ensureBa: (size: {
+  /**
+   * Bring up every standing agent the workflow names besides the boss, or hand
+   * back the ones already running. Empty when the workflow has none - a floor
+   * whose boss assigns directly has nobody here, and that is an answer rather
+   * than a failure.
+   */
+  ensureFixed: (size: {
     cols: number
     rows: number
-  }): Promise<{
-    id: string
-    name: string
-    cwd: string
-    pid: number
-    startedAt: number
-    cols: number
-    rows: number
-    alreadyUp: boolean
-  }> => ipcRenderer.invoke('ba:ensure', size),
+  }): Promise<
+    {
+      id: string
+      name: string
+      /** Which workflow role this one fills. */
+      role: string
+      cwd: string
+      pid: number
+      startedAt: number
+      cols: number
+      rows: number
+      alreadyUp: boolean
+    }[]
+  > => ipcRenderer.invoke('fixed:ensure', size),
+
+  /**
+   * The floor's shape - as structure for the summary table, and as the markdown
+   * a person edits. Both, because they answer different questions: the table
+   * says what is running, the text is what you change.
+   */
+  workflow: (): Promise<{
+    workflow: WorkflowInfo
+    markdown: string
+    problems: string[]
+    stale: string[]
+  }> => ipcRenderer.invoke('workflow:get'),
+  /** Everything switchable: the built-in starting points, and what was saved. */
+  workflowList: (): Promise<
+    { name: string; description: string; markdown: string; builtin: boolean }[]
+  > => ipcRenderer.invoke('workflow:list'),
+  /**
+   * Stop the standing agents, so they can be brought back up on the workflow
+   * that is running now. Returns the ids that are down.
+   */
+  stopFixed: (): Promise<string[]> => ipcRenderer.invoke('fixed:stop'),
+  /**
+   * Write a workflow from a sentence about how the floor should work.
+   *
+   * Slow - it runs a real model turn - and it can come back with problems
+   * still on it, which is why it returns them rather than throwing.
+   */
+  generateWorkflow: (
+    description: string
+  ): Promise<{ markdown?: string; problems?: string[]; error?: string }> =>
+    ipcRenderer.invoke('workflow:generate', description),
+  /** An annotated empty floor, for a first workflow. */
+  workflowStarter: (): Promise<string> => ipcRenderer.invoke('workflow:starter'),
+  /** Keep one without running it. */
+  saveWorkflow: (markdown: string): Promise<{ name?: string; error?: string }> =>
+    ipcRenderer.invoke('workflow:save', markdown),
+  deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
+    ipcRenderer.invoke('workflow:delete', name),
+  /**
+   * Read the editor's text without applying it: what is wrong with it, and the
+   * floor it describes, for the preview beside it.
+   */
+  lintWorkflow: (
+    markdown: string
+  ): Promise<{ problems: string[]; preview: WorkflowInfo | null }> =>
+    ipcRenderer.invoke('workflow:lint', markdown),
+  /** Apply one. Refused whole if it would not work, with the reasons. */
+  setWorkflow: (
+    markdown: string
+  ): Promise<{ workflow?: WorkflowInfo; markdown?: string; error?: string }> =>
+    ipcRenderer.invoke('workflow:set', markdown),
   /** Bring Michael up, or hand back the one already running. */
   ensureGod: (size: {
     cols: number

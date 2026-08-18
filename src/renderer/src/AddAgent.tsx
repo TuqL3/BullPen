@@ -2,14 +2,15 @@ import { useState } from 'react'
 import { Avatar } from './Avatar'
 import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './roster'
 import { LABEL, MONO } from './theme'
+import type { WorkflowInfo } from '../../preload/index'
 
 export type Draft = {
   /**
-   * What this agent is for. The floor's own two - Michael and the analyst - are
-   * spawned by the app; what the wizard makes is somebody who builds, or
-   * somebody who checks what was built.
+   * What this agent is for: a role name from the running workflow. The roles
+   * with a fixed agent are spawned by the app; what the wizard makes is one of
+   * the roles that workflow says may be hired into.
    */
-  role: 'god' | 'dev' | 'tester'
+  role: string
   project: string
   name: string
   face: string
@@ -53,18 +54,32 @@ export function AddAgent({
   taken,
   prefill,
   onCancel,
-  onSpawn
+  onSpawn,
+  workflow
 }: {
   taken: string[]
   /** Fields the caller already knows - hiring into a project fills in both. */
   prefill?: Partial<Draft>
   onCancel: () => void
   onSpawn: (d: Draft) => Promise<string | null>
+  /** The running workflow: which roles exist here, and what each is called. */
+  workflow: WorkflowInfo | null
 }) {
+  // Whatever this floor says may be hired into. A workflow with one kind of
+  // worker shows one chip rather than a choice that is not one.
+  const hireable = Object.entries(workflow?.roles ?? {})
+    .filter(([, def]) => def.hireable)
+    .map(([role, def]) => [role, def.label] as const)
   const [step, setStep] = useState(0)
   // Michael already holds the god seat and is spawned on launch, so everyone
   // hired here is a worker. Nothing to decide.
-  const [d, setD] = useState<Draft>({ ...EMPTY, ...suggest(taken), ...prefill })
+  const [d, setD] = useState<Draft>({
+    ...EMPTY,
+    // A default of 'dev' is this workflow's default only by coincidence.
+    role: hireable[0]?.[0] ?? EMPTY.role,
+    ...suggest(taken),
+    ...prefill
+  })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -143,14 +158,9 @@ export function AddAgent({
                   id: {id} · becomes their mailbox and settings directory
                 </div>
 
-                <div style={{ ...LABEL, marginTop: 4 }}>Role</div>
+                {hireable.length > 1 && <div style={{ ...LABEL, marginTop: 4 }}>Role</div>}
                 <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-                  {(
-                    [
-                      ['dev', 'builds what the analyst assigns'],
-                      ['tester', 'checks it, and takes bugs back to whoever wrote it']
-                    ] as const
-                  ).map(([role, what]) => (
+                  {(hireable.length > 1 ? hireable : []).map(([role, what]) => (
                     <div
                       key={role}
                       onClick={() => set('role', role)}

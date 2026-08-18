@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { onEnter } from './keys'
 import { AddAgent, type Draft } from './AddAgent'
+import { Settings } from './Settings'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
 import { Floor } from './floor/Floor'
@@ -14,7 +15,7 @@ import { Tasks } from './tabs/Tasks'
 import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './roster'
-import type { Dispatch, Question, Report } from '../../preload/index'
+import type { Dispatch, Question, Report, WorkflowInfo } from '../../preload/index'
 import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
 import { FilePanel, Review, WorkTree } from './Code'
 // Not in `Code`: a module that exports anything but components loses React Fast
@@ -36,7 +37,7 @@ import {
   type PanelId
 } from './layout'
 import { LABEL, MONO, VARS, type Mode } from './theme'
-import { useStore, type Agent, type Approval } from './store'
+import { isCore, setCoreRoles, useStore, type Agent, type Approval } from './store'
 
 const TABS = [
   'terminal',
@@ -53,6 +54,7 @@ const TABS = [
 ] as const
 type Tab = (typeof TABS)[number]
 
+
 /**
  * The roster is a hierarchy, not a flat list: the operator's own clone sits
  * above everything, and the workers below it are grouped by project. That
@@ -60,7 +62,7 @@ type Tab = (typeof TABS)[number]
  */
 function byProject(agents: Agent[]): { label: string; rows: Agent[] }[] {
   const groups = new Map<string, Agent[]>()
-  for (const a of agents.filter((x) => x.role !== 'god' && x.role !== 'ba')) {
+  for (const a of agents.filter((x) => !isCore(x.role))) {
     const label = a.project || projectOf(a.cwd)
     groups.set(label, [...(groups.get(label) ?? []), a])
   }
@@ -69,11 +71,17 @@ function byProject(agents: Agent[]): { label: string; rows: Agent[] }[] {
     .map(([label, rows]) => ({ label, rows }))
 }
 
-/** What to call each role in the roster. A developer is the unremarkable case. */
-const ROLE_TAG: Record<string, string> = {
-  god: 'boss',
-  ba: 'analyst',
-  tester: 'tester'
+/**
+ * What to call a role in the roster, from the workflow's own label.
+ *
+ * The label is written to be read mid-sentence ("the boss does not write to a
+ * tester"), so the article comes off before it goes on a row. Whoever builds is
+ * the unremarkable case and gets no tag at all - tagging every row tags none.
+ */
+const roleTag = (wf: WorkflowInfo | null, role: string): string | null => {
+  const def = wf?.roles[role]
+  if (!def || def.can.includes('builds')) return null
+  return def.label.replace(/^(the|a|an) /i, '')
 }
 
 const DOT: Record<string, string> = {
@@ -95,6 +103,13 @@ export default function App() {
   const shellSeen = useRef(false)
   if (tab === 'shell') shellSeen.current = true
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
+  /**
+   * The floor's shape. Read once from main, which is where it is enforced -
+   * the renderer uses it to know who cannot be fired, which roles the wizard
+   * may hire into, and who to bring up beside the boss.
+   */
+  const [wf, setWf] = useState<WorkflowInfo | null>(null)
+  const [settings, setSettings] = useState(false)
   const [dragging, setDragging] = useState<PanelId | null>(null)
   // Null when closed; otherwise the fields the wizard opens with. Hiring the
   // second agent into a project should not mean re-answering where it lives.
@@ -258,9 +273,12 @@ export default function App() {
       startedAt: number
       cols: number
       rows: number
-    },
-    role: 'god' | 'ba' = 'god'
+    } | null,
+    role = 'god'
   ): void => {
+    // A workflow may have no second fixed agent - `solo` is one boss and hired
+    // developers - and main says so with null rather than inventing one.
+    if (!g) return
     store().upsertAgent({
       id: g.id,
       role,
@@ -300,10 +318,12 @@ export default function App() {
       try {
         const g = await window.bullpen.ensureGod({ cols, rows })
         if (!cancelled) adoptGod(g)
-        // Beside him, not after him: work is handed to her, and a floor with
-        // Michael and nobody to hand to is a floor where nothing gets assigned.
-        const b = await window.bullpen.ensureBa({ cols, rows })
-        if (!cancelled) adopt(b, 'ba')
+        // Beside him, not after him: work is handed to them, and a floor with
+        // a boss and nobody to hand to is a floor where nothing gets assigned.
+        // However many the workflow names - two is `analyst-chain`, not a rule.
+        for (const a of await window.bullpen.ensureFixed({ cols, rows })) {
+          if (!cancelled) adopt(a, a.role)
+        }
       } catch (err) {
         // A floor with no Michael still works - dispatch is what stops working,
         // and it already says so - but silence would look like he never existed.
@@ -337,6 +357,15 @@ export default function App() {
 
   useEffect(() => {
     window.bullpen.layout().then((raw) => setLayout(normalise(raw)))
+  }, [])
+
+  useEffect(() => {
+    window.bullpen.workflow().then(({ workflow }) => {
+      setWf(workflow)
+      // A row's × is hidden by this, and `removeAgent` refuses on it. Set as
+      // soon as it is known, so a fixed agent is never briefly fireable.
+      setCoreRoles(Object.keys(workflow.roles).filter((r) => workflow.roles[r].fixed))
+    })
   }, [])
 
   /** Every layout change is persisted; there is no separate save action. */
@@ -430,8 +459,23 @@ export default function App() {
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return setMoveError(res.error)
     adoptGod(res)
-    // She works in his directory, so main stopped her when he moved.
-    adopt(await window.bullpen.ensureBa({ cols, rows }), 'ba')
+    // They work in his directory, so main stopped them when he moved.
+    for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
+  }
+
+  /**
+   * Bring the standing agents back up on the workflow that is running now.
+   *
+   * Applying a workflow does not touch anyone already spawned - a brief is
+   * handed to a CLI once and never again - so without this the floor kept
+   * running the shape it started on and nothing in the UI could move it. Their
+   * conversations do not survive it, which is why the dialog says so first.
+   */
+  const restartFloor = async (): Promise<void> => {
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    await window.bullpen.stopFixed()
+    adoptGod(await window.bullpen.ensureGod({ cols, rows }))
+    for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
   }
 
   const open = async (path: string, line?: number, col?: [number, number]): Promise<void> => {
@@ -456,7 +500,7 @@ export default function App() {
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return res.error
     adoptGod(res)
-    adopt(await window.bullpen.ensureBa({ cols, rows }), 'ba')
+    for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
     setSetupCwd(null)
     return null
   }
@@ -499,6 +543,64 @@ export default function App() {
     setSteerText('')
   }
 
+  /**
+   * Let someone go: stop the process if it is still up, then take the row off
+   * the roster. Halting alone left an exited agent sitting there with no way
+   * to dismiss it, which is the shape the bug arrived in.
+   *
+   * The confirm is only for an agent still running - firing one is not
+   * undoable, and it takes the terminal's scrollback with it. A process that
+   * has already exited has nothing left to lose, so that row just goes.
+   */
+  const fire = async (a: Agent): Promise<void> => {
+    // Michael and the analyst are the floor, not staff on it: dispatch routes
+    // through him and every hire below is hers. Firing either leaves a floor
+    // that cannot hand out work, and nothing in the UI brings them back.
+    if (isCore(a.role)) return
+    if (a.status === 'running') {
+      const queued = store().steers[a.id]?.length ?? 0
+      const note = queued > 0 ? `\n\n${queued} queued note${queued === 1 ? '' : 's'} will be dropped.` : ''
+      if (!window.confirm(`Fire ${a.name}? It stops now and leaves the roster.${note}`)) return
+      await window.bullpen.kill(a.id)
+    }
+    store().removeAgent(a.id)
+  }
+
+  /**
+   * Put an exited agent back on its feet, in the same directory under the same
+   * id. Same id on purpose: the terminal keeps its scrollback, so what the last
+   * run said is still there to read above the new prompt.
+   *
+   * Main resolves the role from the id it already holds, so a restarted Michael
+   * comes back as Michael; `setRole` re-states it for a worker whose role only
+   * the roster knows.
+   */
+  const restart = async (a: Agent): Promise<void> => {
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    try {
+      const state = await window.bullpen.spawn({ id: a.id, cwd: a.cwd, cmd: a.cli ?? 'claude', cols, rows })
+      store().upsertAgent({
+        id: a.id,
+        pid: state.pid,
+        startedAt: state.startedAt,
+        cols: state.cols,
+        rows: state.rows,
+        status: 'running',
+        exitCode: undefined,
+        // Same reason as a fresh hire: it is sitting at a prompt having
+        // submitted nothing, and no Stop hook is coming to correct 'working'.
+        activity: 'idle',
+        asked: null,
+        doing: undefined
+      })
+      window.bullpen.setRole(a.id, a.role)
+      select(a.id)
+      setTab('terminal')
+    } catch (e) {
+      setMoveError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   // Everything the ask me tab lists: a held tool call, a question mailed to
   // you, and an agent stopped on a prompt in its own terminal. Declared above
   // `panes`: the tab bar is built inside it, so a const below is still dead.
@@ -516,7 +618,7 @@ export default function App() {
           {agents.length === 0 && <div style={S.empty}>No one hired yet.</div>}
 
           {agents
-            .filter((a) => a.role === 'god' || a.role === 'ba')
+            .filter((a) => isCore(a.role))
             .map((a) => (
               <RosterRow
                 key={a.id}
@@ -525,7 +627,9 @@ export default function App() {
                 active={selected === a.id}
                 blocked={approvals.some((p) => p.agentId === a.id)}
                 onSelect={() => select(a.id)}
-                onKill={() => window.bullpen.kill(a.id)}
+                onFire={() => fire(a)}
+                onRestart={() => restart(a)}
+                tag={roleTag(wf, a.role)}
               />
             ))}
 
@@ -552,7 +656,9 @@ export default function App() {
                     active={selected === a.id}
                     blocked={approvals.some((p) => p.agentId === a.id)}
                     onSelect={() => select(a.id)}
-                    onKill={() => window.bullpen.kill(a.id)}
+                    onFire={() => fire(a)}
+                    onRestart={() => restart(a)}
+                    tag={roleTag(wf, a.role)}
                   />
                 ))}
               </div>
@@ -581,6 +687,21 @@ export default function App() {
                     move
                   </button>
                 )}
+                {/* Sat next to `queue` before, one button away from the thing
+                    you press all day, and it kills a process without asking. */}
+                {current?.status === 'running' && (
+                  <button
+                    style={{ ...S.linkBtn, color: 'var(--danger)' }}
+                    title="stop this agent, keep it on the roster"
+                    onClick={() => {
+                      const queued = steers[current.id]?.length ?? 0
+                      const note = queued > 0 ? ` ${queued} queued note${queued === 1 ? '' : 's'} will be dropped.` : ''
+                      if (window.confirm(`Halt ${current.name}?${note}`)) window.bullpen.kill(current.id)
+                    }}
+                  >
+                    halt
+                  </button>
+                )}
               </div>
               {moveError && (
                 <div style={{ fontSize: 11, color: 'var(--danger)' }}>{moveError}</div>
@@ -606,18 +727,22 @@ export default function App() {
           {current && (
             <div style={S.control}>
               <span style={{ ...LABEL, color: 'var(--faint)' }}>queue</span>
+              {/* An idle agent has no tool call for a note to ride in on, so the
+                  field took text and dropped it. Better to be shut than to
+                  accept typing it cannot deliver. */}
               <input
-                style={S.steerInput}
+                style={{ ...S.steerInput, ...(busy ? null : S.steerInputOff) }}
                 value={steerText}
+                disabled={!busy}
                 placeholder={
                   busy
                     ? 'queue a note — it goes in with its next tool call, without interrupting it'
-                    : 'queued notes only reach a working agent; this one is idle, type in its terminal'
+                    : 'idle — type in its terminal'
                 }
                 onChange={(e) => setSteerText(e.target.value)}
                 onKeyDown={onEnter(steer)}
               />
-              <button style={S.btn} onClick={steer}>
+              <button style={{ ...S.btn, ...(busy ? null : S.btnOff) }} disabled={!busy} onClick={steer}>
                 queue
               </button>
               {(steers[current.id]?.length ?? 0) > 0 && (
@@ -625,9 +750,6 @@ export default function App() {
                   {steers[current.id].length} queued
                 </span>
               )}
-              <button style={{ ...S.btn, ...S.btnDanger }} onClick={() => window.bullpen.kill(current.id)}>
-                halt
-              </button>
             </div>
           )}
 
@@ -674,7 +796,9 @@ export default function App() {
                 }}
               />
             )}
-            {tab === 'tasks' && <Tasks agents={agents} agent={current} />}
+            {tab === 'tasks' && (
+              <Tasks agents={agents} agent={current} dispatch={wf?.dispatch ?? 'god'} />
+            )}
             {tab === 'ask me' && (
               <AskMe
                 approvals={approvals}
@@ -758,6 +882,7 @@ export default function App() {
         notifyOn={notifyOn}
         onToggleNotify={async () => setNotifyOn(await window.bullpen.setNotify(!notifyOn))}
         onToggleReview={() => setReviewing(!reviewing)}
+        onSettings={() => setSettings(true)}
       />
 
       <div
@@ -806,6 +931,19 @@ export default function App() {
           prefill={adding}
           onCancel={() => setAdding(null)}
           onSpawn={spawnFrom}
+          workflow={wf}
+        />
+      )}
+
+      {settings && (
+        <Settings
+          workflow={wf}
+          onRestartFloor={restartFloor}
+          onClose={() => setSettings(false)}
+          onApplied={(next) => {
+            setWf(next)
+            setCoreRoles(Object.keys(next.roles).filter((r) => next.roles[r].fixed))
+          }}
         />
       )}
 
@@ -851,7 +989,20 @@ function Icon({
   name,
   size = 13
 }: {
-  name: 'floor' | 'sun' | 'moon' | 'min' | 'close' | 'roster' | 'tree' | 'review' | 'bell' | 'bellOff'
+  name:
+    | 'floor'
+    | 'sun'
+    | 'moon'
+    | 'min'
+    | 'full'
+    | 'restart'
+    | 'gear'
+    | 'close'
+    | 'roster'
+    | 'tree'
+    | 'review'
+    | 'bell'
+    | 'bellOff'
   size?: number
 }) {
   const common = {
@@ -921,6 +1072,30 @@ function Icon({
     return (
       <svg {...common} aria-hidden>
         <path d="M2.5 8h11" />
+      </svg>
+    )
+  // Sliders, not a cogwheel. A cog at 13px is a circle with a fringe, which is
+  // the sun icon two buttons along - drawn that way once, and the button read
+  // as a second theme toggle rather than as settings.
+  if (name === 'gear')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M2 4.5h12M2 11.5h12" />
+        <circle cx="5.5" cy="4.5" r="1.8" />
+        <circle cx="10.5" cy="11.5" r="1.8" />
+      </svg>
+    )
+  if (name === 'restart')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M13 8a5 5 0 1 1-1.6-3.7" />
+        <path d="M13.5 2v3h-3" />
+      </svg>
+    )
+  if (name === 'full')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M6 2.5H2.5V6M10 2.5h3.5V6M6 13.5H2.5V10M10 13.5h3.5V10" />
       </svg>
     )
   return (
@@ -1267,7 +1442,8 @@ function TitleBar({
   diffStat,
   notifyOn,
   onToggleNotify,
-  onToggleReview
+  onToggleReview,
+  onSettings
 }: {
   mode: Mode
   onToggle: () => void
@@ -1280,6 +1456,8 @@ function TitleBar({
   notifyOn: boolean
   onToggleNotify: () => void
   onToggleReview: () => void
+  /** Open the floor's shape - roles, routing, briefs. Set once, not per task. */
+  onSettings: () => void
 }) {
   return (
     <div style={S.titlebar}>
@@ -1336,6 +1514,14 @@ function TitleBar({
         <Icon name={notifyOn ? 'bell' : 'bellOff'} />
       </button>
       <button
+        title="workflow"
+        aria-label="workflow settings"
+        style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        onClick={onSettings}
+      >
+        <Icon name="gear" />
+      </button>
+      <button
         title={mode === 'light' ? 'switch to dark' : 'switch to light'}
         aria-label="toggle theme"
         style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -1353,6 +1539,16 @@ function TitleBar({
           onClick={() => window.bullpen.minimize()}
         >
           <Icon name="min" />
+        </button>
+      )}
+      {!window.bullpen.isMac && (
+        <button
+          title="full screen"
+          aria-label="toggle full screen"
+          style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          onClick={() => window.bullpen.toggleFullscreen()}
+        >
+          <Icon name="full" />
         </button>
       )}
       {!window.bullpen.isMac && (
@@ -1375,14 +1571,19 @@ function RosterRow({
   active,
   blocked,
   onSelect,
-  onKill
+  onFire,
+  onRestart,
+  tag
 }: {
   agent: Agent
   god?: boolean
   active: boolean
   blocked: boolean
   onSelect: () => void
-  onKill: () => void
+  onFire: () => void
+  onRestart: () => void
+  /** What this role is called here, or null for whoever does the building. */
+  tag: string | null
 }) {
   const status = agent.status === 'exited' ? 'exited' : blocked ? 'blocked' : agent.activity
   return (
@@ -1402,20 +1603,34 @@ function RosterRow({
         >
           {/* Michael and the analyst share a workspace, so the directory alone
               tells the two of them apart not at all. */}
-          {ROLE_TAG[agent.role] ? (
-            <span style={{ color: 'var(--accent-ink)' }}>{ROLE_TAG[agent.role]} · </span>
-          ) : null}
+          {tag ? <span style={{ color: 'var(--accent-ink)' }}>{tag} · </span> : null}
           {agent.cwd.split('/').pop() || agent.cwd}
         </div>
       </div>
       <span style={{ ...S.dot, background: DOT[status] }} />
-      {agent.status === 'running' && (
+      {/* An exited agent was a dead end - no way to dismiss it, no way to start
+          it again. Restart reuses the id, so the terminal keeps its scrollback. */}
+      {agent.status === 'exited' && (
         <span
           style={S.kill}
-          title="stop this agent"
+          title={`start ${agent.name} again`}
           onClick={(e) => {
             e.stopPropagation()
-            onKill()
+            onRestart()
+          }}
+        >
+          <Icon name="restart" size={11} />
+        </span>
+      )}
+      {/* Not shown for a role with a fixed agent: see isCore. Gating this on
+          `running` is what stranded every exited agent with no way off. */}
+      {!isCore(agent.role) && (
+        <span
+          style={S.kill}
+          title={agent.status === 'running' ? `fire ${agent.name}` : 'remove from roster'}
+          onClick={(e) => {
+            e.stopPropagation()
+            onFire()
           }}
         >
           ×
@@ -1455,9 +1670,23 @@ function Dock({
                 <span style={{ ...S.dot, background: DOT[status] }} />
                 <span style={{ fontSize: 10, color: 'var(--muted)' }}>{status}</span>
               </div>
-              <div style={S.meter}>
-                <div style={{ ...S.meterFill, background: DOT[status], width: status === 'working' ? '70%' : '12%' }} />
-              </div>
+              {/* Was a fixed 70%/12% keyed off status - a progress bar that
+                  measured nothing and read as "70% done". Context usage is the
+                  one number this card actually has. */}
+              {a.ctx ? (
+                <div style={S.meter} title={`ctx ${a.ctx.pct}% · ${a.ctx.model}`}>
+                  <div
+                    style={{
+                      ...S.meterFill,
+                      background:
+                        a.ctx.pct >= 85 ? 'var(--danger)' : a.ctx.pct >= 60 ? 'var(--warn)' : 'var(--ok)',
+                      width: `${Math.max(2, Math.min(100, a.ctx.pct))}%`
+                    }}
+                  />
+                </div>
+              ) : (
+                <div style={S.meter} title="no context reading yet" />
+              )}
             </div>
           </div>
         )
@@ -1698,7 +1927,6 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--line)',
     font: `12px ${MONO}`
   },
-  btnDanger: { color: 'var(--danger)', borderColor: 'var(--danger)' },
   row: {
     display: 'flex',
     alignItems: 'center',
@@ -1761,6 +1989,8 @@ const S: Record<string, React.CSSProperties> = {
     minWidth: 132
   },
   dockCardActive: { borderColor: 'var(--accent)' },
+  steerInputOff: { opacity: 0.5, cursor: 'not-allowed' },
+  btnOff: { opacity: 0.4, cursor: 'not-allowed' },
   meter: { height: 3, background: 'var(--line)', marginTop: 3, width: 76 },
   meterTrack: { width: 90, height: 6, background: 'var(--line)', flex: '0 0 auto' },
   meterBar: { height: '100%' },

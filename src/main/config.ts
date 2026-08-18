@@ -44,6 +44,14 @@ export type Config = {
    * that works while you are elsewhere is being told when it needs you.
    */
   notify?: boolean
+  /**
+   * The floor's shape: roles, who writes to whom, and what each is told.
+   *
+   * Stored opaquely, the same way `layout` is - main parses and repairs what it
+   * reads, so there is no second copy of those rules here to keep in step. A
+   * floor that has never chosen one runs the default chain.
+   */
+  workflow?: unknown
 }
 
 /** Smaller than this and the four panels have nowhere to go. */

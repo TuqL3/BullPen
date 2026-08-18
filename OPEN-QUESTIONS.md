@@ -298,3 +298,67 @@ No art is bundled and none should be added carelessly. Munder Difflin's tileset
 (LimeZu) is non-commercial. If Bullpen is ever sold, use CC0 assets (kenney.nl)
 or buy a commercial license — and never let a restricted asset into git history,
 since deleting it later does not remove it.
+
+# Open questions — workflows
+
+Assumptions made while making the floor's shape data instead of code.
+breaks if the assumption is wrong.
+
+## 1. Applying a workflow does not restart anybody — RESOLVED
+
+A CLI is handed its brief once, as `--append-system-prompt` at spawn, so apply
+alone leaves every running agent on the old shape.
+
+**Fixed** by making the move something the operator asks for: the dialog's
+footer names how many agents are still on the shape they started on and offers
+`restart the standing ones`, which stops the dispatch agent and every other
+fixed agent and brings them back on the running workflow. It confirms first -
+the conversations do not survive it.
+
+Hired agents are deliberately left alone: a developer's context is its work, and
+this is not the place to decide that work is finished. They can be restarted one
+at a time from the roster.
+
+## 2. An agent whose role no longer exists becomes a builder
+
+`workflow:set` drops role assignments naming roles the new workflow lacks, and
+`roleOf` then falls back to the first role that builds.
+
+**Breaks if wrong:** a tester hired under `analyst-chain` and left running
+across a switch to `solo` is treated as a developer - its "pass" report moves a
+card as if it were a "done".
+**Fix if it bites:** refuse the switch while agents of a disappearing role are
+still running, the way `stale` is already reported.
+
+## 3. The dispatch agent's CLAUDE.md is written once and never revised
+
+`writeBriefing` only writes when the file is absent, because after the first
+launch it is the operator's file to edit.
+
+**Breaks if wrong:** an existing floor that switches workflow keeps a CLAUDE.md
+describing the old one. The appended system prompt is right, the file is not,
+and the file is what a person reads.
+**Fix if it bites:** detect that the file is still byte-identical to what
+Bullpen generated and replace it in that case only.
+
+## 4. Standing agents all share the dispatch agent's directory
+
+`fixed:ensure` starts every standing agent in `currentGodCwd()`, because that is
+where the analyst has always worked - she reads the projects the boss can see
+rather than editing any of them.
+
+**Breaks if wrong:** a workflow whose third standing agent is meant to work
+somewhere else has no way to say so, and gets the boss's directory instead.
+**Fix if it bites:** an optional `- cwd:` line per role, resolved against the
+same workspace check the wizard uses.
+
+## 5. `rtk` reports typechecks that did not happen
+
+`npx tsc --noEmit -p <anything>` returns exit 1 while `rtk`'s filter prints
+`TypeScript: No errors found`. It also printed that for `tsconfig.node.json` and
+`tsconfig.web.json`, neither of which exists in this repo. Every typecheck in
+this session was re-run as `rtk proxy npx tsc --noEmit -p tsconfig.json`, which
+reports honestly.
+
+**Breaks if wrong:** nothing here - but any earlier session that trusted the
+filtered output was reading a green light that was not connected to anything.

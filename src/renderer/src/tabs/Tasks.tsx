@@ -25,13 +25,24 @@ const COLUMNS: { key: Status; label: string; bar: string }[] = [
  * all with the same assignment text - unreadable exactly when there is most of
  * it. The floor-wide view is the monitor; this answers "what is this one on".
  */
-export function Tasks({ agents, agent }: { agents: Agent[]; agent: Agent | null }) {
-  // The god agent's work is not cards in columns. He hires, hands things out
-  // and reports; every one of those is done the moment it is done, and a board
-  // of them would be four columns with everything in the last one.
-  // Neither the boss nor the analyst works a board: they hire, hand out and
-  // report, and every one of those is done the moment it is done.
-  if (agent?.role === 'god' || agent?.role === 'ba') return <Ledger agent={agent} />
+export function Tasks({
+  agents,
+  agent,
+  dispatch
+}: {
+  agents: Agent[]
+  agent: Agent | null
+  /** The workflow's dispatch role - the only one whose work is not a board. */
+  dispatch: string
+}) {
+  // Dispatch relays: what reaches it goes straight back out, and every one of
+  // those is done the moment it is done - a board of them would be four columns
+  // with everything in the last one.
+  //
+  // Whoever assigns is not in that position. Work arrives, is analysed, is put
+  // on somebody, and waits to come back: that is a card with a state, and it is
+  // read the same way as anyone else's.
+  if (agent && agent.role === dispatch) return <Ledger agent={agent} />
 
   const [all, setAll] = useState<Task[]>([])
   const [text, setText] = useState('')
@@ -240,9 +251,9 @@ function Ledger({ agent }: { agent: Agent }) {
         })}
       </div>
       <p style={S.note}>
-        {agent.role === 'ba'
-          ? 'This is what the analyst has done, not a list to work through: she analyses what comes in, hires, assigns and puts the result through test. The columns are for the agents she assigns to.'
-          : 'This is what your clone has done, not a list to work through: he hands work to the analyst and reports back to you. The columns are for the agents she assigns to.'}
+        This is what your clone has done, not a list to work through: what
+        reaches him goes straight back out, and he reports to you. Everyone
+        else on the floor works a board.
       </p>
     </div>
   )
