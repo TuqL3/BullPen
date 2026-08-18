@@ -258,3 +258,25 @@ test('server denies on a token mismatch and honours a human deny', async () => {
   a.stop()
   rmSync(root, { recursive: true, force: true })
 })
+
+test('halting an agent drops what was queued for it', async () => {
+  // A queued note leaves only on the agent's next tool call. Once it is halted
+  // there is no next call, so holding them would keep instructions for a turn
+  // that will not happen - and hand them to whatever runs under that id later.
+  const { a: approvals, root } = fresh()
+  const cleared: { id: string; notes: string[] }[] = []
+  approvals.on('steer-cleared', (id: string, notes: string[]) => cleared.push({ id, notes }))
+
+  approvals.steer('dwight', 'use the staging bucket')
+  approvals.steer('dwight', 'and do not commit')
+  assert.equal(approvals.pendingSteers('dwight').length, 2)
+
+  assert.deepEqual(approvals.clearSteers('dwight'), ['use the staging bucket', 'and do not commit'])
+  assert.deepEqual(approvals.pendingSteers('dwight'), [], 'nothing is left waiting')
+  assert.equal(cleared.length, 1, 'and it is announced once')
+
+  // Nothing queued: no event, nothing to say.
+  assert.deepEqual(approvals.clearSteers('dwight'), [])
+  assert.equal(cleared.length, 1)
+  rmSync(root, { recursive: true, force: true })
+})

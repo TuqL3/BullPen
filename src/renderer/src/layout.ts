@@ -30,18 +30,14 @@ export const PANEL_TITLE: Record<PanelId, string> = {
 export const DEFAULT_LAYOUT: Layout = {
   columns: [['roster'], ['command'], ['tree', 'floor']],
   hidden: [],
-  colWeight: [0.62, 3.2, 1.4],
-  // The work tree takes the slack in that column: it is a list that grows, and
-  // the office floor below it is capped at four rows of desks.
-  rowWeight: { roster: 1, command: 1, tree: 1.6, floor: 1 }
+  // Ratios, not pixels: on any window this is a narrow roster, two thirds of
+  // the width to the command centre, and the rest to the tree and the floor.
+  // Taken from the arrangement that was settled on by hand.
+  colWeight: [0.59, 3.48, 1.15],
+  // The work tree takes the larger share of its column: it is a list that
+  // grows, and the office floor under it is a drawing of a fixed shape.
+  rowWeight: { roster: 1, command: 1, tree: 1.8, floor: 1 }
 }
-
-/**
- * Panels with a size of their own. The office floor is capped at four rows of
- * desks, so a divider above it could only add empty space or cut the room in
- * half - it takes the corner it needs and gives the rest back.
- */
-export const FIXED: ReadonlySet<PanelId> = new Set<PanelId>(['floor'])
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n))
 
@@ -101,9 +97,13 @@ export function normalise(raw: unknown): Layout {
 
   // An absent list is "never chosen" and takes the default; an empty one is a
   // choice - everything shown - and must not be overwritten by that default.
-  const hidden = Array.isArray(l.hidden)
-    ? [...new Set(l.hidden.filter((p): p is PanelId => PANELS.includes(p as PanelId)))]
-    : [...DEFAULT_LAYOUT.hidden]
+  // The command centre is never in it: it has no switch in the title bar, so a
+  // config that hides it is a window you cannot get the main panel back in.
+  const hidden = (
+    Array.isArray(l.hidden)
+      ? [...new Set(l.hidden.filter((p): p is PanelId => PANELS.includes(p as PanelId)))]
+      : [...DEFAULT_LAYOUT.hidden]
+  ).filter((p) => p !== 'command')
 
   return {
     columns,

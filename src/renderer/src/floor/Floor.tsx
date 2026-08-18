@@ -7,22 +7,45 @@ import {
   MAX_COLS,
   MAX_ROWS,
   MIN_COLS,
+  MIN_ROWS,
   findPath,
   randomWalkable,
   rng,
+  standingSpot,
   TILE,
   type Office,
   type Point
 } from './layout'
 import { ATLAS_INDEX, buildAtlas, drawChair, PALETTES, type Palette } from './tiles'
-import { drawEnvelope, drawLabel, drawPerson, type Facing } from './sprite'
+import { drawBubble, drawEnvelope, drawLabel, drawPerson, type Facing } from './sprite'
 
+
+/** Panel padding, in pixels. The office is fitted to what is left of it. */
+const PAD = 12
 
 /** Tiles crossed per second while walking. */
 const SPEED = 3.2
-/** Chance per second that a bored agent gets up. */
-const WANDER_CHANCE = 0.12
+/** Chance per second that a rested, bored agent gets up. */
+const WANDER_CHANCE = 0.05
+/**
+ * How long someone stands still after arriving anywhere, in milliseconds.
+ *
+ * An idle agent used to reach the spot it wandered to, turn on its heel and
+ * walk straight back - motion with no rest in it, which reads as a screensaver
+ * rather than an office. Only a conversation overrides this: two agents sorting
+ * something out is the one thing that should look continuous.
+ */
+const REST_MIN = 1400
+const REST_SPAN = 4200
 const ENVELOPE_MS = 1600
+/**
+ * How long two agents stand together once the sender arrives.
+ *
+ * Long enough to read as a conversation rather than a collision, short enough
+ * that an agent handed three things in a row is not away from its desk for a
+ * minute. The walk there and back is on top of it.
+ */
+const TALK_MS = 2600
 
 type Body = {
   pos: Point
@@ -32,9 +55,27 @@ type Body = {
   progress: number
   next: () => number
   wandering: boolean
+  /** Clock this body is standing still until. Set on arriving anywhere. */
+  restUntil: number
+  /**
+   * Someone this agent is walking over to talk to.
+   *
+   * `until` is 0 until it arrives, and then the clock the conversation ends on.
+   * Held on the sender: the message is theirs, and the agent being spoken to
+   * stays where it is - it is being interrupted, not summoned.
+   */
+  errand: { to: string; until: number } | null
 }
 
 type Envelope = { from: Point; to: Point; born: number }
+
+/** Which way to look to face another tile. Diagonals resolve to the long side. */
+const facingTo = (from: Point, to: Point): Facing => {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left'
+  return dy >= 0 ? 'down' : 'up'
+}
 
 /**
  * The office floor. Purely a view over the store: nothing here talks to main,
@@ -52,6 +93,18 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
   const envelopes = useRef<Envelope[]>([])
   const seenMail = useRef(0)
   const atlas = useRef<{ canvas: HTMLCanvasElement; palette: Palette } | null>(null)
+  /**
+   * The room itself, painted once.
+   *
+   * Every tile of it was redrawn on every frame - two `drawImage` calls per
+   * cell, ~1200 a frame for a floor this size, sixty times a second, to produce
+   * exactly the same picture. It only changes when the grid is rebuilt, the
+   * palette flips or someone takes a new desk, so it is painted then and blitted
+   * as one image after.
+   */
+  const room = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null)
+  /** What the last frame drew, so a still office is not repainted at 60fps. */
+  const shown = useRef('')
 
   // Fit the office to the panel rather than letterboxing a fixed 36x26 grid:
   // in a tall narrow panel that left a short wide floor stranded in the middle
@@ -61,11 +114,14 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
     const canvas = canvasRef.current
     if (!wrap || !canvas) return
     const fit = (): void => {
-      const cols = Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(wrap.clientWidth / TILE)))
-      // Height is not negotiable: the floor is four rows of desks, and its panel
-      // is sized by that rather than the other way round. Measuring the panel
-      // here would be circular now that the panel takes its size from this.
-      const rows = MAX_ROWS
+      // Inside the padding, not across it: counting the padding in bought a
+      // column the panel could not show, and the canvas was scaled to 97% to
+      // fit - which on pixel art is a row of half-pixels.
+      const roomW = wrap.clientWidth - 2 * PAD
+      // The legend sits under the canvas and is not part of the office.
+      const roomH = wrap.clientHeight - 2 * PAD - (legendRef.current?.offsetHeight ?? 0)
+      const cols = Math.min(MAX_COLS, Math.max(MIN_COLS, Math.floor(roomW / TILE)))
+      const rows = Math.min(MAX_ROWS, Math.max(MIN_ROWS, Math.floor(roomH / TILE)))
       const changed = cols !== office.current.cols || rows !== office.current.rows
       if (changed) office.current = buildOffice(cols, rows)
       // Always assign, even when the grid did not change: the canvas element
@@ -80,6 +136,7 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       // Desks moved, so every walk in progress is now a path across a grid that
       // no longer exists. Dropping the bodies re-enters everyone at the door.
       bodies.current.clear()
+      shown.current = ''
     }
     fit()
     const ro = new ResizeObserver(fit)
@@ -92,11 +149,22 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
     if (!canvas) return
     const ctx = canvas.getContext('2d')!
     ctx.imageSmoothingEnabled = false
+    // The palette changed under us: the room is painted in it, and the last
+    // frame's signature says nothing about which colours it was painted with.
+    room.current = null
+    shown.current = ''
 
     let raf = 0
     let last = performance.now()
 
     const frame = (now: number): void => {
+      // A window nobody is looking at still gets frames, and an office nobody
+      // can see still has to be worth drawing. Both cost the same as drawing it.
+      if (document.hidden || !canvas.isConnected || canvas.clientWidth === 0) {
+        last = now
+        raf = requestAnimationFrame(frame)
+        return
+      }
       const dt = Math.min(0.1, (now - last) / 1000)
       last = now
 
@@ -112,13 +180,28 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
         agents.find((a) => a.role === 'god')?.id
       )
 
-      // New mail becomes an envelope in flight. Only entries appended since the
-      // last frame, so a full mail list does not replay on every render.
+      // New mail is someone getting up and walking over. Only entries appended
+      // since the last frame, so a full mail list does not replay on every
+      // render.
+      //
+      // The envelope is what is left for mail with nobody to send it: the
+      // human, the webhook, Bullpen's own notices. Those have no body on the
+      // floor, and a message from the door is better than no message at all.
       for (let i = seenMail.current; i < mail.length; i++) {
         const m = mail[i]
         const from = seats.get(m.from)?.seat ?? office.current.door
         const to = seats.get(m.to)?.seat
-        if (to) envelopes.current.push({ from, to, born: now })
+        if (!to) continue
+        const walker = m.from === m.to ? undefined : bodies.current.get(m.from)
+        const spot = walker ? standingSpot(office.current.grid, to, walker.pos) : null
+        const path = walker && spot ? findPath(office.current.grid, walker.pos, spot) : null
+        if (walker && path) {
+          walker.path = path
+          walker.wandering = false
+          walker.errand = { to: m.to, until: 0 }
+          continue
+        }
+        envelopes.current.push({ from, to, born: now })
       }
       seenMail.current = mail.length
       envelopes.current = envelopes.current.filter((e) => now - e.born < ENVELOPE_MS)
@@ -136,18 +219,54 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
             frame: 0,
             progress: 0,
             next: rng(agent.id),
-            wandering: false
+            wandering: false,
+            restUntil: 0,
+            errand: null
           }
           bodies.current.set(agent.id, body)
         }
         const desk = seats.get(agent.id)!.desk
-        step(body, agent.id, seat, desk, dt, approvals.some((p) => p.agentId === agent.id))
+        step(body, agent.id, seat, desk, dt, now, approvals.some((p) => p.agentId === agent.id))
+      }
+      // Two people talking look at each other. Done after everyone has moved,
+      // because the one being spoken to may have been walking itself a moment
+      // ago and would otherwise face whichever way it happened to stop.
+      for (const [, body] of bodies.current) {
+        if (!body.errand?.until) continue
+        const host = bodies.current.get(body.errand.to)
+        if (!host || host.path.length > 0) continue
+        body.facing = facingTo(body.pos, host.pos)
+        host.facing = facingTo(host.pos, body.pos)
       }
       for (const id of [...bodies.current.keys()]) {
         if (!agents.some((a) => a.id === id)) bodies.current.delete(id)
       }
 
-      draw(ctx, canvas, palette, atlas.current.canvas, now)
+      // Repaint only when the picture would differ. A floor where everyone is
+      // sitting still is a still image, and painting it sixty times a second is
+      // sixty times the work for none of the difference. Envelopes animate off
+      // the clock, so while one is in flight every frame counts as new.
+      // A conversation is two people standing still, which the signature below
+      // reads as a still office. The bucket is what keeps the bubble animating
+      // without repainting a quiet floor sixty times a second.
+      const talking = [...bodies.current.values()].some((b) => b.errand?.until)
+      const sig = envelopes.current.length
+        ? `mail:${now}`
+        : (talking ? `talk:${Math.round(now / 200)}|` : '') +
+          agents
+            .map((a) => {
+              const b = bodies.current.get(a.id)
+              return b
+                ? `${a.id}:${b.pos.x},${b.pos.y},${Math.round(b.progress * TILE)},${Math.floor(
+                    b.frame
+                  )},${b.facing},${a.activity},${a.status},${approvals.some((p) => p.agentId === a.id)}`
+                : `${a.id}:-`
+            })
+            .join('|')
+      if (sig !== shown.current) {
+        draw(ctx, canvas, palette, atlas.current.canvas, now)
+        shown.current = sig
+      }
       raf = requestAnimationFrame(frame)
     }
 
@@ -157,10 +276,14 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       seat: Point,
       desk: Point,
       dt: number,
+      now: number,
       blocked: boolean
     ): void => {
       if (body.path.length > 0) {
         body.progress += dt * SPEED
+        // The legs alternate with distance covered, not with tiles arrived at:
+        // a frame per tile is one step every 300ms, which reads as a shuffle.
+        body.frame += dt * SPEED * 2
         while (body.progress >= 1 && body.path.length > 0) {
           body.progress -= 1
           const nextTile = body.path.shift()!
@@ -173,40 +296,61 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
                   ? 'down'
                   : 'up'
           body.pos = nextTile
-          body.frame++
+        }
+        // Arrived. Someone on their way to talk carries on; everyone else takes
+        // a moment before deciding what to do next.
+        if (body.path.length === 0 && !body.errand) {
+          body.restUntil = now + REST_MIN + body.next() * REST_SPAN
         }
         return
       }
 
-      const atSeat = body.pos.x === seat.x && body.pos.y === seat.y
+      // Arrived where it was going: stand there for the length of the
+      // conversation, then let the walk home happen the way any walk home does.
+      if (body.errand) {
+        if (!body.errand.until) body.errand.until = now + TALK_MS
+        if (now < body.errand.until) return
+        body.errand = null
+      }
 
-      // Arrived at a wander target: clear the flag so the next tick routes it
-      // home. Without this an idle agent walks off and stands there forever.
+      const atSeat = body.pos.x === seat.x && body.pos.y === seat.y
+      const agent = useStore.getState().agents.find((a) => a.id === id)
+      const working = agent?.activity === 'working'
+
+      // Standing where it stopped. This is most of what an idle floor is:
+      // people who moved a minute ago and have not decided to move again.
+      if (body.restUntil > now) {
+        if (atSeat && working) body.frame += dt * 6
+        return
+      }
+
+      // Rested wherever it wandered to, so now it goes back to its desk.
       if (body.wandering && !atSeat) body.wandering = false
 
       if (!atSeat && !body.wandering) {
         body.path = findPath(office.current.grid, body.pos, seat) ?? []
         return
       }
-      const agent = useStore.getState().agents.find((a) => a.id === id)
-      const working = agent?.activity === 'working'
       // Face the desk, which is above for a pod's front row and below for its
       // back row - otherwise half the office sits with its back to the screen.
       body.facing = desk.y < seat.y ? 'up' : 'down'
 
       // Only a bored agent wanders. One that is working stays at its desk, and
       // one waiting on a human stays put so you can find it.
-      if (!working && !blocked && !body.wandering && body.next() < WANDER_CHANCE * dt * 60) {
+      // Per second, which is what the constant says: `* dt * 60` was a roll of
+      // WANDER_CHANCE on every single frame, so an agent got up roughly the
+      // moment it sat down and the office never stopped moving.
+      if (!working && !blocked && body.next() < WANDER_CHANCE * dt) {
         const target = randomWalkable(office.current.grid, body.next, office.current.door)
         const path = findPath(office.current.grid, body.pos, target)
         if (path?.length) {
           body.path = path
           body.wandering = true
         }
-      } else if (!body.wandering && atSeat) {
+      } else if (working && atSeat) {
         // Sitting: cycle frames only while working, so a still floor means a
         // quiet office at a glance.
-        if (working) body.frame += dt * 6
+        body.frame += dt * 6
       }
     }
 
@@ -217,32 +361,55 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       tiles: HTMLCanvasElement,
       now: number
     ): void => {
-      ctx.fillStyle = palette.floor
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-      for (let y = 0; y < office.current.rows; y++) {
-        for (let x = 0; x < office.current.cols; x++) {
-          const under = office.current.ground[y][x]
-          ctx.drawImage(tiles, ATLAS_INDEX[under] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
-          const cell = office.current.grid[y][x]
-          if (cell === under) continue
-          ctx.drawImage(tiles, ATLAS_INDEX[cell] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
-        }
-      }
-
       const { agents, approvals } = useStore.getState()
       const seats = assignDesks(
         agents.map((a) => a.id),
         office.current,
         agents.find((a) => a.role === 'god')?.id
       )
-      for (const [, d] of seats) drawChair(ctx, d.seat.x * TILE, d.seat.y * TILE, palette)
 
+      // Chairs belong to the room: they move only when someone takes a desk.
+      const key = `${canvas.width}x${canvas.height}|${palette.floor}|${[...seats.values()]
+        .map((d) => `${d.seat.x},${d.seat.y}`)
+        .join(';')}`
+      if (!room.current || room.current.key !== key) {
+        const layer = room.current?.canvas ?? document.createElement('canvas')
+        layer.width = canvas.width
+        layer.height = canvas.height
+        const lc = layer.getContext('2d')!
+        lc.imageSmoothingEnabled = false
+        lc.fillStyle = palette.floor
+        lc.fillRect(0, 0, layer.width, layer.height)
+        for (let y = 0; y < office.current.rows; y++) {
+          for (let x = 0; x < office.current.cols; x++) {
+            const under = office.current.ground[y][x]
+            lc.drawImage(tiles, ATLAS_INDEX[under] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
+            const cell = office.current.grid[y][x]
+            if (cell === under) continue
+            lc.drawImage(tiles, ATLAS_INDEX[cell] * TILE, 0, TILE, TILE, x * TILE, y * TILE, TILE, TILE)
+          }
+        }
+        for (const [, d] of seats) drawChair(lc, d.seat.x * TILE, d.seat.y * TILE, palette)
+        room.current = { canvas: layer, key }
+      }
+      ctx.drawImage(room.current.canvas, 0, 0)
+
+      // Where each person ended up on screen, so a conversation can be drawn
+      // over both of them after everyone has been painted.
+      const at = new Map<string, { px: number; py: number }>()
       for (const agent of agents) {
         const body = bodies.current.get(agent.id)
         if (!body) continue
-        const px = body.pos.x * TILE + 3
-        const py = body.pos.y * TILE + 1
+        // Between the tile behind and the tile ahead, so a walk is a walk and
+        // not a jump every 300ms. Rounded to whole pixels: this is a pixel-art
+        // sprite, and half a pixel of it is a smear.
+        const ahead = body.path[0]
+        const t = ahead ? Math.min(1, body.progress) : 0
+        const gx = ahead ? body.pos.x + (ahead.x - body.pos.x) * t : body.pos.x
+        const gy = ahead ? body.pos.y + (ahead.y - body.pos.y) * t : body.pos.y
+        const px = Math.round(gx * TILE) + 3
+        const py = Math.round(gy * TILE) + 1
+        at.set(agent.id, { px, py })
         const blocked = approvals.some((p) => p.agentId === agent.id)
         const typing = agent.activity === 'working' && body.path.length === 0
         ctx.fillStyle = palette.shadow
@@ -267,6 +434,21 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
           blocked ? '#241f1a' : mode === 'light' ? '#3b3b46' : '#d9dce2',
           blocked ? '#e0a800' : mode === 'light' ? '#ffffffd8' : '#161822d8'
         )
+      }
+
+      // The conversation itself: a bubble over each of the two, filling in as it
+      // goes so a glance says whether they have just started or are wrapping up.
+      for (const [id, body] of bodies.current) {
+        if (!body.errand?.until) continue
+        const host = bodies.current.get(body.errand.to)
+        if (!host || host.path.length > 0) continue
+        const spoke = at.get(id)
+        const heard = at.get(body.errand.to)
+        if (!spoke || !heard) continue
+        const left = TALK_MS - (body.errand.until - now)
+        const dots = Math.floor((left / TALK_MS) * 3) + 1
+        drawBubble(ctx, spoke.px - 2, spoke.py - 26, dots)
+        drawBubble(ctx, heard.px - 2, heard.py - 26, dots - 1)
       }
 
       for (const e of envelopes.current) {
@@ -307,10 +489,19 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
 
 const S: Record<string, React.CSSProperties> = {
   wrap: {
+    // Fills the panel so the office can sit in the middle of it: the pane is
+    // resizable, and a drawing pinned to the top of a tall panel reads as a
+    // rendering bug.
+    flex: 1,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    padding: 12,
+    // Centred both ways: the office is a drawing with a size of its own, and a
+    // panel taller than it should leave the room in the middle rather than
+    // pinned to the top with a field of empty panel under it.
+    justifyContent: 'center',
+    minHeight: 0,
+    padding: PAD,
     overflow: 'hidden',
     background: 'var(--sunk)'
   },
@@ -319,6 +510,12 @@ const S: Record<string, React.CSSProperties> = {
     // draws at its natural size and only shrinks when the panel is smaller than
     // that. Stretching it to fill a tall panel is what made a wall of desks.
     maxWidth: '100%',
+    // The panel is resizable now, so the office has to survive being given less
+    // room than it draws in. Both maximums plus contain: it scales down whole,
+    // rather than being squashed out of proportion by the flex line.
+    maxHeight: '100%',
+    minHeight: 0,
+    objectFit: 'contain',
     imageRendering: 'pixelated',
     border: '1px solid var(--line)',
     cursor: 'pointer'

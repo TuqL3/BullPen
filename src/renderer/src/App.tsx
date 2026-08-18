@@ -4,7 +4,7 @@ import { AddAgent, type Draft } from './AddAgent'
 import { Avatar } from './Avatar'
 import { Commands } from './Commands'
 import { Floor } from './floor/Floor'
-import { FLOOR_MAX_W } from './floor/layout'
+
 import { AskMe } from './tabs/AskMe'
 import { Activity } from './tabs/Activity'
 import { Graph } from './tabs/Graph'
@@ -14,13 +14,15 @@ import { Tasks } from './tabs/Tasks'
 import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './roster'
-import type { Question } from '../../preload/index'
+import type { Dispatch, Question, Report } from '../../preload/index'
 import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
-import { FilePanel, openFile, Review, WorkTree, type OpenFile } from './Code'
+import { FilePanel, Review, WorkTree } from './Code'
+// Not in `Code`: a module that exports anything but components loses React Fast
+// Refresh, and every edit to a panel there would remount the whole tree.
+import { openFile, type OpenFile } from './file'
 import { isShellId, Shell } from './Shell'
 import {
   DEFAULT_LAYOUT,
-  FIXED,
   moveTo,
   moveToNewColumn,
   normalise,
@@ -58,13 +60,20 @@ type Tab = (typeof TABS)[number]
  */
 function byProject(agents: Agent[]): { label: string; rows: Agent[] }[] {
   const groups = new Map<string, Agent[]>()
-  for (const a of agents.filter((x) => x.role !== 'god')) {
+  for (const a of agents.filter((x) => x.role !== 'god' && x.role !== 'ba')) {
     const label = a.project || projectOf(a.cwd)
     groups.set(label, [...(groups.get(label) ?? []), a])
   }
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([label, rows]) => ({ label, rows }))
+}
+
+/** What to call each role in the roster. A developer is the unremarkable case. */
+const ROLE_TAG: Record<string, string> = {
+  god: 'boss',
+  ba: 'analyst',
+  tester: 'tester'
 }
 
 const DOT: Record<string, string> = {
@@ -81,7 +90,7 @@ export default function App() {
   const { agents, approvals, mail, steers, lastSeen, selected, select } = useStore()
   const store = useStore.getState
 
-  const [mode, setMode] = useState<Mode>('light')
+  const [mode, setMode] = useState<Mode>(window.bullpen.initialMode)
   const [tab, setTab] = useState<Tab>('terminal')
   const shellSeen = useRef(false)
   if (tab === 'shell') shellSeen.current = true
@@ -118,22 +127,34 @@ export default function App() {
   }, [])
   /** Bumped on every save, so the review re-reads instead of waiting for its poll. */
   const [savedTick, setSavedTick] = useState(0)
+  /** Lines added and removed against HEAD, for the review button's own label. */
+  const [diffStat, setDiffStat] = useState<{ adds: number; dels: number } | null>(null)
   // Held here rather than in the tab that shows them: the tab badge has to
   // count them while that tab is unmounted, which is exactly when it matters.
   const [questions, setQuestions] = useState<Question[]>([])
+  /** The god agent's last word on where the work stands. Monitor's, not ask me's. */
+  const [report, setReport] = useState<Report | null>(null)
+  /** The brief the operator last handed over, shown back to them on the monitor. */
+  const [dispatched, setDispatched] = useState<Dispatch | null>(null)
+  /** Desktop notifications, mirrored here so the title bar can show which it is. */
+  const [notifyOn, setNotifyOn] = useState(true)
 
   useEffect(() => {
     window.bullpen.askList().then(setQuestions)
-    return window.bullpen.onAsk(setQuestions)
+    window.bullpen.lastReport().then(setReport)
+    window.bullpen.lastDispatch().then(setDispatched)
+    window.bullpen.notify().then(setNotifyOn)
+    const offAsk = window.bullpen.onAsk(setQuestions)
+    const offReport = window.bullpen.onReport(setReport)
+    const offDispatch = window.bullpen.onDispatch(setDispatched)
+    return () => {
+      offAsk()
+      offReport()
+      offDispatch()
+    }
   }, [])
 
   useEffect(() => setTerminalTheme(mode), [mode])
-
-  // Remembered in main, not here: an agent's CLI is handed the same value when
-  // it spawns, so main has to be the one that knows it.
-  useEffect(() => {
-    window.bullpen.mode().then((saved) => saved && setMode(saved))
-  }, [])
 
   useEffect(() => {
     const off = [
@@ -165,6 +186,15 @@ export default function App() {
       window.bullpen.onSteerQueued((id) => {
         window.bullpen.steers(id).then((notes) => store().setSteers(id, notes))
       }),
+      window.bullpen.onSteerCleared((id, notes) => {
+        store().setSteers(id, [])
+        store().addMail({
+          from: 'you',
+          to: id,
+          subject: `${notes.length} queued note${notes.length === 1 ? '' : 's'} dropped · halted`,
+          ts: Date.now()
+        })
+      }),
       window.bullpen.onSteerDelivered((id, notes) => {
         store().setSteers(id, [])
         store().addMail({
@@ -180,46 +210,65 @@ export default function App() {
       window.bullpen.onHired((a) =>
         store().upsertAgent({
           id: a.id,
-          role: 'worker',
+          role: a.role === 'tester' ? 'tester' : 'dev',
           project: a.project,
           name: a.name,
           face: a.id,
           cwd: a.cwd,
+          cli: 'claude',
           pid: a.pid,
           startedAt: a.startedAt,
           cols: a.cols,
           rows: a.rows,
           status: 'running',
-          activity: 'idle'
+          activity: 'idle',
+          ...(a.brief ? { task: { text: a.brief, at: Date.now() } } : null)
         })
       ),
       window.bullpen.onPending((p) => store().addApproval(p as Approval)),
       window.bullpen.onResolved((p) => store().removeApproval((p as Approval).id)),
+      // A notification was clicked: the window is already coming up, and this
+      // puts it on the thing the notification was about.
+      window.bullpen.onGoto((tab, id) => {
+        if (id) select(id)
+        if ((TABS as readonly string[]).includes(tab)) setTab(tab as Tab)
+      }),
       window.bullpen.onDeliver((d) => {
-        const { to, msg } = d as { to: string; msg: { from: string; subject: string; ts: number } }
+        const { to, msg } = d as {
+          to: string
+          msg: { from: string; subject: string; body?: string; ts: number }
+        }
         store().addMail({ to, from: msg.from, subject: msg.subject, ts: msg.ts })
+        // A message from the god agent to a worker is the assignment: it is how
+        // work reaches anyone here, and the monitor has nothing else to read.
+        const text = [msg.subject, msg.body].filter(Boolean).join(' — ').trim()
+        if (text) store().upsertAgent({ id: to, task: { text, at: msg.ts || Date.now() } })
       })
     ]
     return () => off.forEach((fn) => fn())
   }, [])
 
-  /** Put Michael in the store and open his terminal. */
-  const adoptGod = (g: {
-    id: string
-    name: string
-    cwd: string
-    pid: number
-    startedAt: number
-    cols: number
-    rows: number
-  }): void => {
+  /** Put one of the floor's standing agents in the store. */
+  const adopt = (
+    g: {
+      id: string
+      name: string
+      cwd: string
+      pid: number
+      startedAt: number
+      cols: number
+      rows: number
+    },
+    role: 'god' | 'ba' = 'god'
+  ): void => {
     store().upsertAgent({
       id: g.id,
-      role: 'god',
+      role,
       project: '',
       name: g.name,
       face: g.id,
       cwd: g.cwd,
+      cli: 'claude',
       pid: g.pid,
       startedAt: g.startedAt,
       cols: g.cols,
@@ -228,8 +277,11 @@ export default function App() {
       exitCode: undefined,
       activity: 'idle'
     })
-    select(g.id)
+    if (role === 'god') select(g.id)
   }
+
+  /** Michael, and the analyst he hands everything to. */
+  const adoptGod = (g: Parameters<typeof adopt>[0]): void => adopt(g, 'god')
 
   // Michael is the floor's starting state, not a hire. Bringing him up here
   // rather than in the wizard is what makes "open the app and he is there"
@@ -248,6 +300,10 @@ export default function App() {
       try {
         const g = await window.bullpen.ensureGod({ cols, rows })
         if (!cancelled) adoptGod(g)
+        // Beside him, not after him: work is handed to her, and a floor with
+        // Michael and nobody to hand to is a floor where nothing gets assigned.
+        const b = await window.bullpen.ensureBa({ cols, rows })
+        if (!cancelled) adopt(b, 'ba')
       } catch (err) {
         // A floor with no Michael still works - dispatch is what stops working,
         // and it already says so - but silence would look like he never existed.
@@ -266,7 +322,8 @@ export default function App() {
       agents.map((a) => ({
         id: a.id,
         name: a.name,
-        project: a.role === 'god' ? '' : a.project || projectOf(a.cwd),
+        project: a.role === 'god' || a.role === 'ba' ? '' : a.project || projectOf(a.cwd),
+        role: a.role === 'worker' ? 'dev' : a.role,
         cwd: a.cwd,
         status: a.status,
         activity: a.activity,
@@ -318,6 +375,7 @@ export default function App() {
         face: d.face,
         color: d.color,
         cwd: state.cwd,
+        cli: d.cmd.trim() || 'claude',
         pid: state.pid,
         startedAt: state.startedAt,
         cols: state.cols,
@@ -329,6 +387,9 @@ export default function App() {
         activity: 'idle'
       })
       if (d.role === 'god') window.bullpen.setGod(id)
+      // Cards move by role - a tester's "done" closes the developer's card, a
+      // developer's does not - so main has to be told what this one is.
+      window.bullpen.setRole(id, d.role)
       select(id)
       setTab('terminal')
       setAdding(null)
@@ -360,17 +421,22 @@ export default function App() {
   const moveGod = async (): Promise<void> => {
     const dir = await window.bullpen.pickDir()
     if (!dir) return
-    if (!confirm(`Restart Michael in ${dir}?\n\nHis current conversation is lost.`)) return
+    // Both of them: she works in his directory, so moving him restarts her too,
+    // and finding that out afterwards is finding out you lost a conversation
+    // nobody mentioned.
+    if (!confirm(`Restart Michael in ${dir}?\n\nIris works in his directory, so she moves with him. Both conversations are lost.`)) return
     setMoveError('')
     const { cols, rows } = paneSize(document.querySelector('section'))
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return setMoveError(res.error)
     adoptGod(res)
+    // She works in his directory, so main stopped her when he moved.
+    adopt(await window.bullpen.ensureBa({ cols, rows }), 'ba')
   }
 
-  const open = async (path: string, line?: number): Promise<void> => {
+  const open = async (path: string, line?: number, col?: [number, number]): Promise<void> => {
     if (!current) return
-    const res = await openFile(current, path, line)
+    const res = await openFile(current, path, line, col)
     if (typeof res === 'string') return setFileNote(res)
     setFile(res)
     setFileNote(res.truncated ? 'Showing the first 1 MB — saving is refused for this file.' : '')
@@ -390,9 +456,42 @@ export default function App() {
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return res.error
     adoptGod(res)
+    adopt(await window.bullpen.ensureBa({ cols, rows }), 'ba')
     setSetupCwd(null)
     return null
   }
+
+  /**
+   * The review button carries the size of the diff, so it says what it opens.
+   *
+   * Read when the answer can have changed - a different agent, a file saved,
+   * the panel opened or closed, the window coming back to the front - rather
+   * than on a timer: `git diff` per second per agent is a cost with nothing
+   * behind it while nobody is typing.
+   */
+  useEffect(() => {
+    let live = true
+    const read = async (): Promise<void> => {
+      if (!current) return setDiffStat(null)
+      const stats = await window.bullpen.gitStats(current.cwd)
+      if (!live) return
+      let adds = 0
+      let dels = 0
+      for (const v of Object.values(stats)) {
+        const [a, d] = v.split('-')
+        // A binary file reports `-` for both, and is a change with no lines.
+        adds += Number(a) || 0
+        dels += Number(d) || 0
+      }
+      setDiffStat({ adds, dels })
+    }
+    read()
+    window.addEventListener('focus', read)
+    return () => {
+      live = false
+      window.removeEventListener('focus', read)
+    }
+  }, [current?.cwd, savedTick, reviewing])
 
   const steer = (): void => {
     if (!selected || !steerText.trim()) return
@@ -417,7 +516,7 @@ export default function App() {
           {agents.length === 0 && <div style={S.empty}>No one hired yet.</div>}
 
           {agents
-            .filter((a) => a.role === 'god')
+            .filter((a) => a.role === 'god' || a.role === 'ba')
             .map((a) => (
               <RosterRow
                 key={a.id}
@@ -506,24 +605,24 @@ export default function App() {
 
           {current && (
             <div style={S.control}>
-              <span style={{ ...LABEL, color: 'var(--faint)' }}>steer</span>
+              <span style={{ ...LABEL, color: 'var(--faint)' }}>queue</span>
               <input
                 style={S.steerInput}
                 value={steerText}
                 placeholder={
                   busy
-                    ? 'injected as context on its next tool call — no typing into its terminal'
-                    : 'steer reaches a working agent; this one is idle, just message it'
+                    ? 'queue a note — it goes in with its next tool call, without interrupting it'
+                    : 'queued notes only reach a working agent; this one is idle, type in its terminal'
                 }
                 onChange={(e) => setSteerText(e.target.value)}
                 onKeyDown={onEnter(steer)}
               />
               <button style={S.btn} onClick={steer}>
-                steer
+                queue
               </button>
               {(steers[current.id]?.length ?? 0) > 0 && (
                 <span style={{ ...LABEL, color: 'var(--warn)' }}>
-                  {steers[current.id].length} waiting
+                  {steers[current.id].length} queued
                 </span>
               )}
               <button style={{ ...S.btn, ...S.btnDanger }} onClick={() => window.bullpen.kill(current.id)}>
@@ -561,7 +660,8 @@ export default function App() {
               <Monitor
                 agents={agents}
                 lastSeen={lastSeen}
-                questions={questions}
+                report={report}
+                dispatched={dispatched}
                 // Ask me is where everything waiting on a human is collected,
                 // so that is where a waiting agent leads - not the terminal.
                 onSelect={(id) => {
@@ -574,7 +674,7 @@ export default function App() {
                 }}
               />
             )}
-            {tab === 'tasks' && <Tasks agents={agents} />}
+            {tab === 'tasks' && <Tasks agents={agents} agent={current} />}
             {tab === 'ask me' && (
               <AskMe
                 approvals={approvals}
@@ -590,7 +690,7 @@ export default function App() {
             {tab === 'memory' && <Memory agents={agents} selected={selected} />}
             {tab === 'graph' && <Graph agents={agents} mail={mail} />}
             {tab === 'activity' && <Activity />}
-            {tab === 'commands' && <Commands />}
+            {tab === 'commands' && <Commands agent={current} />}
             {tab === 'workers' && <Workers agents={agents} onSelect={select} />}
           </section>
 
@@ -638,24 +738,6 @@ export default function App() {
   // whether its share would overrun the office floor's own width.
   const perWeight = bodyW / (cols.reduce((n, c) => n + c.weight, 0) || 1)
 
-  /**
-   * Bring the office floor's stored weight down to what its cap actually uses.
-   *
-   * Without this a column whose weight asks for 830px but is drawn at 464 eats
-   * the first several hundred pixels of any drag before anything moves - the
-   * divider works, and looks broken. Corrected once, with a pixel of tolerance
-   * so the correction cannot chase itself.
-   */
-  useEffect(() => {
-    if (perWeight <= 0) return
-    const floorCol = cols.find((c) => c.panels.includes('floor'))
-    if (!floorCol) return
-    const want = FLOOR_MAX_W / perWeight
-    if (floorCol.weight <= want + 1 / perWeight) return
-    const colWeight = [...layout.colWeight]
-    colWeight[floorCol.index] = want
-    applyLayout({ ...layout, colWeight })
-  }, [perWeight, layout])
 
   return (
     // color-scheme is what repaints the native scrollbars, which are drawn by
@@ -672,6 +754,9 @@ export default function App() {
         layout={layout}
         onTogglePanel={(id) => applyLayout(togglePanel(layout, id))}
         reviewing={reviewing}
+        diffStat={diffStat}
+        notifyOn={notifyOn}
+        onToggleNotify={async () => setNotifyOn(await window.bullpen.setNotify(!notifyOn))}
         onToggleReview={() => setReviewing(!reviewing)}
       />
 
@@ -766,7 +851,7 @@ function Icon({
   name,
   size = 13
 }: {
-  name: 'floor' | 'sun' | 'moon' | 'full' | 'min' | 'close' | 'roster' | 'command' | 'tree' | 'review'
+  name: 'floor' | 'sun' | 'moon' | 'min' | 'close' | 'roster' | 'tree' | 'review' | 'bell' | 'bellOff'
   size?: number
 }) {
   const common = {
@@ -807,13 +892,6 @@ function Icon({
         <path d="M7.5 5.5h6.5M7.5 12h6.5" />
       </svg>
     )
-  if (name === 'command')
-    return (
-      <svg {...common} aria-hidden>
-        <rect x="1.5" y="2.5" width="13" height="11" />
-        <path d="M4 6l2.2 2L4 10M8.2 10.5h3.6" />
-      </svg>
-    )
   if (name === 'review')
     return (
       <svg {...common} aria-hidden>
@@ -831,21 +909,23 @@ function Icon({
         <rect x="7.5" y="10.5" width="6" height="3" />
       </svg>
     )
+  if (name === 'bell' || name === 'bellOff')
+    return (
+      <svg {...common} aria-hidden>
+        <path d="M4 6.5a4 4 0 0 1 8 0c0 3 1 4 1.5 4.5h-11C3 10.5 4 9.5 4 6.5Z" />
+        <path d="M6.6 13.5a1.6 1.6 0 0 0 2.8 0" />
+        {name === 'bellOff' && <path d="M2.5 2.5l11 11" />}
+      </svg>
+    )
   if (name === 'min')
     return (
       <svg {...common} aria-hidden>
         <path d="M2.5 8h11" />
       </svg>
     )
-  if (name === 'close')
-    return (
-      <svg {...common} aria-hidden>
-        <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
-      </svg>
-    )
   return (
     <svg {...common} aria-hidden>
-      <path d="M6 1.5H1.5V6M10 1.5h4.5V6M10 14.5h4.5V10M6 14.5H1.5V10" />
+      <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
     </svg>
   )
 }
@@ -882,9 +962,9 @@ function FirstRun({
           Where should Michael work?
         </div>
         <p style={S.firstRunBlurb}>
-          Michael stands in for you: you dispatch through him and he is the one agent that can
-          see the whole floor. He needs a directory of his own — he may write freely inside it,
-          and nowhere else. You can move him later from his header.
+          Michael stands in for you: you dispatch through him, he hands the work to Iris the
+          analyst, and he is the one who reports back to you. They share this directory — they
+          may write freely inside it, and nowhere else. You can move them later from his header.
         </p>
         <div style={{ display: 'flex', gap: 8, margin: '4px 0 8px' }}>
           <input
@@ -943,7 +1023,7 @@ function Column({
   onResize: (above: PanelId, below: PanelId, delta: number) => void
 }) {
   const col = useRef<HTMLDivElement>(null)
-  const total = panels.filter((p) => !FIXED.has(p)).reduce((n, p) => n + layout.rowWeight[p], 0) || 1
+  const total = panels.reduce((n, p) => n + layout.rowWeight[p], 0) || 1
 
   /**
    * Weight only - no maximum, no fixed pixels.
@@ -954,15 +1034,16 @@ function Column({
    * Mixing fixed pixels in was worse - the pixel width of every other column is
    * computed from the total weight, so pinning one changed all of them.
    *
-   * The office floor is kept inside its own width by its weight instead: the
-   * panel above normalises it once it would overrun. See `FLOOR_MAX_W`.
+   * Nothing is pinned now: every column is its weight and nothing else, which
+   * is what makes every divider between them move the pair it sits on and
+   * nobody else. The office floor draws itself to whatever width its column
+   * ends up with, and letterboxes rather than overrunning.
    */
   return (
     <div ref={col} style={{ ...S.column, flexGrow: weight }}>
       {panels.map((id, i) => (
         <Fragment key={id}>
-          {/* No divider above a fixed panel: there is nothing to trade with it. */}
-          {i > 0 && !FIXED.has(id) && !FIXED.has(panels[i - 1]) && (
+          {i > 0 && (
             <Splitter
               vertical
               dragging={dragging}
@@ -1103,9 +1184,7 @@ function Pane({
       data-pane={id}
       style={{
         ...S.pane,
-        // A fixed panel is sized by its content; everything else divides what
-        // is left over in the column.
-        ...(FIXED.has(id) ? { flex: '0 0 auto' } : { flexGrow: share, flexBasis: 0 }),
+        ...{ flexGrow: share, flexBasis: 0 },
         ...(isTarget ? (side === 'above' ? S.paneTargetTop : S.paneTargetBottom) : null)
       }}
       onDragOver={(e) => {
@@ -1135,8 +1214,47 @@ function Pane({
         <span>{PANEL_TITLE[id]}</span>
         <span style={{ color: 'var(--faint)' }}>⠿</span>
       </div>
-      <div style={FIXED.has(id) ? S.paneBodyFixed : S.paneBody}>{children}</div>
+      <div style={S.paneBody}>{children}</div>
     </section>
+  )
+}
+
+/**
+ * The switches on the right of the bar. Roster has its own, on the left, and
+ * the command centre has none at all.
+ */
+type Switchable = Exclude<PanelId, 'command'>
+const SIDE_PANELS: Switchable[] = ['tree', 'floor']
+
+/** One panel switch: lit when its panel is up, grey when it is not. */
+function PanelToggle({
+  id,
+  layout,
+  onToggle
+}: {
+  id: Switchable
+  layout: Layout
+  onToggle: (id: PanelId) => void
+}) {
+  const on = !layout.hidden.includes(id)
+  return (
+    <button
+      title={on ? `hide ${PANEL_TITLE[id]}` : `show ${PANEL_TITLE[id]}`}
+      aria-label={`toggle ${PANEL_TITLE[id]}`}
+      style={
+        {
+          ...S.panelToggle,
+          WebkitAppRegion: 'no-drag',
+          // Colour, not a box. Four boxed icons in a row read as one control
+          // with four parts, and the box was doing the work the colour already
+          // does - which is why the review button's own box looked wrong.
+          color: on ? 'var(--accent-ink)' : 'var(--faint)'
+        } as React.CSSProperties
+      }
+      onClick={() => onToggle(id)}
+    >
+      <Icon name={id} />
+    </button>
   )
 }
 
@@ -1146,6 +1264,9 @@ function TitleBar({
   layout,
   onTogglePanel,
   reviewing,
+  diffStat,
+  notifyOn,
+  onToggleNotify,
   onToggleReview
 }: {
   mode: Mode
@@ -1153,47 +1274,66 @@ function TitleBar({
   layout: Layout
   onTogglePanel: (id: PanelId) => void
   reviewing: boolean
+  /** Lines added and removed in the selected agent's workspace, or null. */
+  diffStat: { adds: number; dels: number } | null
+  /** Whether the desktop is told when the floor needs you. */
+  notifyOn: boolean
+  onToggleNotify: () => void
   onToggleReview: () => void
 }) {
   return (
     <div style={S.titlebar}>
       {/* Leaves room for the macOS traffic lights, which stay native. */}
       <div style={{ width: window.bullpen.isMac ? 72 : 14 }} />
-      <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 11, fontWeight: 700 }}>Bullpen</div>
+      {/* The roster sits on the left of the window, so its switch sits on the
+          left of the bar - where the wordmark used to be. A title bar that
+          spells out the name of the app you are looking at is decoration. */}
+      <PanelToggle id="roster" layout={layout} onToggle={onTogglePanel} />
       <div style={{ flex: 1 }} />
-      {/* Order here is fixed, so a toggle does not move when the panels are
-          rearranged and the button under the cursor stays the one you meant. */}
-      {PANELS.map((id) => {
-        const on = !layout.hidden.includes(id)
-        return (
-          <button
-            key={id}
-            title={on ? `hide ${PANEL_TITLE[id]}` : `show ${PANEL_TITLE[id]}`}
-            aria-label={`toggle ${PANEL_TITLE[id]}`}
-            style={{
-              ...S.panelToggle,
-              WebkitAppRegion: 'no-drag',
-              color: on ? 'var(--accent-ink)' : 'var(--faint)',
-              borderColor: on ? 'var(--accent-ink)' : 'transparent'
-            } as React.CSSProperties}
-            onClick={() => onTogglePanel(id)}
-          >
-            <Icon name={id} />
-          </button>
-        )
-      })}
+      {/* Fixed order, so a toggle does not move when the panels are rearranged
+          and the button under the cursor stays the one you meant. The command
+          centre has no switch: it is what the window is for, and a hidden one
+          leaves a window with nothing in it. */}
+      {SIDE_PANELS.map((id) => (
+        <PanelToggle key={id} id={id} layout={layout} onToggle={onTogglePanel} />
+      ))}
+      {/* The one control here that says what it does in numbers rather than in
+          a glyph you have to have learned: how much has changed is the reason
+          you would open it at all. */}
       <button
         title="review uncommitted changes"
         aria-label="toggle review"
         style={{
           ...S.panelToggle,
+          ...S.reviewBtn,
           WebkitAppRegion: 'no-drag',
-          color: reviewing ? 'var(--accent-ink)' : 'var(--faint)',
-          borderColor: reviewing ? 'var(--accent-ink)' : 'transparent'
+          color: reviewing ? 'var(--accent-ink)' : 'var(--faint)'
         } as React.CSSProperties}
         onClick={onToggleReview}
       >
         <Icon name="review" />
+        {diffStat && (diffStat.adds || diffStat.dels) ? (
+          <>
+            <span style={{ color: 'var(--ok)' }}>+{diffStat.adds}</span>
+            <span style={{ color: 'var(--danger)' }}>-{diffStat.dels}</span>
+          </>
+        ) : (
+          <span style={{ color: 'var(--faint)' }}>0</span>
+        )}
+      </button>
+      <button
+        title={notifyOn ? 'notifications on - click to mute' : 'notifications muted'}
+        aria-label="toggle notifications"
+        style={
+          {
+            ...S.panelToggle,
+            WebkitAppRegion: 'no-drag',
+            color: notifyOn ? 'var(--accent-ink)' : 'var(--faint)'
+          } as React.CSSProperties
+        }
+        onClick={onToggleNotify}
+      >
+        <Icon name={notifyOn ? 'bell' : 'bellOff'} />
       </button>
       <button
         title={mode === 'light' ? 'switch to dark' : 'switch to light'}
@@ -1215,14 +1355,6 @@ function TitleBar({
           <Icon name="min" />
         </button>
       )}
-      <button
-        title="full screen"
-        aria-label="toggle full screen"
-        style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        onClick={() => window.bullpen.toggleFullscreen()}
-      >
-        <Icon name="full" />
-      </button>
       {!window.bullpen.isMac && (
         <button
           title="close"
@@ -1268,6 +1400,11 @@ function RosterRow({
           title={agent.cwd}
           style={{ fontSize: 10, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         >
+          {/* Michael and the analyst share a workspace, so the directory alone
+              tells the two of them apart not at all. */}
+          {ROLE_TAG[agent.role] ? (
+            <span style={{ color: 'var(--accent-ink)' }}>{ROLE_TAG[agent.role]} · </span>
+          ) : null}
           {agent.cwd.split('/').pop() || agent.cwd}
         </div>
       </div>
@@ -1486,7 +1623,11 @@ const S: Record<string, React.CSSProperties> = {
   column: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexBasis: 0 },
   splitterV: { cursor: 'col-resize', background: 'var(--line)', width: 5, flexShrink: 0 },
   splitterH: { cursor: 'row-resize', background: 'var(--line)', height: 5, flexShrink: 0 },
-  splitterArmed: { background: 'var(--sunk)', outline: '1px dashed var(--accent)', minWidth: 14 },
+  // Wider while a panel is in flight, and nothing else: a 5px target is not a
+  // drop zone. The dashed accent outline this used to draw put a yellow line
+  // down every seam in the window the moment you picked a panel up - eight
+  // highlights for one drop. The seam under the pointer says it instead.
+  splitterArmed: { background: 'var(--sunk)', minWidth: 14, minHeight: 14 },
   splitterOver: { background: 'var(--accent)' },
   paneGrip: {
     display: 'flex',
@@ -1504,17 +1645,16 @@ const S: Record<string, React.CSSProperties> = {
   },
   paneGripHeld: { opacity: 0.5, cursor: 'grabbing' },
   paneBody: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
-  paneBodyFixed: { flex: 'none', minWidth: 0, display: 'flex', flexDirection: 'column' },
+  reviewBtn: { gap: 5, padding: '0 6px', font: `10px ${MONO}`, color: 'var(--muted)' },
   panelToggle: {
     display: 'flex',
     alignItems: 'center',
     background: 'transparent',
-    // Longhand, not `border: 1px solid transparent`: the active state overrides
-    // borderColor alone, and React clears that longhand when the state drops -
-    // leaving border-color at `currentcolor`, which drew a white box on the
-    // panel you had just switched away from.
-    border: '1px solid',
-    borderColor: 'transparent',
+    // No box at all now: state is the colour of the glyph. The old outline had
+    // to be written as longhand plus borderColor, because React clears the
+    // longhand when the active state drops and left border-color at
+    // `currentcolor` - a white box on the panel you had just switched away from.
+    border: 'none',
     cursor: 'pointer',
     padding: '3px 5px'
   },

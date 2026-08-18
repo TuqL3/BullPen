@@ -3,22 +3,42 @@ import { create } from 'zustand'
 export type Agent = {
   id: string
   /**
+   * What this agent is for.
+   *
    * The god agent is the operator's own clone: one per floor, pinned above the
    * projects. It is what dispatch routes through, what sits at the centre of
-   * the graph, and what the activity log means by "god".
+   * the graph, and what the activity log means by "god". The analyst sits
+   * beside it, above the projects too: she is who work is handed to, and every
+   * dev and tester below is hired by her.
+   *
+   * 'worker' is what everyone below used to be, kept so an agent made by the
+   * wizard before roles existed still loads as somebody who builds.
    */
-  role: 'god' | 'worker'
+  role: 'god' | 'ba' | 'dev' | 'tester' | 'worker'
   /** Which project this agent belongs to. God agents belong to none. */
   project: string
   /** What the human typed in the wizard; `id` is its slug. */
   name: string
   cwd: string
+  /**
+   * The CLI this agent runs - `claude` today, something else once another one
+   * is wired up. What you can type at it depends on this, not on Bullpen.
+   */
+  cli?: string
   pid: number
   status: 'running' | 'exited'
   /** Set when a mail or approval arrives; drives the badge, and later the avatar. */
   activity: 'idle' | 'working' | 'blocked'
   /** The last tool it finished, so a working agent can say what it is doing. */
   doing?: { tool: string; detail: string; at: number }
+  /**
+   * What it was last asked to do, in the words it was asked in.
+   *
+   * Its hiring brief, or the last message Michael sent it. The monitor answers
+   * "what is everyone doing" with a tool call, which says what an agent is
+   * touching this second and nothing about what it was sent for.
+   */
+  task?: { text: string; at: number }
   /**
    * The question the agent is stopped on inside its own terminal, if any.
    * Distinct from an approval: Bullpen has nothing to decide here, the CLI is
@@ -91,7 +111,7 @@ export const useStore = create<State>((set, get) => ({
       const i = s.agents.findIndex((x) => x.id === a.id)
       if (i === -1) {
         const fresh: Agent = {
-          role: 'worker',
+          role: 'dev',
           project: '',
           name: a.id,
           cwd: '',

@@ -214,6 +214,44 @@ activity, commands). The reference UI has ten; nine empty ones read worse than
 four full ones. `queue` in particular needs a busy/idle signal per agent, which
 does not exist yet.
 
+## The analyst chain — assumed, and where it can bite
+
+Michael no longer assigns: he hands everything to Bea (`ba`), who analyses,
+hires and runs the dev → test loop, and reports back to him. Verified live in a
+throwaway `BULLPEN_HOME`: dispatch reached Michael, Michael mailed Bea, Bea
+hired a dev, the dev reported, Bea put a tester on it, and the report came back
+to the human through Michael. What that run did not settle:
+
+- **Assumed:** an existing floor's `~/.bullpen/michael/CLAUDE.md` is the
+  operator's file once written, so it is left alone. The new chain reaches an
+  upgraded Michael only through `--append-system-prompt`, which says in words
+  that it supersedes the file. If a hand-edited CLAUDE.md argues back hard
+  enough, he could still try to hire. What breaks: work assigned twice, or
+  assigned without anyone testing it. Fix if seen: delete that file and let it
+  be rewritten.
+- **Assumed:** Bea works in Michael's directory, so she can read the projects he
+  can see. She is not sandboxed to any repo, and her writes outside it escalate
+  to the human like anyone else's. What breaks if wrong: an analyst who cannot
+  read the code she is analysing, and asks instead.
+- **Ceiling:** a tester's pass closes every card in `wait_test` on the same
+  project, not the one card it was testing. There is no link on a card back to
+  the message it came from. Two features under test on one project at the same
+  moment therefore close together. Upgrade path: carry a task id in the mail.
+- **Known gap:** a card only leaves `wait_test` when a tester reports. If the
+  tester is killed mid-loop, the card sits there until someone drags it.
+- **Deliberate:** the router refuses mail that skips the chain (boss↔analyst,
+  analyst↔dev, analyst↔tester, dev↔tester, and only the boss may write to the
+  human). A refused message is kept in `dead/` and bounced back to the sender
+  with the reason. Cost: a developer blocked on something only the human can
+  decide now waits two hops - dev → analyst → boss → human. That is the trade
+  the chain is for; if it hurts, the gate is one function in `index.ts`.
+- **Deliberate:** the gate switches itself off when the analyst is not running.
+  She is a process and can be killed, and rules that strand every task on a
+  floor without her are worse than the shortcuts they prevent.
+- **Assumed:** `role` in a hire message is `dev` unless it says `tester`.
+  Anything else silently becomes a dev rather than a third kind of agent
+  nobody briefed.
+
 ## Deferred, with a trigger
 
 | Deferred | Add when |

@@ -184,6 +184,21 @@ export class Approvals extends EventEmitter {
     return [...(this.steers.get(agentId) ?? [])]
   }
 
+  /**
+   * Throw away what is queued for an agent, and say how much was thrown.
+   *
+   * A queued note only ever leaves on the agent's next tool call, so halting it
+   * is the moment those notes stop being able to arrive. Keeping them would
+   * hold instructions for a turn that is not going to happen, and hand them to
+   * whatever runs under that id next.
+   */
+  clearSteers(agentId: string): string[] {
+    const list = this.steers.get(agentId) ?? []
+    this.steers.delete(agentId)
+    if (list.length) this.emit('steer-cleared', agentId, list)
+    return list
+  }
+
   /** Take everything queued for this agent, formatted for the hook reply. */
   private drainSteers(agentId: string): string {
     const list = this.steers.get(agentId)

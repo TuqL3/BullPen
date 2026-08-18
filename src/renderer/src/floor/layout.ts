@@ -9,23 +9,16 @@ export const MIN_COLS = 18
 export const MIN_ROWS = 14
 
 /**
- * And large enough is enough. Past this the office is not more readable, just
- * more of it: a wall of empty desks nobody sits at, with the agents you are
- * actually watching lost somewhere in the middle.
+ * A ceiling, not a target: the office is built to whatever the panel gives it.
  *
- * The caps are four rows of desks by five pods across, and nothing more. A pod
- * is 4 tall and holds two desk rows, pods repeat every 6, and the last one has
- * to clear the aisle inside the bottom wall - so two pod rows is
- * `podTop + 6 + 3 + 3`. Pods repeat every 5 across from x=3, so 29 columns fits
- * five and starts no sixth - a tile narrower than the widest that still does,
- * which keeps the outer wall clear of the pane edge when the canvas is scaled
- * down. The row count cannot come down with it: one row fewer drops a whole
- * pod row and the floor goes to two rows of desks.
+ * These were 29x24 - five pods across, four rows of desks - and the floor was
+ * drawn at that size in the middle of whatever panel it had, which on a tall
+ * panel is a small room with a field of empty panel under it. The panel is
+ * resizable, so the room follows it and these only stop it running away on a
+ * wall-sized monitor.
  */
-export const MAX_COLS = 29
-export const DESK_ROWS = 4
-export const POD_COLS = 5
-export const MAX_ROWS = 24
+export const MAX_COLS = 44
+export const MAX_ROWS = 44
 
 /**
  * The widest the office is ever drawn, in pixels.
@@ -192,7 +185,7 @@ export function buildOffice(cols: number, rows: number): Office {
   const split = Math.floor(cols / 2)
   const roomsFit = hasRooms && cols >= 24
   const meeting = roomsFit ? { x0: 2, x1: split } : hasRooms ? { x0: 2, x1: 2 + 10 } : null
-  const kitchen = roomsFit ? { x0: split + 1, x1: cols - 2 } : null
+
 
   if (meeting) {
     for (let y = partTop; y <= roomBottom; y++) set(meeting.x1, y, 'wall')
@@ -228,21 +221,6 @@ export function buildOffice(cols: number, rows: number): Office {
     set(Math.floor((inX0 + inX1) / 2), 1, 'board')
     // Nothing else inside: the ring around the table is meant to be floor, and
     // a cooler standing in it is not floor.
-  }
-
-  if (kitchen) {
-    for (let y = partTop; y <= roomBottom; y++) set(kitchen.x0 - 1, y, 'wall')
-    for (let x = kitchen.x0 - 1; x <= cols - 1; x++) set(x, roomBottom, 'wall')
-    // Its own door, in its own wall - not in the one it shares with the meeting
-    // room, which would make the kitchen a way through rather than a room.
-    // Placed clear of the shelf run, or the door opens onto a shelf and the
-    // kitchen is a sealed box with a doorway painted on it.
-    set(kitchen.x0 + 1, roomBottom, 'door')
-    // The counter run goes against the back wall. A row lower it stretched right
-    // across the room and cut the strip above it off from the door.
-    for (let x = kitchen.x0; x <= kitchen.x1; x++) set(x, partTop, 'counter')
-    set(kitchen.x0, partTop + 1, 'fridge')
-    for (let x = kitchen.x0 + 3; x <= kitchen.x1; x++) set(x, roomBottom - 1, 'shelf')
   }
 
   // The screen goes on last: it hangs on the wall the two rooms share, and the
@@ -286,10 +264,18 @@ export function buildOffice(cols: number, rows: number): Office {
     set(bossRoom.x0, bossRoom.y0, 'plant')
   }
 
-  /** Does a pod's 2x4 footprint run into the corner office or its walls? */
+  /**
+   * Does a pod's 2x4 footprint run into the corner office, its walls, or the
+   * tile you have to stand on to open its door?
+   *
+   * The door is in the office's left wall, so the approach is the column left
+   * of that wall. A pod was allowed to sit in it, and at every width where one
+   * landed there the boss was sealed in: his seat had no route from the front
+   * door, so the agent who owns that desk stood in the doorway forever.
+   */
   const hitsOffice = (px: number, py: number): boolean =>
     bossRoom !== null &&
-    px + 1 >= bossRoom.x0 - 1 &&
+    px + 1 >= bossRoom.x0 - 2 &&
     px <= bossRoom.x1 &&
     py + 3 >= bossRoom.y0 - 1 &&
     py <= bossRoom.y1
@@ -302,16 +288,28 @@ export function buildOffice(cols: number, rows: number): Office {
   // The row inside the bottom wall stays clear: it is the corridor the door
   // opens onto. Without it a pod can land on the doorway and seal the office -
   // every seat unreachable, everyone stuck in the wall.
+  const pod = (px: number, py: number): void => {
+    for (const dx of [0, 1]) {
+      set(px + dx, py, 'desk')
+      desks.push({ desk: { x: px + dx, y: py }, seat: { x: px + dx, y: py + 1 } })
+      set(px + dx, py + 3, 'deskUp')
+      desks.push({ desk: { x: px + dx, y: py + 3 }, seat: { x: px + dx, y: py + 2 } })
+    }
+  }
+
   for (let py = podTop; py + 3 < rows - 2; py += 6) {
     for (let px = 3; px + 1 < cols - 2; px += 5) {
       if (hitsOffice(px, py)) continue
-      for (const dx of [0, 1]) {
-        set(px + dx, py, 'desk')
-        desks.push({ desk: { x: px + dx, y: py }, seat: { x: px + dx, y: py + 1 } })
-        set(px + dx, py + 3, 'deskUp')
-        desks.push({ desk: { x: px + dx, y: py + 3 }, seat: { x: px + dx, y: py + 2 } })
-      }
+      pod(px, py)
     }
+  }
+
+  // The strip the kitchen used to occupy, between the meeting room and the back
+  // wall. Interior floor exactly as tall as a pod, so it seats people: a
+  // fridge and two sinks were the only things in it, and desks are what this
+  // office is short of. One tile of aisle beside the meeting room's wall.
+  if (meeting) {
+    for (let px = meeting.x1 + 2; px + 1 < cols - 2; px += 5) pod(px, partTop + 1)
   }
 
   /**
@@ -456,6 +454,34 @@ export function assignDesks(
     if (desk) out.set(id, desk)
   })
   return out
+}
+
+/**
+ * Where to stand to talk to someone at `seat`.
+ *
+ * Beside them, never on them: the seat is walkable - a chair is drawn on the
+ * room layer rather than blocking the grid - so a visitor sent to the seat
+ * itself ends up standing inside the person it came to see.
+ *
+ * The nearest free neighbour to where the visitor is now, so someone crossing
+ * the floor stops on the side they arrived from instead of walking round the
+ * desk. Null when the seat has no free side at all, which is what the caller
+ * needs to know: there is no conversation to draw.
+ */
+export function standingSpot(grid: Cell[][], seat: Point, from: Point): Point | null {
+  const sides = [
+    { x: seat.x, y: seat.y - 1 },
+    { x: seat.x + 1, y: seat.y },
+    { x: seat.x, y: seat.y + 1 },
+    { x: seat.x - 1, y: seat.y }
+  ].filter((p) => walkable(grid, p.x, p.y))
+  if (sides.length === 0) return null
+  return sides.reduce((best, p) =>
+    Math.abs(p.x - from.x) + Math.abs(p.y - from.y) <
+    Math.abs(best.x - from.x) + Math.abs(best.y - from.y)
+      ? p
+      : best
+  )
 }
 
 /** Deterministic per-agent randomness, so idle wandering replays identically. */

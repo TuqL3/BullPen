@@ -30,6 +30,20 @@ export type Config = {
    * back to centred rather than open off-screen.
    */
   window?: { width: number; height: number; x?: number; y?: number; maximized?: boolean }
+  /**
+   * The inbound door, off unless it was turned on here.
+   *
+   * The token is persisted so a caller set up once keeps working across
+   * restarts; rotating it is a deliberate act in the UI. Nothing else in
+   * Bullpen listens for anything, which is why this is the one setting that
+   * says exactly what it opens.
+   */
+  webhook?: { enabled: boolean; port: number; token: string }
+  /**
+   * Desktop notifications. On unless turned off - the whole point of a floor
+   * that works while you are elsewhere is being told when it needs you.
+   */
+  notify?: boolean
 }
 
 /** Smaller than this and the four panels have nowhere to go. */
@@ -67,6 +81,19 @@ export function readConfig(home: string): Config {
     if (raw.mode === 'light' || raw.mode === 'dark') out.mode = raw.mode
     const win = readWindow(raw.window)
     if (win) out.window = win
+    if (typeof raw.notify === 'boolean') out.notify = raw.notify
+    const hook = raw.webhook
+    if (
+      hook &&
+      typeof hook.token === 'string' &&
+      hook.token.length >= 16 &&
+      typeof hook.port === 'number' &&
+      Number.isFinite(hook.port) &&
+      hook.port >= 0 &&
+      hook.port <= 65535
+    ) {
+      out.webhook = { enabled: hook.enabled === true, port: Math.floor(hook.port), token: hook.token }
+    }
     return out
   } catch {
     return {}

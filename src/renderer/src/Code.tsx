@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { EditorState, Prec, type Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import { EditorState, Prec, StateEffect, StateField, type Extension } from '@codemirror/state'
+import { Decoration, EditorView, keymap, type DecorationSet } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { basicSetup } from 'codemirror'
@@ -11,52 +11,9 @@ import { python } from '@codemirror/lang-python'
 import { Vim, getCM, vim } from '@replit/codemirror-vim'
 import { LABEL, MONO } from './theme'
 import { blocks, parseDiff, type Block, type ParsedDiff } from '../../diff.ts'
+import type { OpenFile } from './file'
 import type { Agent } from './store'
 import type { CodeEntry, GitChanges, Hit, SearchResult } from '../../preload/index'
-
-export type OpenFile = {
-  agentId: string
-  root: string
-  path: string
-  /** Line to jump to, when the file was opened from a search hit. */
-  line?: number
-  text: string
-  truncated: boolean
-  binary: boolean
-  /** Unified diff against HEAD, when the workspace is a git repository. */
-  diff?: string
-}
-
-/**
- * Ask main for a file, in the form the editor panel wants it.
- *
- * Lives here rather than in either panel because the tree opens files and the
- * editor displays them, and they are separate panels the operator can put in
- * different columns.
- */
-export async function openFile(
-  agent: Agent,
-  path: string,
-  line?: number
-): Promise<OpenFile | string> {
-  // Both at once: the panel offers file and diff side by side, and fetching the
-  // diff only when that tab is clicked makes the first click feel broken.
-  const [res, d] = await Promise.all([
-    window.bullpen.codeRead(agent.cwd, path),
-    window.bullpen.gitDiff(agent.cwd, path)
-  ])
-  if (res.error) return res.error
-  return {
-    agentId: agent.id,
-    root: agent.cwd,
-    path,
-    line,
-    text: res.text ?? '',
-    truncated: !!res.truncated,
-    binary: !!res.binary,
-    diff: d.error ? undefined : d.text
-  }
-}
 
 /**
  * What the agent has written lately, and the directory it works in.
@@ -72,7 +29,7 @@ export function WorkTree({
 }: {
   agent: Agent | null
   openPath: string | null
-  onOpen: (path: string, line?: number) => void
+  onOpen: (path: string, line?: number, col?: [number, number]) => void
 }) {
   // Bumped on every refresh so the tree re-lists: a file an agent just created
   // did not appear until the panel happened to remount.
@@ -135,7 +92,7 @@ export function WorkTree({
         />
       </div>
       <div style={{ ...S.search, display: mode === 'search' ? 'flex' : 'none' }}>
-        <Search agent={agent} onOpen={onOpen} openPath={openPath} />
+        <Search agent={agent} onOpen={onOpen} openPath={openPath} active={mode === 'search'} />
       </div>
     </div>
   )
@@ -206,11 +163,14 @@ function PanelIcon({ name }: { name: 'files' | 'search' }) {
 function Search({
   agent,
   onOpen,
-  openPath
+  openPath,
+  active
 }: {
   agent: Agent
-  onOpen: (path: string, line?: number) => void
+  onOpen: (path: string, line?: number, col?: [number, number]) => void
   openPath: string | null
+  /** Whether the panel is the one on screen - it stays mounted when it is not. */
+  active: boolean
 }) {
   const [query, setQuery] = useState('')
   const [aa, setAa] = useState(false)
@@ -218,6 +178,23 @@ function Search({
   const [res, setRes] = useState<SearchResult | null>(null)
   const [busy, setBusy] = useState(false)
   const [shut, setShut] = useState<string[]>([])
+  /**
+   * The row that was clicked last, so it stays marked while you read the file.
+   *
+   * Held here rather than derived from the open file: a file has one path and
+   * a dozen hits in it, and lighting all twelve of them says nothing about
+   * which one you are looking at. Dropped when a different file is opened -
+   * the mark is about the line on screen, not the last one clicked.
+   */
+  const [at, setAt] = useState<{ path: string; line: number } | null>(null)
+  const box = useRef<HTMLInputElement>(null)
+
+  // Switching to search is asking to search: the panel is one input, and making
+  // you click it after clicking the icon that opened it is one click too many.
+  // The panel is never unmounted, so this is keyed on becoming visible.
+  useEffect(() => {
+    if (active) box.current?.focus()
+  }, [active])
 
   /**
    * Search while typing, once the typing pauses.
@@ -267,6 +244,7 @@ function Search({
     <div style={S.searchInner}>
       <div style={S.searchBar}>
         <input
+          ref={box}
           style={S.searchInput}
           value={query}
           placeholder="search this workspace"
@@ -330,9 +308,17 @@ function Search({
                 hits.map((h) => (
                   <button
                     key={`${h.line}`}
-                    style={{ ...S.hit, ...(openPath === path ? S.rowActive : null) }}
+                    style={{
+                      ...S.hit,
+                      ...(openPath === path && at?.path === path && at.line === h.line
+                        ? S.hitActive
+                        : null)
+                    }}
                     title={`${path}:${h.line}`}
-                    onClick={() => onOpen(path, h.line)}
+                    onClick={() => {
+                      setAt({ path, line: h.line })
+                      onOpen(path, h.line, h.ranges?.[0])
+                    }}
                   >
                     <span style={S.hitLine}>{h.line}</span>
                     <span style={S.rowName}>
@@ -393,6 +379,7 @@ export function FilePanel({
           path={file.path}
           text={file.text}
           line={file.line}
+          col={file.col}
           onChange={() => setDirty(true)}
           onSave={(text) => {
             onSave(text)
@@ -931,6 +918,39 @@ function langFor(path: string): Extension[] {
 }
 
 /**
+ * What a search hit opened on: the line, and the characters that matched.
+ *
+ * A cursor is four pixels wide in a screen of code: putting it on the right
+ * line is not the same as showing anybody where that line is, and a line of 200
+ * characters does not say which word was found. The mark clears itself the
+ * moment the cursor moves or the file is edited - by then it is answering a
+ * question nobody is asking any more.
+ */
+const showHit = StateEffect.define<{ line: number; from: number; to: number }>()
+const HIT_LINE = Decoration.line({ class: 'cm-hitLine' })
+const HIT_TEXT = Decoration.mark({ class: 'cm-hitText' })
+const hitLine = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    // Before the clearing rules: the jump sets the selection in the same
+    // transaction that asks for the mark.
+    for (const e of tr.effects) {
+      if (!e.is(showHit)) continue
+      const { line, from, to } = e.value
+      // Sorted, because a line decoration and a mark starting at the same
+      // position have an order CodeMirror will not guess.
+      return Decoration.set(
+        to > from ? [HIT_LINE.range(line), HIT_TEXT.range(from, to)] : [HIT_LINE.range(line)],
+        true
+      )
+    }
+    if (tr.docChanged || tr.selection) return Decoration.none
+    return deco.map(tr.changes)
+  },
+  provide: (f) => EditorView.decorations.from(f)
+})
+
+/**
  * CodeMirror with vim keybindings.
  *
  * `vim()` comes first: it installs its own keymap and expects to win over the
@@ -940,6 +960,7 @@ function Editor({
   path,
   text,
   line,
+  col,
   onChange,
   onSave
 }: {
@@ -947,6 +968,8 @@ function Editor({
   text: string
   /** 1-based, from a search hit. Re-applied when it changes on the same file. */
   line?: number
+  /** Match offsets inside that line, from the same search hit. */
+  col?: [number, number]
   onChange: () => void
   onSave: (text: string) => void
 }) {
@@ -964,6 +987,7 @@ function Editor({
         extensions: [
           vim(),
           basicSetup,
+          hitLine,
           ...langFor(path),
           // basicSetup installs its own highlight style; earlier extensions win
           // in CodeMirror, so ours has to outrank it explicitly.
@@ -985,6 +1009,18 @@ function Editor({
             },
             '.cm-activeLineGutter': { backgroundColor: 'var(--line)', color: 'var(--ink)' },
             '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--line) 45%, transparent)' },
+            // After the active line, and on purpose: the hit IS the active line,
+            // and the one drawn last is the one you see.
+            '.cm-hitLine': {
+              backgroundColor: 'color-mix(in srgb, var(--accent) 18%, transparent)',
+              boxShadow: 'inset 3px 0 0 var(--accent)'
+            },
+            // The characters that actually matched, picked out of the line the
+            // same way the results panel picks them out of its own rows.
+            '.cm-hitText': {
+              backgroundColor: 'color-mix(in srgb, var(--accent) 55%, transparent)',
+              borderRadius: '2px'
+            },
             '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
               backgroundColor: 'color-mix(in srgb, var(--accent) 32%, transparent)'
             },
@@ -1028,12 +1064,22 @@ function Editor({
     const v = view.current
     if (!v || !line) return
     const at = v.state.doc.line(Math.min(Math.max(1, line), v.state.doc.lines))
+    // Clamped against the line as the editor has it: the search read the file
+    // from disk, and an unsaved buffer is a different document.
+    const end = at.to - at.from
+    const from = at.from + Math.min(col?.[0] ?? 0, end)
+    const to = at.from + Math.min(col?.[1] ?? 0, end)
     v.dispatch({
-      selection: { anchor: at.from },
-      effects: EditorView.scrollIntoView(at.from, { y: 'center' })
+      // The cursor goes on the match, not on the start of the line: what was
+      // searched for is what the next keystroke should be next to.
+      selection: { anchor: from },
+      effects: [
+        showHit.of({ line: at.from, from, to }),
+        EditorView.scrollIntoView(from, { y: 'center' })
+      ]
     })
     v.focus()
-  }, [path, line])
+  }, [path, line, col?.[0], col?.[1]])
 
   // The vim `:w` command is global to CodeMirror, so it is defined once and
   // routed through a ref to whichever editor is currently mounted.
@@ -1137,16 +1183,16 @@ const S: Record<string, React.CSSProperties> = {
     width: 24,
     height: 20,
     background: 'transparent',
-    border: '1px solid',
-    borderColor: 'transparent',
+    // No box: the one that is on says so in colour, the same way the title
+    // bar's switches do. The white ring these used to draw was Chromium's
+    // focus outline rather than a style of ours, which is why `outline` is off.
+    border: 'none',
     color: 'var(--faint)',
     cursor: 'pointer',
     padding: 0,
-    // The white ring was Chromium's focus outline, not a style of ours: these
-    // are toggles, and the one that is on already says so in colour.
     outline: 'none'
   },
-  modeOn: { color: 'var(--accent-ink)', borderColor: 'var(--accent-ink)' },
+  modeOn: { color: 'var(--accent-ink)' },
   searchBar: { display: 'flex', gap: 6, padding: '5px 8px', alignItems: 'center' },
   searchInput: {
     flex: 1,
@@ -1184,6 +1230,13 @@ const S: Record<string, React.CSSProperties> = {
     textAlign: 'left'
   },
   hitLine: { flex: '0 0 auto', width: 34, textAlign: 'right', color: 'var(--faint)' },
+  // The same accent tint and edge the editor puts on the line it jumped to, so
+  // the row here and the line over there read as one selection in two panels.
+  hitActive: {
+    background: 'color-mix(in srgb, var(--accent) 18%, transparent)',
+    color: 'var(--ink)',
+    boxShadow: 'inset 3px 0 0 var(--accent)'
+  },
   mark: {
     background: 'color-mix(in srgb, var(--accent) 45%, transparent)',
     color: 'var(--ink)',

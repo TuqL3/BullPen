@@ -220,9 +220,10 @@ test('per-file counts change when a file does - that is what the panel polls', a
     // Tracked and modified: the review panel compares this to decide whether the
     // diff it is showing is still the truth.
     assert.equal(before['src/keep.ts'], '1-1')
-    // Untracked files have no numstat, which is why the panel always re-reads
-    // them rather than trusting a comparison it cannot make.
-    assert.equal('src/new.ts' in before, false)
+    // A new file is a change too. `diff HEAD` cannot see it, so its lines are
+    // counted directly - the review panel diffs it against /dev/null and counts
+    // the same lines, and the header that sums them has to agree with the list.
+    assert.equal(before['src/new.ts'], '1-0')
 
     writeFileSync(join(dir, 'src/keep.ts'), 'export const a = 2\nexport const d = 4\n')
     const after = await stats(dir)

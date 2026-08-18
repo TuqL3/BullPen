@@ -1,32 +1,59 @@
 import { useEffect, useState } from 'react'
 import { onEnter } from '../keys'
+import { ago } from '../fleet'
 import { LABEL, MONO } from '../theme'
+import type { ActivityItem } from '../../../preload/index'
 import type { Agent } from '../store'
 
-type Status = 'todo' | 'doing' | 'blocked' | 'done'
+type Status = 'todo' | 'doing' | 'wait_test' | 'blocked' | 'done'
 type Task = { id: string; agentId: string; text: string; status: Status; createdAt: number }
 
 const COLUMNS: { key: Status; label: string; bar: string }[] = [
   { key: 'todo', label: 'todo', bar: '#7fc7e8' },
   { key: 'doing', label: 'doing', bar: '#e8cf6a' },
+  // Built, and nobody but the developer has said so. A card lands here on its
+  // own when the developer reports, and leaves it only when a tester passes it.
+  { key: 'wait_test', label: 'wait to test', bar: '#c9a2e8' },
   { key: 'blocked', label: 'blocked', bar: '#e8917f' },
   { key: 'done', label: 'done', bar: '#7fd8a0' }
 ]
 
-/** The board is the whole floor's, not one agent's - that is the point of it. */
-export function Tasks({ agents }: { agents: Agent[] }) {
-  const [tasks, setTasks] = useState<Task[]>([])
+/**
+ * One agent's board: the cards belonging to whoever is selected.
+ *
+ * The whole floor's cards in four columns was four agents' work interleaved,
+ * all with the same assignment text - unreadable exactly when there is most of
+ * it. The floor-wide view is the monitor; this answers "what is this one on".
+ */
+export function Tasks({ agents, agent }: { agents: Agent[]; agent: Agent | null }) {
+  // The god agent's work is not cards in columns. He hires, hands things out
+  // and reports; every one of those is done the moment it is done, and a board
+  // of them would be four columns with everything in the last one.
+  // Neither the boss nor the analyst works a board: they hire, hand out and
+  // report, and every one of those is done the moment it is done.
+  if (agent?.role === 'god' || agent?.role === 'ba') return <Ledger agent={agent} />
+
+  const [all, setAll] = useState<Task[]>([])
   const [text, setText] = useState('')
-  const [owner, setOwner] = useState('')
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [over, setOver] = useState<Status | null>(null)
+  const tasks = agent ? all.filter((t) => t.agentId === agent.id) : all
 
   const refresh = (): void => {
-    window.bullpen.tasks().then((t) => setTasks(t as Task[]))
+    window.bullpen.tasks().then((t) => setAll(t as Task[]))
   }
-  useEffect(refresh, [])
+  // Subscribed, not fetched once: cards appear on their own now - an agent
+  // given work gets one, and it moves as the agent does.
+  useEffect(() => {
+    refresh()
+    return window.bullpen.onTasks((t) => setAll(t as Task[]))
+  }, [])
 
   const add = async (): Promise<void> => {
-    if (!text.trim()) return
-    await window.bullpen.addTask(owner || agents[0]?.id || '', text.trim())
+    if (!text.trim() || !agent) return
+    // A card typed on an agent's board is that agent's: the owner dropdown was
+    // a second place to say what the tab already says.
+    await window.bullpen.addTask(agent.id, text.trim())
     setText('')
     refresh()
   }
@@ -44,22 +71,15 @@ export function Tasks({ agents }: { agents: Agent[] }) {
         <input
           style={S.input}
           value={text}
-          placeholder="add a card"
+          placeholder={agent ? `add a card for ${agent.name}` : 'pick an agent first'}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onEnter(add)}
         />
-        <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
-          <option value="">unassigned</option>
-          {agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
-          ))}
-        </select>
         <button style={S.btn} onClick={add}>
           add
         </button>
         <span style={{ ...LABEL, color: 'var(--faint)', marginLeft: 'auto' }}>
+          {agent ? `${agent.name} · ` : ''}
           {tasks.length} task{tasks.length === 1 ? '' : 's'}
         </span>
       </div>
@@ -68,16 +88,58 @@ export function Tasks({ agents }: { agents: Agent[] }) {
         {COLUMNS.map((col) => {
           const cards = tasks.filter((t) => t.status === col.key)
           return (
-            <div key={col.key} style={S.column}>
+            <div
+              key={col.key}
+              style={{ ...S.column, ...(over === col.key ? S.columnOver : null) }}
+              onDragOver={(e) => {
+                // Read off the drag itself, not off React state: the first
+                // dragover runs in a closure from before the drag started, and
+                // a column that only lights up on the second event looks
+                // broken. preventDefault is also what makes the drop fire.
+                if (!e.dataTransfer.types.includes('text/card')) return
+                e.preventDefault()
+                setOver(col.key)
+              }}
+              onDragLeave={() => setOver((o) => (o === col.key ? null : o))}
+              onDrop={(e) => {
+                e.preventDefault()
+                const id = e.dataTransfer.getData('text/card') || dragging
+                setOver(null)
+                setDragging(null)
+                if (id) move(id, col.key)
+              }}
+            >
               <div style={{ ...S.colHead, background: col.bar }}>
                 <span style={{ ...LABEL, color: '#241f1a', fontWeight: 700 }}>{col.label}</span>
                 <span style={{ ...LABEL, color: '#241f1a' }}>{cards.length}</span>
               </div>
               <div style={S.cards}>
                 {cards.map((t) => (
-                  <div key={t.id} style={{ ...S.card, borderLeft: `3px solid ${col.bar}` }}>
+                  <div
+                    key={t.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('text/card', t.id)
+                      e.dataTransfer.effectAllowed = 'move'
+                      setDragging(t.id)
+                    }}
+                    onDragEnd={() => {
+                      setDragging(null)
+                      setOver(null)
+                    }}
+                    style={{
+                      ...S.card,
+                      borderLeft: `3px solid ${col.bar}`,
+                      ...(dragging === t.id ? S.cardHeld : null)
+                    }}
+                  >
                     <div style={{ display: 'flex', gap: 6 }}>
-                      <span style={{ flex: 1, lineHeight: 1.45 }}>{t.text}</span>
+                      {/* The whole assignment is on the card's title: four of
+                          these at full length is a column you scroll past
+                          rather than read. */}
+                      <span style={S.cardText} title={t.text}>
+                        {t.text}
+                      </span>
                       <button
                         style={S.linkBtn}
                         title="delete card"
@@ -91,17 +153,6 @@ export function Tasks({ agents }: { agents: Agent[] }) {
                     </div>
                     <div style={S.cardFoot}>
                       <span style={{ ...LABEL, color: 'var(--accent-ink)' }}>{nameOf(t.agentId)}</span>
-                      <span style={{ flex: 1 }} />
-                      {COLUMNS.filter((c) => c.key !== t.status).map((c) => (
-                        <button
-                          key={c.key}
-                          style={S.moveBtn}
-                          title={`move to ${c.label}`}
-                          onClick={() => move(t.id, c.key)}
-                        >
-                          {c.label[0]}
-                        </button>
-                      ))}
                     </div>
                   </div>
                 ))}
@@ -113,15 +164,119 @@ export function Tasks({ agents }: { agents: Agent[] }) {
       </div>
 
       <p style={S.note}>
-        Cards are yours: nothing here is sent to an agent on its own. Assigning names an owner for
-        your own tracking — to make an agent act, message it, dispatch through your clone, or set a
-        trigger.
+        A card appears here on its own when this agent is given something, and moves as it works -
+        drag one to move it by hand. Adding or moving a card does not tell the agent anything: to
+        make it act, message it, dispatch through your clone, or set a trigger.
+      </p>
+    </div>
+  )
+}
+
+
+/** What the god agent did, newest first: hires, assignments, reports. */
+const DID: Record<string, { label: string; color: string }> = {
+  spawn: { label: 'hired', color: '#7fd8a0' },
+  task: { label: 'assigned', color: '#e8cf6a' },
+  message: { label: 'sent', color: '#7fc7e8' },
+  question: { label: 'asked you', color: '#e8917f' },
+  done: { label: 'finished', color: 'var(--muted)' },
+  dead: { label: 'undelivered', color: '#e8917f' }
+}
+
+function Ledger({ agent }: { agent: Agent }) {
+  const [items, setItems] = useState<ActivityItem[]>([])
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    window.bullpen.activity(500).then(setItems)
+    return window.bullpen.onActivity((i) => setItems((prev) => [i, ...prev].slice(0, 500)))
+  }, [])
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  // His own actions, and the ones taken in his name: a hire is spawned by the
+  // runtime on his instruction, and reads as his doing on this page.
+  //
+  // Two things are dropped. The runtime's own line for starting him is not
+  // something he did. And handing work over writes twice - the card, and the
+  // mail that carried it - so the mail is dropped when the card already says
+  // it, which is every time the text of one starts the other.
+  const mine = items.filter((i) => i.actor === agent.id && DID[i.kind])
+  const assigned = mine.filter((i) => i.kind === 'task').map((i) => i.text)
+  const log = mine.filter(
+    (i) =>
+      !(i.kind === 'spawn' && i.text.startsWith('spawned ')) &&
+      !(i.kind === 'message' && assigned.some((t) => t.startsWith(i.text)))
+  )
+
+  return (
+    <div style={S.wrap}>
+      <div style={S.ledgerHead}>
+        <span style={{ ...LABEL, color: 'var(--ink)' }}>{agent.name}&apos;s log</span>
+        <span style={{ ...LABEL, color: 'var(--faint)' }}>
+          {log.length} action{log.length === 1 ? '' : 's'}
+        </span>
+      </div>
+      {log.length === 0 && (
+        <div style={S.emptyCol}>Nothing yet. Hires, assignments and reports land here.</div>
+      )}
+      <div style={S.ledger}>
+        {log.map((i) => {
+          const d = DID[i.kind]
+          return (
+            <div key={i.id} style={{ ...S.entry, borderLeft: `3px solid ${d.color}` }}>
+              <div style={S.entryHead}>
+                <span style={{ ...LABEL, color: d.color }}>{d.label}</span>
+                <span style={{ flex: 1 }} />
+                <span style={{ ...LABEL, color: 'var(--faint)' }}>{ago(i.ts, now)} ago</span>
+              </div>
+              <div style={S.entryText} title={i.text}>
+                {i.text}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <p style={S.note}>
+        {agent.role === 'ba'
+          ? 'This is what the analyst has done, not a list to work through: she analyses what comes in, hires, assigns and puts the result through test. The columns are for the agents she assigns to.'
+          : 'This is what your clone has done, not a list to work through: he hands work to the analyst and reports back to you. The columns are for the agents she assigns to.'}
       </p>
     </div>
   )
 }
 
 const S: Record<string, React.CSSProperties> = {
+  ledgerHead: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12 },
+  ledger: { display: 'flex', flexDirection: 'column', gap: 6 },
+  entry: { background: 'var(--panel)', border: '1px solid var(--line)', padding: '6px 9px' },
+  entryHead: { display: 'flex', alignItems: 'baseline', gap: 8 },
+  // Two lines, then an ellipsis: a mail subject and body run long, and this is
+  // a log you scan rather than read.
+  entryText: {
+    marginTop: 3,
+    fontSize: 11,
+    color: 'var(--muted)',
+    lineHeight: 1.45,
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden'
+  } as React.CSSProperties,
+  columnOver: { background: 'color-mix(in srgb, var(--accent) 12%, transparent)' },
+  cardHeld: { opacity: 0.45 },
+  // Four lines, then an ellipsis: an assignment written by an agent runs to a
+  // paragraph, and the card is a marker for it rather than the document.
+  cardText: {
+    flex: 1,
+    lineHeight: 1.45,
+    display: '-webkit-box',
+    WebkitLineClamp: 4,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden'
+  } as React.CSSProperties,
   wrap: { padding: 14, height: '100%', overflowY: 'auto', font: `12px ${MONO}` },
   addRow: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 },
   input: {
@@ -147,7 +302,7 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     font: `11px ${MONO}`
   },
-  board: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
+  board: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 10 },
   column: { minWidth: 0 },
   colHead: {
     display: 'flex',
@@ -160,21 +315,10 @@ const S: Record<string, React.CSSProperties> = {
     background: 'var(--panel)',
     border: '1px solid var(--line)',
     padding: '7px 8px',
-    fontSize: 11
+    fontSize: 11,
+    cursor: 'grab'
   },
   cardFoot: { display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 },
-  moveBtn: {
-    width: 16,
-    height: 16,
-    lineHeight: '14px',
-    textAlign: 'center',
-    background: 'var(--sunk)',
-    color: 'var(--faint)',
-    border: '1px solid var(--line)',
-    cursor: 'pointer',
-    font: `9px ${MONO}`,
-    padding: 0
-  },
   linkBtn: {
     background: 'transparent',
     border: 'none',

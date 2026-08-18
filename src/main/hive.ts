@@ -1,5 +1,13 @@
 import { EventEmitter } from 'node:events'
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { join } from 'node:path'
 
 export type Message = {
@@ -14,9 +22,24 @@ export type Message = {
    * operator's call, so this is the field that carries their answer.
    */
   cwd?: string
+  /**
+   * Only read on a message to `hire`: what the new agent is for. A floor with
+   * one kind of agent cannot have a test loop - somebody has to be the one who
+   * checks the work rather than the one who wrote it.
+   */
+  role?: string
 }
 
 export type Delivery = { to: string; msg: Message }
+
+/**
+ * How long a file may be unreadable before it counts as broken rather than busy.
+ *
+ * An agent writes its mail with a shell heredoc, and for a moment the file on
+ * disk is half a JSON object. Several poll ticks: a message worth sending is
+ * worth waiting a couple of seconds for.
+ */
+const HALF_WRITTEN_MS = 3000
 
 /**
  * Reserved recipient: mail addressed here is a question for the human, not for
@@ -50,6 +73,16 @@ export class Hive extends EventEmitter {
   private seq = 0
   private timer: NodeJS.Timeout | null = null
   readonly root: string
+
+  /**
+   * Who is allowed to write to whom. Return a reason to refuse, null to deliver.
+   *
+   * The router is the only place this can be enforced: an agent writes a file
+   * and the file is the message, so a rule that lives anywhere else is a rule
+   * the sender can decline to follow. Unset means the old behaviour - anyone
+   * may write to anyone.
+   */
+  gate: ((from: string, to: string) => string | null) | null = null
 
   // Plain assignment, not a constructor parameter property: `node
   // --experimental-strip-types` rejects parameter properties, and that is how
@@ -119,21 +152,68 @@ export class Hive extends EventEmitter {
       for (const name of this.jsonFiles(dir)) {
         const path = join(dir, name)
         const msg = this.readJson(path)
+
+        // Unreadable is not the same as unroutable. This used to delete the
+        // file first and check afterwards, so a message caught mid-write was
+        // gone: no delivery, no ack, no dead letter - indistinguishable to the
+        // sender from a request nobody acted on. That is what silently ate a
+        // round of hires. Left where it is until it has been broken long
+        // enough to be broken rather than busy, and then it is dead mail with
+        // its contents kept, not a file that never existed.
+        if (!msg) {
+          let age = 0
+          try {
+            age = Date.now() - statSync(path).mtimeMs
+          } catch {
+            continue
+          }
+          if (age < HALF_WRITTEN_MS) continue
+          try {
+            renameSync(path, join(this.root, 'dead', this.nextName()))
+          } catch {
+            rmSync(path, { force: true })
+          }
+          this.emit('dead', {
+            from,
+            to: '?',
+            subject: `unreadable message ${name}`,
+            body: 'The file did not parse as a message. It is in dead/ as it was written.',
+            ts: Date.now()
+          } satisfies Message)
+          continue
+        }
         rmSync(path, { force: true })
 
-        if (!msg) continue
-
-        if (msg.to === HUMAN) {
-          this.emit('question', msg)
-          continue
-        }
-        if (msg.to === HIRE) {
-          this.emit('hire', msg)
-          continue
+        // Refused mail is kept and answered, never dropped: the sender is a
+        // model that will otherwise sit waiting for a reply to a message
+        // nobody told it was against the rules.
+        const refuse = (why: string): void => {
+          writeFileSync(join(this.root, 'dead', this.nextName()), JSON.stringify(msg, null, 2))
+          this.emit('blocked', msg, why)
         }
 
-        const targets =
+        if (msg.to === HUMAN || msg.to === HIRE) {
+          const why = this.gate?.(msg.from, msg.to) ?? null
+          if (why) {
+            refuse(why)
+            continue
+          }
+          this.emit(msg.to === HUMAN ? 'question' : 'hire', msg)
+          continue
+        }
+
+        const addressed =
           msg.to === '*' ? agents.filter((a) => a !== from) : agents.includes(msg.to) ? [msg.to] : []
+        // Per target, so a broadcast reaches the part of the floor it is
+        // allowed to reach rather than being refused whole.
+        const blocked = addressed
+          .map((to) => [to, this.gate?.(msg.from, to) ?? null] as const)
+          .filter((pair): pair is readonly [string, string] => pair[1] !== null)
+        const targets = addressed.filter((to) => !blocked.some(([id]) => id === to))
+        if (targets.length === 0 && blocked.length > 0) {
+          refuse(blocked[0][1])
+          continue
+        }
 
         if (targets.length === 0) {
           writeFileSync(join(this.root, 'dead', this.nextName()), JSON.stringify(msg, null, 2))

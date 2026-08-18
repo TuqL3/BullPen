@@ -17,6 +17,35 @@ export type Question = {
   ts: number
 }
 
+/** A call that came in: accepted, or refused with the reason as its subject. */
+export type WebhookCall = { at: number; from: string; subject: string; ok: boolean }
+
+/** The inbound webhook, as main knows it. `error` is set when it refused to start. */
+export type WebhookState = {
+  enabled: boolean
+  port: number
+  token: string
+  running?: boolean
+  error?: string
+  lastCall?: WebhookCall | null
+}
+
+/** What to do when an agent's context fills: compact it, or clear it. */
+export type ContextRule = {
+  agentId: string
+  atPct: number
+  action: 'compact' | 'clear'
+  enabled: boolean
+  lastRun: number
+  armed: boolean
+}
+
+/** A brief the operator handed to the god agent, before he wrapped it in orders. */
+export type Dispatch = { text: string; owner: string; project: string; ts: number }
+
+/** Where the work stands, as the god agent last described it. */
+export type Report = { from: string; subject: string; body: string; ts: number }
+
 /** One row of the snapshot Michael reads to see who is on the floor. */
 export type FloorAgent = {
   id: string
@@ -25,6 +54,8 @@ export type FloorAgent = {
   cwd: string
   status: string
   activity: string
+  /** What they are for - the analyst reads this to pick who tests what. */
+  role?: string
   pid: number
   ctxPct?: number
   model?: string
@@ -91,7 +122,10 @@ const api = {
   pickDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDir'),
   toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
   /** Light or dark, remembered across restarts and handed to every agent's CLI. */
-  mode: (): Promise<'light' | 'dark' | null> => ipcRenderer.invoke('ui:mode'),
+  /** The saved theme, known before the first render rather than one paint late. */
+  initialMode: (process.argv.find((a) => a.startsWith('--bullpen-mode=')) ?? '').endsWith('dark')
+    ? ('dark' as const)
+    : ('light' as const),
   setMode: (mode: 'light' | 'dark'): Promise<boolean> => ipcRenderer.invoke('ui:setMode', mode),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -124,6 +158,8 @@ const api = {
   steers: (id: string): Promise<string[]> => ipcRenderer.invoke('agent:steers', id),
   onSteerQueued: (fn: (id: string, note: string, depth: number) => void) => on('agent:steer-queued', fn),
   onSteerDelivered: (fn: (id: string, notes: string[]) => void) => on('agent:steer-delivered', fn),
+  /** The queue was dropped rather than delivered - the agent was halted. */
+  onSteerCleared: (fn: (id: string, notes: string[]) => void) => on('agent:steer-cleared', fn),
 
   listApprovals: () => ipcRenderer.invoke('approvals:list'),
   decide: (id: string, decision: 'allow' | 'deny') => ipcRenderer.invoke('approvals:decide', id, decision),
@@ -140,8 +176,30 @@ const api = {
   askAnswer: (qid: string, answer: string) => ipcRenderer.invoke('ask:answer', qid, answer),
   askDismiss: (qid: string) => ipcRenderer.invoke('ask:dismiss', qid),
   onAsk: (fn: (qs: Question[]) => void) => on('ask:pending', fn),
+  /** The god agent's last progress report. Not a question - nothing is owed. */
+  lastReport: (): Promise<Report | null> => ipcRenderer.invoke('report:last'),
+  onReport: (fn: (r: Report) => void) => on('report:new', fn),
+  /** What the operator last dispatched, in their own words. */
+  lastDispatch: (): Promise<Dispatch | null> => ipcRenderer.invoke('dispatch:last'),
+  onDispatch: (fn: (d: Dispatch) => void) => on('dispatch:new', fn),
 
   setGod: (id: string) => ipcRenderer.invoke('agent:setGod', id),
+  /** Say what a hand-made agent is for: it decides how its cards move. */
+  setRole: (id: string, role: string) => ipcRenderer.invoke('agent:setRole', id, role),
+  /** Bring the analyst up, or hand back the one already running. */
+  ensureBa: (size: {
+    cols: number
+    rows: number
+  }): Promise<{
+    id: string
+    name: string
+    cwd: string
+    pid: number
+    startedAt: number
+    cols: number
+    rows: number
+    alreadyUp: boolean
+  }> => ipcRenderer.invoke('ba:ensure', size),
   /** Bring Michael up, or hand back the one already running. */
   ensureGod: (size: {
     cols: number
@@ -224,7 +282,20 @@ const api = {
   onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
   /** An agent Michael hired: main spawned it, the roster has never seen it. */
   onHired: (
-    fn: (a: { id: string; name: string; project: string; cwd: string; pid: number; startedAt: number; cols: number; rows: number }) => void
+    fn: (a: {
+      id: string
+      name: string
+      project: string
+      cwd: string
+      pid: number
+      startedAt: number
+      cols: number
+      rows: number
+      /** What it was hired as: someone who builds, or someone who checks. */
+      role?: string
+      /** The task it was hired to do, as its first turn. */
+      brief?: string
+    }) => void
   ) => on('agent:hired', fn),
   layout: (): Promise<unknown> => ipcRenderer.invoke('layout:get'),
   saveLayout: (layout: unknown): Promise<boolean> => ipcRenderer.invoke('layout:set', layout),
@@ -256,7 +327,33 @@ const api = {
   sendMail: (msg: { from: string; to: string; subject: string; body: string }) =>
     ipcRenderer.invoke('hive:send', msg),
   inbox: (id: string) => ipcRenderer.invoke('hive:inbox', id),
-  onDeliver: (fn: (d: unknown) => void) => on('hive:deliver', fn)
+  onDeliver: (fn: (d: unknown) => void) => on('hive:deliver', fn),
+  /** The board, whenever it changes - agents write to it as well as you do. */
+  onTasks: (fn: (tasks: unknown[]) => void) => on('board:tasks', fn),
+  /** Schedules, whenever one is added, toggled, removed or fires. */
+  onTriggers: (fn: (triggers: unknown[]) => void) => on('board:triggers', fn),
+  rules: (id?: string): Promise<ContextRule[]> => ipcRenderer.invoke('board:rules', id),
+  setRule: (id: string, atPct: number, action: 'compact' | 'clear'): Promise<ContextRule | null> =>
+    ipcRenderer.invoke('board:setRule', id, atPct, action),
+  toggleRule: (id: string): Promise<void> => ipcRenderer.invoke('board:toggleRule', id),
+  removeRule: (id: string): Promise<void> => ipcRenderer.invoke('board:removeRule', id),
+  onRules: (fn: (rules: ContextRule[]) => void) => on('board:rules', fn),
+  /** The inbound door: whether it is open, on what port, and with what token. */
+  webhook: (): Promise<WebhookState> => ipcRenderer.invoke('webhook:get'),
+  setWebhook: (enabled: boolean, port: number): Promise<WebhookState> =>
+    ipcRenderer.invoke('webhook:set', enabled, port),
+  rotateWebhookToken: (): Promise<WebhookState> => ipcRenderer.invoke('webhook:rotate'),
+  /** Post a task to ourselves through the real socket, to prove it is wired. */
+  testWebhook: (): Promise<{ ok: boolean; status?: number; body?: string; error?: string }> =>
+    ipcRenderer.invoke('webhook:test'),
+  onWebhookCall: (fn: (call: WebhookCall) => void) => on('webhook:call', fn),
+  /** Open an http(s) link in the real browser. Anything else is refused. */
+  openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('ui:open', url),
+  /** Desktop notifications: on unless turned off. */
+  notify: (): Promise<boolean> => ipcRenderer.invoke('ui:notify'),
+  setNotify: (on: boolean): Promise<boolean> => ipcRenderer.invoke('ui:setNotify', on),
+  /** A notification was clicked: show this tab, and this agent if it names one. */
+  onGoto: (fn: (tab: string, id: string | null) => void) => on('ui:goto', fn)
 }
 
 contextBridge.exposeInMainWorld('bullpen', api)

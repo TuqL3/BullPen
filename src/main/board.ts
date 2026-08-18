@@ -3,8 +3,14 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
-export type TaskStatus = 'todo' | 'doing' | 'blocked' | 'done'
-export const TASK_STATUSES: TaskStatus[] = ['todo', 'doing', 'blocked', 'done']
+/**
+ * `wait_test` is the column the test loop needed: a developer says it is built,
+ * and that is not the same claim as "it works". Cards used to go from doing
+ * straight to done on the developer's own word, which is the one report nobody
+ * should take at face value.
+ */
+export type TaskStatus = 'todo' | 'doing' | 'wait_test' | 'blocked' | 'done'
+export const TASK_STATUSES: TaskStatus[] = ['todo', 'doing', 'wait_test', 'blocked', 'done']
 
 export type Task = {
   id: string
@@ -26,9 +32,25 @@ export type Trigger = {
   lastRun: number
 }
 
-type Data = { tasks: Task[]; triggers: Trigger[] }
+/**
+ * What to do when an agent's context fills up.
+ *
+ * One per agent, because "compact at 80%" is a property of the agent rather
+ * than a list of things to do. `armed` is what stops it firing on every read
+ * while the window sits above the line: it re-arms once usage drops back under.
+ */
+export type ContextRule = {
+  agentId: string
+  atPct: number
+  action: 'compact' | 'clear'
+  enabled: boolean
+  lastRun: number
+  armed: boolean
+}
 
-const EMPTY: Data = { tasks: [], triggers: [] }
+type Data = { tasks: Task[]; triggers: Trigger[]; rules: ContextRule[] }
+
+const EMPTY: Data = { tasks: [], triggers: [], rules: [] }
 
 /**
  * Tasks and scheduled prompts, in one small JSON file.
@@ -38,7 +60,7 @@ const EMPTY: Data = { tasks: [], triggers: [] }
  */
 export class Board extends EventEmitter {
   readonly file: string
-  private data: Data = { tasks: [], triggers: [] }
+  private data: Data = { tasks: [], triggers: [], rules: [] }
   private timer: NodeJS.Timeout | null = null
 
   constructor(file: string) {
@@ -58,12 +80,13 @@ export class Board extends EventEmitter {
           ...t,
           status: TASK_STATUSES.includes(t?.status) ? t.status : t?.done ? 'done' : 'todo'
         })),
-        triggers: Array.isArray(parsed.triggers) ? parsed.triggers : []
+        triggers: Array.isArray(parsed.triggers) ? parsed.triggers : [],
+        rules: Array.isArray(parsed.rules) ? parsed.rules : []
       }
     } catch {
       // Missing or corrupt: start clean rather than refuse to boot. Losing a
       // scratch task list is not worth blocking the whole app over.
-      this.data = { ...EMPTY, tasks: [], triggers: [] }
+      this.data = { ...EMPTY, tasks: [], triggers: [], rules: [] }
     }
   }
 
@@ -159,22 +182,102 @@ export class Board extends EventEmitter {
    * Triggers whose interval has elapsed. Marks them run in the same step, so a
    * slow tick cannot fire the same trigger twice.
    */
+  /**
+   * Which schedules are ready, without claiming them.
+   *
+   * Stamping here was wrong: a trigger for a busy agent is not delivered - the
+   * caller drops it - and stamping it anyway spent the interval on a prompt
+   * nobody received, so an hourly trigger silently skipped the hour whenever
+   * the agent happened to be mid-turn. The caller stamps what it delivers.
+   */
   due(now: number): Trigger[] {
-    const ready = this.data.triggers.filter(
+    return this.data.triggers.filter(
       (t) => t.enabled && now - t.lastRun >= t.everyMinutes * 60_000
     )
-    if (ready.length === 0) return []
-    for (const t of ready) t.lastRun = now
-    this.save()
-    return ready
   }
 
-  /** Poll for due triggers. `fire` decides whether the agent can take it. */
-  start(fire: (t: Trigger) => void, intervalMs = 30_000): void {
+  /** Say a schedule was delivered, which is what starts its next interval. */
+  markRun(id: string, now = Date.now()): void {
+    const t = this.data.triggers.find((x) => x.id === id)
+    if (!t) return
+    t.lastRun = now
+    this.save()
+  }
+
+  rules(agentId?: string): ContextRule[] {
+    return this.data.rules.filter((r) => !agentId || r.agentId === agentId)
+  }
+
+  /**
+   * Set (or replace) an agent's context rule.
+   *
+   * Refused below 10% or above 99: a rule that fires at 5% compacts a fresh
+   * session on its second turn, and one at 100 never fires at all.
+   */
+  setRule(agentId: string, atPct: number, action: ContextRule['action']): ContextRule | null {
+    if (!agentId || !Number.isFinite(atPct) || atPct < 10 || atPct > 99) return null
+    if (action !== 'compact' && action !== 'clear') return null
+    const rule: ContextRule = {
+      agentId,
+      atPct: Math.floor(atPct),
+      action,
+      enabled: true,
+      lastRun: this.data.rules.find((r) => r.agentId === agentId)?.lastRun ?? 0,
+      armed: true
+    }
+    this.data.rules = [...this.data.rules.filter((r) => r.agentId !== agentId), rule]
+    this.save()
+    return rule
+  }
+
+  toggleRule(agentId: string): void {
+    const r = this.data.rules.find((x) => x.agentId === agentId)
+    if (!r) return
+    r.enabled = !r.enabled
+    // Coming back on with the window already full should act, not wait for it
+    // to empty first.
+    if (r.enabled) r.armed = true
+    this.save()
+  }
+
+  removeRule(agentId: string): void {
+    this.data.rules = this.data.rules.filter((r) => r.agentId !== agentId)
+    this.save()
+  }
+
+  /**
+   * Whether this reading should fire the agent's rule, arming it as it goes.
+   *
+   * Hysteresis of 5 points: a window sitting on the line would otherwise
+   * compact, read a percent under, and compact again on the next turn.
+   */
+  ruleDue(agentId: string, pct: number): ContextRule | null {
+    const r = this.data.rules.find((x) => x.agentId === agentId)
+    if (!r || !r.enabled) return null
+    if (!r.armed) {
+      if (pct < r.atPct - 5) {
+        r.armed = true
+        this.save()
+      }
+      return null
+    }
+    if (pct < r.atPct) return null
+    r.armed = false
+    r.lastRun = Date.now()
+    this.save()
+    return r
+  }
+
+  /**
+   * Poll for due triggers. `fire` decides whether the agent can take it, and
+   * says so by returning true - anything else leaves the trigger due.
+   */
+  start(fire: (t: Trigger) => boolean | void, intervalMs = 30_000): void {
     if (this.timer) return
     this.timer = setInterval(() => {
       try {
-        for (const t of this.due(Date.now())) fire(t)
+        const now = Date.now()
+        for (const t of this.due(now)) if (fire(t) !== false) this.markRun(t.id, now)
       } catch (err) {
         this.emit('error', err)
       }

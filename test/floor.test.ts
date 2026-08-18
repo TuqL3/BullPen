@@ -4,12 +4,11 @@ import {
   assignDesks,
   buildOffice,
   findPath,
-  DESK_ROWS,
   MAX_COLS,
   MAX_ROWS,
-  POD_COLS,
   MIN_COLS,
   MIN_ROWS,
+  standingSpot,
   randomWalkable,
   rng,
   walkable
@@ -121,19 +120,40 @@ test('the corner office is reachable, and its seat is walkable', () => {
   assert.ok(findPath(o.grid, o.door, o.boss!.seat), 'no route into the corner office')
 })
 
-test('at full size the office is exactly four rows of desks by five pods across', () => {
-  // Asked for explicitly: more is a wall of empty desks, fewer wastes the
-  // panel. The caps have to produce the counts, not merely allow them.
-  const o = buildOffice(MAX_COLS, MAX_ROWS)
-  const rows = new Set(o.desks.map((d) => d.desk.y))
-  assert.equal(rows.size, DESK_ROWS, [...rows].join(','))
-  // Pods are 2 wide, so a pod column is the desk x rounded to its pod origin.
-  const podCols = new Set(o.desks.map((d) => Math.floor((d.desk.x - 3) / 5)))
-  assert.equal(podCols.size, POD_COLS, [...podCols].join(','))
+test('the corner office is reachable at every size, not just the cap', () => {
+  // It was not: at any width where a pod landed in the column the office door
+  // opens onto, the boss was sealed in and the agent at that desk stood in the
+  // front doorway for as long as the panel kept that width. The desks are
+  // checked per size elsewhere; his is not one of them.
+  const sealed: string[] = []
+  for (let cols = MIN_COLS; cols <= MAX_COLS; cols++) {
+    for (let rows = MIN_ROWS; rows <= MAX_ROWS; rows++) {
+      const o = buildOffice(cols, rows)
+      if (!o.boss) continue
+      if (!findPath(o.grid, o.door, o.boss.seat)) sealed.push(`${cols}x${rows}`)
+    }
+  }
+  assert.deepEqual(sealed, [], `sealed at ${sealed.slice(0, 8).join(', ')}`)
+})
+
+test('the office grows with the panel, and stops at the cap', () => {
+  // The panel is resizable, so a bigger panel is a bigger room rather than the
+  // same room with empty panel around it. Past the cap it stops: a wall-sized
+  // monitor is not an argument for a hundred empty desks.
+  const rowsOf = (o: ReturnType<typeof buildOffice>): number =>
+    new Set(o.desks.map((d) => d.desk.y)).size
+  const podsOf = (o: ReturnType<typeof buildOffice>): number =>
+    new Set(o.desks.map((d) => Math.floor((d.desk.x - 3) / 5))).size
+
+  const small = buildOffice(24, 20)
+  const full = buildOffice(MAX_COLS, MAX_ROWS)
+  assert.ok(rowsOf(full) > rowsOf(small), `${rowsOf(full)} desk rows is no more than ${rowsOf(small)}`)
+  assert.ok(podsOf(full) > podsOf(small), `${podsOf(full)} pod columns is no more than ${podsOf(small)}`)
+
   // And a panel larger than the cap gets the same office, not a bigger one.
   const huge = buildOffice(500, 500)
-  assert.equal(new Set(huge.desks.map((d) => d.desk.y)).size, DESK_ROWS)
-  assert.equal(new Set(huge.desks.map((d) => Math.floor((d.desk.x - 3) / 5))).size, POD_COLS)
+  assert.equal(rowsOf(huge), rowsOf(full))
+  assert.equal(podsOf(huge), podsOf(full))
 })
 
 test('a path is contiguous, walkable, and ends where asked', () => {
@@ -212,4 +232,37 @@ test('randomWalkable never returns furniture', () => {
     const p = randomWalkable(o.grid, next, o.door)
     assert.ok(walkable(o.grid, p.x, p.y), `returned ${p.x},${p.y}`)
   }
+})
+
+test('you stand beside someone to talk to them, never on them', () => {
+  const office = buildOffice(30, 24)
+  const seat = office.desks[0].seat
+  // From across the room: the spot has to be somewhere you can actually stand,
+  // next to the seat, and not the seat itself - the chair is drawn on the room
+  // layer rather than blocking the grid, so walking onto it is allowed and
+  // reads as one agent standing inside another.
+  const spot = standingSpot(office.grid, seat, office.door)!
+  assert.ok(spot, 'a seat in an open office has a free side')
+  assert.notDeepEqual(spot, seat)
+  assert.equal(Math.abs(spot.x - seat.x) + Math.abs(spot.y - seat.y), 1)
+  assert.ok(walkable(office.grid, spot.x, spot.y))
+  // And it is reachable, or the walk over never starts.
+  assert.ok(findPath(office.grid, office.door, spot))
+})
+
+test('a seat with no free side has nowhere to stand, and says so', () => {
+  const office = buildOffice(30, 24)
+  const seat = office.desks[0].seat
+  const boxed = office.grid.map((row) => [...row])
+  for (const [dx, dy] of [
+    [0, -1],
+    [1, 0],
+    [0, 1],
+    [-1, 0]
+  ]) {
+    boxed[seat.y + dy][seat.x + dx] = 'wall'
+  }
+  // Null rather than the seat: the caller falls back to an envelope, which is
+  // the honest picture of a message that nobody could walk over to deliver.
+  assert.equal(standingSpot(boxed, seat, office.door), null)
 })

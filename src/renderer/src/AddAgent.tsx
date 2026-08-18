@@ -4,8 +4,12 @@ import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './roster'
 import { LABEL, MONO } from './theme'
 
 export type Draft = {
-  /** The first agent is the operator's own clone; every later one is a worker. */
-  role: 'god' | 'worker'
+  /**
+   * What this agent is for. The floor's own two - Michael and the analyst - are
+   * spawned by the app; what the wizard makes is somebody who builds, or
+   * somebody who checks what was built.
+   */
+  role: 'god' | 'dev' | 'tester'
   project: string
   name: string
   face: string
@@ -24,7 +28,7 @@ const STEPS = [
 ] as const
 
 const EMPTY: Draft = {
-  role: 'worker',
+  role: 'dev',
   project: '',
   name: '',
   face: PRESETS[1],
@@ -139,9 +143,28 @@ export function AddAgent({
                   id: {id} · becomes their mailbox and settings directory
                 </div>
 
+                <div style={{ ...LABEL, marginTop: 4 }}>Role</div>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+                  {(
+                    [
+                      ['dev', 'builds what the analyst assigns'],
+                      ['tester', 'checks it, and takes bugs back to whoever wrote it']
+                    ] as const
+                  ).map(([role, what]) => (
+                    <div
+                      key={role}
+                      onClick={() => set('role', role)}
+                      title={what}
+                      style={{ ...S.roleChip, ...(d.role === role ? S.roleChipOn : null) }}
+                    >
+                      {role}
+                    </div>
+                  ))}
+                </div>
                 <div style={S.roleRow}>
                   <span>
-                    Reports to <b>Michael</b>, who stands in for you and is already on the floor.
+                    Reports to <b>Iris</b>, the analyst — she assigns the work and sees it through
+                    test. Michael only reports to you.
                   </span>
                 </div>
 
@@ -197,7 +220,7 @@ export function AddAgent({
                     browse
                   </button>
                 </div>
-                {d.role === 'worker' && (
+                {d.role !== 'god' && (
                   <>
                     <div style={{ ...LABEL, marginTop: 14 }}>Project</div>
                     <input
@@ -338,6 +361,15 @@ const S: Record<string, React.CSSProperties> = {
   },
   faceActive: { border: '1px solid var(--accent)', background: 'var(--sunk)' },
   swatch: { width: 26, height: 22, cursor: 'pointer' },
+  roleChip: {
+    padding: '4px 12px',
+    border: '1px solid var(--line)',
+    background: 'var(--sunk)',
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    font: `11px ${MONO}`
+  },
+  roleChipOn: { borderColor: 'var(--accent)', color: 'var(--accent-ink)' },
   roleRow: {
     display: 'flex',
     alignItems: 'flex-start',

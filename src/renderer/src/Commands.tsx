@@ -1,76 +1,17 @@
 import { useState } from 'react'
+import { catalogFor, SHARED, type Entry, type Group } from './catalog'
 import { LABEL, MONO } from './theme'
+import type { Agent } from './store'
 
-type Entry = { kind: 'slash' | 'cli' | 'bullpen'; cmd: string; desc: string; eg?: string }
-type Group = { title: string; entries: Entry[] }
-
-const GROUPS: Group[] = [
-  {
-    title: 'Session',
-    entries: [
-      { kind: 'slash', cmd: '/clear', desc: 'Start a fresh conversation and reclaim the context window.' },
-      { kind: 'slash', cmd: '/resume', desc: 'Pick or search a past session to continue.', eg: '/resume auth refactor' },
-      { kind: 'slash', cmd: '/rewind', desc: 'Roll code AND conversation back to an earlier checkpoint.' },
-      {
-        kind: 'slash',
-        cmd: '/compact',
-        desc: 'Summarise the conversation so far to free context without losing the thread.',
-        eg: '/compact keep the auth decisions'
-      },
-      { kind: 'cli', cmd: 'claude -c', desc: 'Continue the most recent session in this directory.' },
-      { kind: 'cli', cmd: 'claude -r', desc: 'Resume — pick or search a past session.', eg: 'claude -r auth' },
-      {
-        kind: 'cli',
-        cmd: 'claude --fork-session',
-        desc: 'When resuming, branch into a new session id instead of reusing the original.'
-      }
-    ]
-  },
-  {
-    title: 'Context & memory',
-    entries: [
-      { kind: 'slash', cmd: '/context', desc: 'Visualise what is filling the context window.' },
-      { kind: 'slash', cmd: '/memory', desc: 'Open the project and user CLAUDE.md files for editing.' },
-      { kind: 'slash', cmd: '/init', desc: 'Scan the repo and generate a CLAUDE.md capturing its conventions.' },
-      { kind: 'slash', cmd: '/effort', desc: 'Set how hard the model works on each turn.', eg: '/effort high' }
-    ]
-  },
-  {
-    title: 'Bullpen',
-    entries: [
-      {
-        kind: 'bullpen',
-        cmd: 'Write $BULLPEN_MAILBOX/outbox/msg.json',
-        desc: 'How an agent sends mail: write JSON with from, to, subject, body. "to": "*" broadcasts.'
-      },
-      {
-        kind: 'bullpen',
-        cmd: 'ls $BULLPEN_MAILBOX/inbox',
-        desc: 'Mail waiting for this agent. The router delivers here every 500ms.'
-      },
-      {
-        kind: 'bullpen',
-        cmd: 'Write $BULLPEN_MAILBOX/outbox/ask.json',
-        desc: 'Ask the human something: address it to "you" and it lands in the ask-me queue; your answer arrives in your inbox.',
-        eg: '{"from":"<you>","to":"you","subject":"which variant?","body":"a, b or c"}'
-      },
-      {
-        kind: 'bullpen',
-        cmd: 'npm run verify:hook',
-        desc: 'Re-check the approvals layer against the real CLI. Run after every Claude Code update.'
-      }
-    ]
-  }
-]
-
-const KIND_COLOR: Record<Entry['kind'], string> = {
-  slash: 'var(--accent-ink)',
-  cli: 'var(--muted)',
-  bullpen: 'var(--ok)'
-}
-
-export function Commands() {
+/**
+ * The commands the selected agent understands.
+ *
+ * Per agent, not per app: what you can type depends on the CLI behind that
+ * terminal. Bullpen's own protocol is files, so it is listed for every agent.
+ */
+export function Commands({ agent }: { agent: Agent | null }) {
   const [copied, setCopied] = useState('')
+  const [q, setQ] = useState('')
 
   const copy = async (cmd: string): Promise<void> => {
     await navigator.clipboard.writeText(cmd)
@@ -78,46 +19,106 @@ export function Commands() {
     setTimeout(() => setCopied(''), 1200)
   }
 
+  const catalog = catalogFor(agent?.cli ?? 'claude')
+  const groups: Group[] = [...(catalog?.groups ?? []), SHARED]
+  const needle = q.trim().toLowerCase()
+  const shown = groups
+    .map((g) => ({
+      ...g,
+      entries: g.entries.filter(
+        (e) => !needle || `${e.cmd} ${e.desc}`.toLowerCase().includes(needle)
+      )
+    }))
+    .filter((g) => g.entries.length > 0)
+  const total = shown.reduce((n, g) => n + g.entries.length, 0)
+
   return (
-    <div style={{ padding: '14px 18px', overflowY: 'auto', height: '100%' }}>
-      <div style={{ ...LABEL, marginBottom: 14 }}>
-        Click any command to copy. Slash commands run inside Claude Code; CLI commands run in a shell.
+    <div style={S.wrap}>
+      <div style={S.head}>
+        <input
+          style={S.input}
+          value={q}
+          placeholder="filter commands"
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <span style={{ ...LABEL, color: 'var(--faint)' }}>{total}</span>
       </div>
 
-      {GROUPS.map((g) => (
-        <div key={g.title} style={{ marginBottom: 22 }}>
-          <div style={{ ...LABEL, color: 'var(--faint)', marginBottom: 8 }}>{g.title}</div>
+      <div style={{ ...LABEL, color: 'var(--faint)', marginBottom: 12 }}>
+        {catalog ? (
+          <>
+            {agent ? `${agent.name} runs ` : ''}
+            <span style={{ color: 'var(--accent-ink)' }}>{catalog.label}</span> · {catalog.source} ·
+            click to copy
+          </>
+        ) : (
+          <>
+            No command list for <span style={{ color: 'var(--warn)' }}>{agent?.cli}</span> yet - only
+            Bullpen&apos;s own protocol, which works from any CLI.
+          </>
+        )}
+      </div>
+
+      {shown.map((g) => (
+        <div key={g.title} style={{ marginBottom: 20 }}>
+          <div style={{ ...LABEL, color: 'var(--faint)', marginBottom: 6 }}>{g.title}</div>
           {g.entries.map((e) => (
-            <div
-              key={e.cmd}
-              onClick={() => copy(e.cmd)}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '58px 1fr auto',
-                gap: 12,
-                alignItems: 'baseline',
-                padding: '8px 0',
-                borderTop: '1px solid var(--line)',
-                cursor: 'pointer'
-              }}
-            >
-              <span style={{ ...LABEL, color: KIND_COLOR[e.kind], fontWeight: 700 }}>{e.kind}</span>
-              <span>
-                <div style={{ font: `13px ${MONO}`, color: 'var(--ink)', wordBreak: 'break-all' }}>{e.cmd}</div>
-                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>{e.desc}</div>
-                {e.eg && (
-                  <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 3, fontStyle: 'italic' }}>
-                    e.g. {e.eg}
-                  </div>
-                )}
-              </span>
-              <span style={{ ...LABEL, color: copied === e.cmd ? 'var(--ok)' : 'var(--faint)' }}>
-                {copied === e.cmd ? 'copied' : 'copy'}
-              </span>
-            </div>
+            <Row key={e.cmd} entry={e} copied={copied === e.cmd} onCopy={() => copy(e.cmd)} />
           ))}
         </div>
       ))}
+
+      {total === 0 && <div style={S.empty}>Nothing matches “{q}”.</div>}
     </div>
   )
+}
+
+function Row({
+  entry,
+  copied,
+  onCopy
+}: {
+  entry: Entry
+  copied: boolean
+  onCopy: () => void
+}) {
+  return (
+    <div onClick={onCopy} style={S.row}>
+      <span>
+        <div style={S.cmd}>{entry.cmd}</div>
+        <div style={S.desc}>{entry.desc}</div>
+        {entry.eg && <div style={S.eg}>e.g. {entry.eg}</div>}
+      </span>
+      <span style={{ ...LABEL, color: copied ? 'var(--ok)' : 'var(--faint)' }}>
+        {copied ? 'copied' : 'copy'}
+      </span>
+    </div>
+  )
+}
+
+const S: Record<string, React.CSSProperties> = {
+  wrap: { padding: '14px 18px', overflowY: 'auto', height: '100%' },
+  head: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 },
+  input: {
+    flex: 1,
+    padding: '6px 9px',
+    background: 'var(--sunk)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    outline: 'none',
+    font: `12px ${MONO}`
+  },
+  row: {
+    display: 'grid',
+    gridTemplateColumns: '1fr auto',
+    gap: 12,
+    alignItems: 'baseline',
+    padding: '7px 0',
+    borderTop: '1px solid var(--line)',
+    cursor: 'pointer'
+  },
+  cmd: { font: `13px ${MONO}`, color: 'var(--ink)', wordBreak: 'break-all' },
+  desc: { fontSize: 12, color: 'var(--muted)', marginTop: 3 },
+  eg: { fontSize: 11, color: 'var(--faint)', marginTop: 3, fontStyle: 'italic' },
+  empty: { color: 'var(--faint)', font: `12px ${MONO}` }
 }

@@ -46,7 +46,7 @@ export function Workers({ agents, onSelect }: { agents: Agent[]; onSelect: (id: 
             {a.name}
           </span>
           <span style={{ width: 110, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {a.role === 'god' ? '—' : a.project || '—'}
+            {a.role === 'god' || a.role === 'ba' ? '—' : a.project || '—'}
           </span>
           <span style={{ width: 70, color: 'var(--muted)' }}>{a.pid || '—'}</span>
           <span style={{ width: 78, color: 'var(--muted)' }}>

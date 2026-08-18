@@ -95,3 +95,40 @@ export function drawLabel(
   ctx.fillStyle = fg
   ctx.fillText(text, Math.round(cx), y + 2)
 }
+
+/**
+ * A speech bubble, for two agents standing together.
+ *
+ * Mail used to be an envelope flying between two desks, which said a message
+ * had been sent and nothing about anyone talking. The dots fill in over the
+ * length of the conversation, so a bubble that has been up for a while looks
+ * different from one that just appeared - otherwise a still frame cannot tell
+ * a chat starting from a chat about to end.
+ */
+export function drawBubble(ctx: CanvasRenderingContext2D, x: number, y: number, dots: number): void {
+  const W = 14
+  const H = 9
+  ctx.fillStyle = '#fffdf5'
+  ctx.fillRect(x, y, W, H)
+  ctx.fillStyle = '#241f1a'
+  // A one-pixel outline, drawn as four edges: strokeRect on half pixels is a
+  // grey smear at this scale.
+  ctx.fillRect(x, y, W, 1)
+  ctx.fillRect(x, y + H - 1, W, 1)
+  ctx.fillRect(x, y, 1, H)
+  ctx.fillRect(x + W - 1, y, 1, H)
+  // The tail, pointing down at whoever is speaking.
+  ctx.fillStyle = '#fffdf5'
+  ctx.fillRect(x + 3, y + H, 3, 1)
+  ctx.fillRect(x + 3, y + H + 1, 2, 1)
+  ctx.fillStyle = '#241f1a'
+  ctx.fillRect(x + 2, y + H, 1, 1)
+  ctx.fillRect(x + 6, y + H, 1, 1)
+  ctx.fillRect(x + 5, y + H + 1, 1, 1)
+  ctx.fillRect(x + 3, y + H + 2, 2, 1)
+
+  ctx.fillStyle = '#5c5750'
+  for (let i = 0; i < Math.max(1, Math.min(3, dots)); i++) {
+    ctx.fillRect(x + 3 + i * 3, y + 4, 2, 2)
+  }
+}

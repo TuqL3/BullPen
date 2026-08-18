@@ -7,8 +7,8 @@
  * word - which is what "I cannot type Vietnamese in the inputs" looked like.
  */
 export const onEnter =
-  (run: () => void) =>
+  (run: (e: React.KeyboardEvent) => void) =>
   (e: React.KeyboardEvent): void => {
     if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
-    run()
+    run(e)
   }

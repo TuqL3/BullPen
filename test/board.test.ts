@@ -44,17 +44,43 @@ test('a trigger interval under a minute is refused', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
-test('due() fires on schedule and never twice for one interval', () => {
+test('a trigger stays due until it is actually delivered', () => {
   const { board, root } = fresh()
   const t = board.addTrigger('michael', 'hourly standup', 60)!
   const t0 = 1_000_000_000
 
   assert.equal(board.due(t0).length, 1, 'lastRun 0 means it is due immediately')
-  assert.equal(board.due(t0).length, 0, 'must not re-fire in the same window')
+  // Asked twice without delivering: still due. `due()` used to stamp the clock
+  // itself, so a trigger the caller dropped - a busy agent - spent its whole
+  // interval on a prompt nobody received.
+  assert.equal(board.due(t0).length, 1, 'unclaimed, so still waiting')
+
+  board.markRun(t.id, t0)
+  assert.equal(board.due(t0).length, 0, 'delivered, so the interval starts here')
   assert.equal(board.due(t0 + 59 * 60_000).length, 0, 'still inside the interval')
   assert.equal(board.due(t0 + 60 * 60_000).length, 1, 'due again after the interval')
   assert.equal(board.triggers('michael')[0].id, t.id)
   rmSync(root, { recursive: true, force: true })
+})
+
+test('the scheduler only spends an interval on a trigger that went in', () => {
+  const { board, root } = fresh()
+  const t = board.addTrigger('michael', 'standup', 1)!
+  // Refused: the agent was busy. The board must not treat that as delivery.
+  let seen = 0
+  board.start((fired) => {
+    seen++
+    return fired.id === t.id && seen > 1
+  }, 5)
+  return new Promise<void>((done) => {
+    setTimeout(() => {
+      board.stop()
+      assert.ok(seen >= 2, `fire was called ${seen} times`)
+      assert.ok(board.triggers('michael')[0].lastRun > 0, 'the accepted one was stamped')
+      rmSync(root, { recursive: true, force: true })
+      done()
+    }, 60)
+  })
 })
 
 test('a disabled trigger never fires', () => {
@@ -142,4 +168,42 @@ test('a card can be reassigned', () => {
   assert.equal(board.tasks('dwight').length, 1)
   assert.equal(board.tasks('michael').length, 0)
   rmSync(root, { recursive: true, force: true })
+})
+
+test('a context rule fires once per fill, not once per reading', () => {
+  const { board, root } = fresh()
+  assert.equal(board.setRule('michael', 5, 'compact'), null, 'too low to be useful')
+  assert.equal(board.setRule('michael', 120, 'compact'), null, 'never reachable')
+
+  const rule = board.setRule('michael', 80, 'compact')!
+  assert.equal(rule.action, 'compact')
+  assert.equal(board.ruleDue('michael', 79), null, 'under the line')
+  assert.ok(board.ruleDue('michael', 80), 'at the line')
+  // Still over it on the next turn: a second /compact for the same fill would
+  // compact what the first one just compacted.
+  assert.equal(board.ruleDue('michael', 92), null, 'already spent for this fill')
+  assert.equal(board.ruleDue('michael', 77), null, 'inside the hysteresis band')
+  assert.equal(board.ruleDue('michael', 74), null, 're-arms, does not fire on the way down')
+  assert.ok(board.ruleDue('michael', 88), 'and fires again on the next fill')
+
+  board.toggleRule('michael')
+  assert.equal(board.ruleDue('michael', 99), null, 'off means off')
+  board.removeRule('michael')
+  assert.deepEqual(board.rules('michael'), [])
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a card waiting for a tester survives a restart in that column', () => {
+  const { board, root } = fresh()
+  try {
+    const t = board.addTask('morgan', 'add the sitemap route')!
+    board.setTaskStatus(t.id, 'wait_test')
+    // Built is a status a restart must not round back to done: the whole point
+    // of the column is that nobody but the developer has vouched for it yet.
+    const again = new Board(boardPath(root))
+    assert.equal(again.tasks('morgan')[0].status, 'wait_test')
+    assert.equal(again.tasks('morgan')[0].done, false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

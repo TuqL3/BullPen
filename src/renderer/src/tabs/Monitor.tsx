@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Avatar } from '../Avatar'
 import { CtxMeter } from '../App'
+import { onEnter } from '../keys'
 import { LABEL, MONO } from '../theme'
 import { ago, isQuiet, summarise } from '../fleet'
-import type { Question } from '../../../preload/index'
+import type { Dispatch, Report } from '../../../preload/index'
 import type { Agent } from '../store'
 
 /** Kept exported: the workers tab formats uptime the same way. */
@@ -33,14 +34,17 @@ const tokens = (n: number): string =>
 export function Monitor({
   agents,
   lastSeen,
-  questions,
+  report,
+  dispatched,
   onSelect,
   onOpenTerminal
 }: {
   agents: Agent[]
   lastSeen: Record<string, number>
-  /** Everything addressed to you; the newest from the god agent is the report. */
-  questions: Question[]
+  /** Where the work stands. Shown here and nowhere else - it is not a question. */
+  report: Report | null
+  /** The brief the operator handed over, as they wrote it. */
+  dispatched: Dispatch | null
   /** Waiting agent picked: goes to ask me, where every question is collected. */
   onSelect: (id: string) => void
   onOpenTerminal: (id: string) => void
@@ -49,7 +53,6 @@ export function Monitor({
   const [owner, setOwner] = useState('decide')
   const [project, setProject] = useState('')
   const [sent, setSent] = useState('')
-  const [showDispatch, setShowDispatch] = useState(false)
   const [confirmKill, setConfirmKill] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
 
@@ -63,15 +66,24 @@ export function Monitor({
   }, [])
 
   const god = agents.find((a) => a.role === 'god')
+  // Who the work actually lands on. Michael carries it in; she decides who does
+  // it, so a dropdown offering "Michael decides" was naming the wrong person.
+  const ba = agents.find((a) => a.role === 'ba')
+
+  const send = async (): Promise<void> => {
+    if (!brief.trim()) return
+    const err = await window.bullpen.dispatch(brief.trim(), owner, project)
+    setSent(
+      err ?? `handed to ${god?.name}${ba ? ` — he passes it to ${ba.name}` : ''}`
+    )
+    if (!err) setBrief('')
+  }
 
   if (agents.length === 0) return <div style={S.empty}>Nobody on the floor.</div>
 
   const startedAt = Object.fromEntries(agents.map((a) => [a.id, a.startedAt ?? 0]))
   const sum = summarise(agents, lastSeen, startedAt, now)
   const asking = agents.filter((a) => a.asked)
-  // Michael's progress report arrives as an ordinary question addressed to you,
-  // so it is already in ask me; this is the newest one he sent.
-  const report = questions.filter((q) => q.from === god?.id).at(-1)
 
   const costs = agents.map((a) => a.cost).filter(Boolean) as NonNullable<Agent['cost']>[]
   const fleetUsd = costs.reduce((sum, c) => sum + c.usd, 0)
@@ -80,7 +92,14 @@ export function Monitor({
     0
   )
   const anyUnpriced = costs.some((c) => !c.complete)
-  const projects = [...new Set(agents.filter((a) => a.role !== 'god').map((a) => a.project).filter(Boolean))]
+  const projects = [
+    ...new Set(
+      agents
+        .filter((a) => a.role !== 'god' && a.role !== 'ba')
+        .map((a) => a.project)
+        .filter(Boolean)
+    )
+  ]
 
   return (
     <div style={S.wrap}>
@@ -108,6 +127,17 @@ export function Monitor({
               </div>
             </button>
           ))}
+        </div>
+      )}
+
+      {dispatched && (
+        <div style={S.sent}>
+          <span style={{ ...LABEL, color: 'var(--muted)' }}>
+            you dispatched · {ago(dispatched.ts, now)} ago
+            {dispatched.project ? ` · ${dispatched.project}` : ''}
+            {dispatched.owner && dispatched.owner !== 'decide' ? ` · for ${dispatched.owner}` : ''}
+          </span>
+          <pre style={S.sentBody}>{dispatched.text}</pre>
         </div>
       )}
 
@@ -143,7 +173,9 @@ export function Monitor({
               <div style={S.who}>
                 <div style={{ ...LABEL, color: 'var(--ink)' }}>
                   {a.name}
-                  {a.role === 'god' && <span style={{ color: 'var(--accent-ink)' }}> (god)</span>}
+                  {a.role === 'god' && <span style={{ color: 'var(--accent-ink)' }}> (boss)</span>}
+                  {a.role === 'ba' && <span style={{ color: 'var(--accent-ink)' }}> (analyst)</span>}
+                  {a.role === 'tester' && <span style={{ color: 'var(--muted)' }}> (tester)</span>}
                 </div>
                 <div style={{ color: 'var(--faint)' }} title={a.cwd}>
                   {a.project || a.cwd.split('/').filter(Boolean).pop() || a.cwd}
@@ -156,8 +188,15 @@ export function Monitor({
                 {quiet && <span style={{ color: 'var(--danger)' }}>quiet</span>}
               </div>
 
-              {/* "working" for four minutes says nothing; the last tool does. */}
+              {/* Two different questions, both worth an answer: what it was sent
+                  to do, and what it is touching right now. "working" for four
+                  minutes says neither. */}
               <div style={S.doing} title={a.doing ? `${a.doing.tool} · ${a.doing.detail}` : ''}>
+                {a.task && (
+                  <div style={S.task} title={a.task.text}>
+                    {a.task.text}
+                  </div>
+                )}
                 {a.doing ? (
                   <>
                     <span style={{ color: 'var(--ink)' }}>{a.doing.tool}</span>{' '}
@@ -243,68 +282,75 @@ export function Monitor({
       </p>
       </div>
 
-      {/* Pinned: it is the one control on this tab, and in the flow it either
-          sat above what you read or scrolled off the end of it. */}
+      {/* Pinned and open: it is the one control on this tab, and behind a
+          disclosure it was a tab you had to remember had a control on it. */}
       <div style={S.dispatch}>
-        <button style={S.disclose} onClick={() => setShowDispatch(!showDispatch)}>
-          {showDispatch ? '▾' : '▸'} dispatch {god ? `— via ${god.name}` : '— no clone of you yet'}
-        </button>
-        {showDispatch && (
-          <>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
-              <span style={{ ...LABEL, color: 'var(--faint)' }}>project</span>
-              <select style={S.select} value={project} onChange={(e) => setProject(e.target.value)}>
-                <option value="">any</option>
-                {projects.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <span style={{ ...LABEL, color: 'var(--faint)' }}>suggested owner</span>
-              <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
-                <option value="decide">{god ? `${god.name} decides` : 'decide'}</option>
-                {agents
-                  .filter((a) => a.role !== 'god')
-                  .map((a) => (
-                    <option key={a.id} value={a.name}>
-                      {a.name}
-                    </option>
-                  ))}
-              </select>
-            </div>
-            <textarea
-              style={S.brief}
-              rows={2}
-              value={brief}
-              placeholder={
-                god
-                  ? `Describe the task — ${god.name} decomposes it and assigns`
-                  : 'Create a clone of yourself first: tick "This one is me" in the add-agent wizard.'
-              }
-              onChange={(e) => setBrief(e.target.value)}
-            />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button
-                style={{ ...S.btn, opacity: god && brief.trim() ? 1 : 0.5 }}
-                onClick={async () => {
-                  if (!brief.trim()) return
-                  const err = await window.bullpen.dispatch(brief.trim(), owner, project)
-                  setSent(err ?? `handed to ${god?.name}`)
-                  if (!err) setBrief('')
-                }}
-              >
-                dispatch
-              </button>
-              {sent && <span style={{ ...LABEL, color: 'var(--muted)' }}>{sent}</span>}
-            </div>
-            <p style={{ ...S.note, marginTop: 8 }}>
-              Dispatch types the brief into your clone&apos;s own prompt. It decides the breakdown
-              and the assignment. When the floor next falls quiet it is asked for a progress report,
-              which arrives above and in ask me.
-            </p>
-          </>
-        )}
+        <span style={S.disclose}>
+          dispatch {god ? `— to ${god.name}` : '— no clone of you yet'}
+        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+          <span style={{ ...LABEL, color: 'var(--faint)' }}>project</span>
+          <select style={S.select} value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">any</option>
+            {projects.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+          <span style={{ ...LABEL, color: 'var(--faint)' }}>suggested owner</span>
+          <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
+            {/* What the empty choice means, said as what happens: the box is
+                addressed to the boss, so "Iris decides" next to it read as if
+                the task were going to her instead of to him. */}
+            <option value="decide">
+              {ba ? `no suggestion — ${ba.name} picks` : god ? `no suggestion — ${god.name} picks` : 'no suggestion'}
+            </option>
+            {agents
+              .filter((a) => a.role !== 'god' && a.role !== 'ba')
+              .map((a) => (
+                <option key={a.id} value={a.name}>
+                  {a.name}
+                </option>
+              ))}
+          </select>
+        </div>
+        <textarea
+          style={S.brief}
+          rows={2}
+          value={brief}
+          placeholder={
+            god
+              ? `Describe the task — ${god.name} hands it to ${ba?.name ?? 'the analyst'}, who assigns it`
+              : 'Create a clone of yourself first: tick "This one is me" in the add-agent wizard.'
+          }
+          onChange={(e) => setBrief(e.target.value)}
+          // Enter sends, shift+Enter is a new line: this is a box you type one
+          // sentence into and hand over, not a document. The IME guard is in
+          // `onEnter` - the Enter that accepts a Vietnamese candidate is not a
+          // send.
+          onKeyDown={onEnter((e) => {
+            // Shift+Enter is still a new line: a brief can be more than one.
+            if (e.shiftKey) return
+            e.preventDefault()
+            send()
+          })}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            style={{ ...S.btn, opacity: god && brief.trim() ? 1 : 0.5 }}
+            onClick={send}
+          >
+            dispatch
+          </button>
+          {sent && <span style={{ ...LABEL, color: 'var(--muted)' }}>{sent}</span>}
+        </div>
+        <p style={{ ...S.note, marginTop: 8 }}>
+          Dispatch types the brief into your clone&apos;s own prompt. He hands it to the analyst,
+          who decides the breakdown, puts people on it and sends the result to a tester before she
+          calls it done. When the floor next falls quiet she is asked where things stand, and it
+          reaches you through him, above - ask me is for questions that are waiting on an answer.
+        </p>
       </div>
     </div>
   )
@@ -346,6 +392,32 @@ const S: Record<string, React.CSSProperties> = {
     marginBottom: 12,
     background: 'var(--panel)',
     border: '1px solid var(--line)'
+  },
+  // The brief, not the orders around it: a left rule rather than a box, so it
+  // reads as the thing that started the round rather than a second report.
+  // One line, cut with an ellipsis: the whole brief is on the row's title, and
+  // a monitor whose rows are four lines tall stops being a table.
+  task: {
+    color: 'var(--muted)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    marginBottom: 2
+  },
+  sent: {
+    padding: '8px 12px',
+    marginBottom: 10,
+    background: 'var(--panel)',
+    borderLeft: '3px solid var(--accent)'
+  },
+  sentBody: {
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    maxHeight: 120,
+    overflow: 'auto',
+    margin: '6px 0 0',
+    font: `12px ${MONO}`,
+    color: 'var(--ink)'
   },
   reportBody: {
     whiteSpace: 'pre-wrap',
@@ -403,10 +475,7 @@ const S: Record<string, React.CSSProperties> = {
     borderTop: '1px solid var(--line)'
   },
   disclose: {
-    background: 'transparent',
-    border: 'none',
-    padding: 0,
-    cursor: 'pointer',
+    display: 'block',
     color: 'var(--ink)',
     font: `11px ${MONO}`,
     textTransform: 'uppercase',

@@ -1,4 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
+import { readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { inside } from './code.ts'
 import { blockPatch, blocks, parseDiff } from '../diff.ts'
@@ -17,6 +19,9 @@ const run = promisify(execFile)
  * renderer must not be able to become part of a command.
  */
 const MAX_DIFF = 400_000
+
+/** Past this a new file is not summarised: reading it costs more than it says. */
+const MAX_NEW_FILE = 4_000_000
 
 export type Change = {
   path: string
@@ -149,6 +154,31 @@ export async function stats(cwd: string): Promise<Record<string, string>> {
       if (!m) continue
       const path = m[3] || parts[++i] || ''
       if (path) out[path] = `${m[1]}-${m[2]}`
+    }
+
+    // `diff HEAD` cannot see a file git has never been told about, and a new
+    // file is most of what an agent writes. The panel diffs those against
+    // /dev/null and counts every line as added; counted here the same way, so
+    // the header and the list under it cannot disagree. Read directly rather
+    // than by one `git diff --no-index` per file: this is a summary, and a
+    // hundred new files is a hundred processes.
+    const others = await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
+    for (const rel of others.split('\0')) {
+      if (!rel || out[rel] !== undefined) continue
+      try {
+        if (statSync(join(cwd, rel)).size > MAX_NEW_FILE) continue
+        const buf = readFileSync(join(cwd, rel))
+        // Binary is a change with no lines in it, which is what git reports too.
+        if (buf.subarray(0, 8000).includes(0)) {
+          out[rel] = '0-0'
+          continue
+        }
+        const text = buf.toString('utf8')
+        const lines = text.length === 0 ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+        out[rel] = `${lines}-0`
+      } catch {
+        // Deleted between the listing and the read, or unreadable: not a count.
+      }
     }
     return out
   } catch {

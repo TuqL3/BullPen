@@ -101,8 +101,12 @@ test('a divider resizes the columns either side of it, hidden ones skipped', () 
   assert.equal(l.colWeight[1], off.colWeight[1], 'the hidden column was not touched')
 })
 
-test('hiding every panel is refused - it would leave no way back', () => {
-  assert.deepEqual(normalise({ hidden: [...PANELS] }).hidden, [])
+test('the command centre is never hidden - nothing in the bar brings it back', () => {
+  // Its switch was taken out of the title bar: it is what the window is for.
+  // A stored config that hides it - or one that hides everything - opens on a
+  // window with the command centre still up.
+  assert.deepEqual(normalise({ hidden: [...PANELS] }).hidden, ['roster', 'tree', 'floor'])
+  assert.deepEqual(normalise({ hidden: ['command'] }).hidden, [])
   assert.deepEqual(normalise({ hidden: ['floor', 'nope'] }).hidden, ['floor'])
 })
 
