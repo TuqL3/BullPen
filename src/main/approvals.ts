@@ -222,6 +222,23 @@ export class Approvals extends EventEmitter {
     return list.map((n) => `[steer from your operator] ${n}`).join('\n')
   }
 
+  /**
+   * Deny everything this agent is waiting on, and say how many there were.
+   *
+   * A halted agent is not going to make the tool call its request was about, so
+   * the row stops being a decision and becomes a ghost: the roster keeps it
+   * marked blocked and the queue keeps offering allow/deny for a process that
+   * has already gone. Denying resolves it the same way the human would have,
+   * which is what the renderer listens for.
+   */
+  clearPending(agentId: string): number {
+    const ids = [...this.pending.entries()]
+      .filter(([, e]) => e.p.agentId === agentId)
+      .map(([id]) => id)
+    for (const id of ids) this.decide(id, 'deny')
+    return ids.length
+  }
+
   /** Resolve a queued request. Unknown id is a no-op. */
   decide(id: string, decision: 'allow' | 'deny'): void {
     const entry = this.pending.get(id)
@@ -270,8 +287,9 @@ export class Approvals extends EventEmitter {
         return { verdict: 'ask', reason: 'touches a credential path' }
       }
       const sandbox = this.sandboxes.get(agentId)
-      const writing = tool === 'Write' || tool === 'Edit' || tool === 'NotebookEdit'
-      if (writing && sandbox && !this.isInside(sandbox, p)) {
+      // The same set the edit log keys off. Listed by hand here once, it went
+      // out of step with it and MultiEdit wrote outside the sandbox unasked.
+      if (WRITING_TOOLS.has(tool) && sandbox && !this.isInside(sandbox, p)) {
         return { verdict: 'ask', reason: `writes outside sandbox (${sandbox})` }
       }
     }
@@ -422,57 +440,39 @@ export class Approvals extends EventEmitter {
    * versions. The hook payload is structured and emitted by the CLI itself.
    */
   private onLifecycle(agentId: string, body: string): void {
-    let event = ''
+    // One parse, read five ways. It used to be a JSON.parse per question, and
+    // the copies drifted: each new question had to remember to re-read the same
+    // payload, and a caught parse error was reported by whichever block noticed
+    // first rather than once.
+    let payload: HookPayload
     try {
-      event = (JSON.parse(body) as HookPayload).hook_event_name ?? ''
+      payload = JSON.parse(body) as HookPayload
     } catch {
       return
     }
-    try {
-      this.noteTranscript(agentId, JSON.parse(body))
-    } catch {
-      // Already reported above; the status still matters.
-    }
+    this.noteTranscript(agentId, payload)
+
+    const event = payload.hook_event_name ?? ''
+    const tool = payload.tool_name ?? ''
     const status = LIFECYCLE_STATUS[event]
     if (status) this.emit('status', agentId, status, event)
 
     // The answer landed (PostToolUse), or the turn ended without one - either
     // way nobody is waiting on the human any more.
-    if (event === 'PostToolUse') {
-      try {
-        const tool = (JSON.parse(body) as HookPayload).tool_name ?? ''
-        if (WAITING_TOOLS.has(tool)) this.emit('answered', agentId)
-      } catch {
-        // Reported by the status parse above.
-      }
-    }
+    if (event === 'PostToolUse' && WAITING_TOOLS.has(tool)) this.emit('answered', agentId)
     if (status === 'idle') this.emit('answered', agentId)
+
+    if (event !== 'PostToolUse') return
 
     // What it is doing, tool by tool. The monitor shows the last one: "working"
     // for four minutes says nothing, "Bash - npm test" says what to expect.
-    if (event === 'PostToolUse') {
-      try {
-        const payload = JSON.parse(body) as HookPayload
-        const tool = payload.tool_name ?? ''
-        if (tool) this.emit('tool', agentId, tool, this.describe(payload).slice(0, 120))
-      } catch {
-        // Reported by the status parse above.
-      }
-    }
+    if (tool) this.emit('tool', agentId, tool, this.describe(payload).slice(0, 120))
 
     // What the agent just wrote. PostToolUse fires after the write landed, so
     // the file on disk already reflects it - no need to carry the content.
-    if (event === 'PostToolUse') {
-      try {
-        const payload = JSON.parse(body) as HookPayload
-        const tool = payload.tool_name ?? ''
-        if (WRITING_TOOLS.has(tool)) {
-          for (const path of this.touchedPaths(payload.tool_input ?? {})) {
-            this.emit('edit', agentId, path, tool)
-          }
-        }
-      } catch {
-        // Malformed payloads are already reported by the status parse above.
+    if (WRITING_TOOLS.has(tool)) {
+      for (const path of this.touchedPaths(payload.tool_input ?? {})) {
+        this.emit('edit', agentId, path, tool)
       }
     }
   }

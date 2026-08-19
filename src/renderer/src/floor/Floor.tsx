@@ -95,6 +95,14 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
   const office = useRef<Office>(buildOffice(36, 26))
   const bodies = useRef(new Map<string, Body>())
   const envelopes = useRef<Envelope[]>([])
+  /**
+   * The `seq` of the last message walked across the floor.
+   *
+   * Was an index into `mail`, which is a sliding window of the last 200 - so
+   * once it filled, `mail.length` stopped growing, the index sat on the end and
+   * every message after the two-hundredth was skipped. The floor stopped moving
+   * for the rest of the session.
+   */
   const seenMail = useRef(0)
   /**
    * Mail whose recipient has no chair yet.
@@ -226,11 +234,11 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
         return true
       }
 
-      for (let i = seenMail.current; i < mail.length; i++) {
-        const m = mail[i]
+      for (const m of mail) {
+        if (m.seq <= seenMail.current) continue
         if (!start(m)) waiting.current.push({ m, born: now })
       }
-      seenMail.current = mail.length
+      seenMail.current = Math.max(seenMail.current, mail.at(-1)?.seq ?? 0)
       // Whoever has sat down since. A few seconds is long enough for a hire to
       // reach the roster and short enough that a message to somebody who never
       // arrives does not turn up minutes later.

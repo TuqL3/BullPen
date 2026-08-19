@@ -42,11 +42,17 @@ export function hireName(project: string, isTaken: (id: string) => boolean): str
   for (const name of PRESETS) {
     if (!isTaken(slug(name))) return name
   }
-  const base = slug(project) || 'agent'
+  // Past the roster the name is already a slug, so the id `isTaken` was asked
+  // about is exactly the id the caller derives from what comes back. Built the
+  // other way round - name first, slug after - `slug` capped `<32 chars>-2` at
+  // 32 and swallowed the `-2`, so every number from 2 to 99 produced the same
+  // id as the first one and a long-named project could only ever hire once.
+  const stem = slug(project).slice(0, 24).replace(/-+$/, '') || 'agent'
   for (let n = 2; n < 100; n++) {
-    if (!isTaken(slug(`${base}-${n}`))) return `${base}-${n}`
+    const id = `${stem}-${n}`
+    if (!isTaken(id)) return id
   }
-  return `${base}-${Date.now()}`
+  return `${stem}-${String(Date.now()).slice(-6)}`
 }
 
 /** Filesystem- and id-safe name. Agent ids become directory names. */

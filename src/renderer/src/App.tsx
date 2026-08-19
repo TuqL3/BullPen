@@ -20,6 +20,7 @@ import {
   paneSize,
   setTerminalFontSize,
   setTerminalTheme,
+  disposeTerminal,
   TerminalDeck,
   writeToTerminal
 } from './Terminal'
@@ -28,7 +29,6 @@ import { FilePanel, Review, WorkTree } from './Code'
 // Not in `Code`: a module that exports anything but components loses React Fast
 // Refresh, and every edit to a panel there would remount the whole tree.
 import { openFile, type OpenFile } from './file'
-import { isShellId, Shell } from './Shell'
 import {
   DEFAULT_LAYOUT,
   moveTo,
@@ -57,7 +57,6 @@ import {
 
 const TABS = [
   'terminal',
-  'shell',
   'monitor',
   'tasks',
   'ask me',
@@ -103,8 +102,6 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>(window.bullpen.initialMode)
   const [tab, setTab] = useState<Tab>('terminal')
-  const shellSeen = useRef(false)
-  if (tab === 'shell') shellSeen.current = true
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
   /**
    * The floor's shape. Read once from main, which is where it is enforced -
@@ -134,15 +131,6 @@ export default function App() {
   /** Files collapsed in the review, held here so closing it does not forget. */
   const [reviewShut, setReviewShut] = useState<string[]>([])
   const body = useRef<HTMLDivElement>(null)
-  const [bodyW, setBodyW] = useState(0)
-  useEffect(() => {
-    const el = body.current
-    if (!el) return
-    const ro = new ResizeObserver(() => setBodyW(el.clientWidth))
-    ro.observe(el)
-    setBodyW(el.clientWidth)
-    return () => ro.disconnect()
-  }, [])
   /** Bumped on every save, so the review re-reads instead of waiting for its poll. */
   const [savedTick, setSavedTick] = useState(0)
   /** Lines added and removed against HEAD, for the review button's own label. */
@@ -196,21 +184,18 @@ export default function App() {
           store().touch(id, now)
         }
       }),
-      window.bullpen.onExit((id, code) => {
-        // A shell exiting is not an agent exiting; upserting it would put a
-        // phantom agent on the roster and on the office floor.
-        if (isShellId(id)) return
-        store().upsertAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
-      }),
-      window.bullpen.onStatus((id, status) => store().upsertAgent({ id, activity: status })),
+      window.bullpen.onExit((id, code) =>
+        store().patchAgent({ id, status: 'exited', exitCode: code, activity: 'idle' })
+      ),
+      window.bullpen.onStatus((id, status) => store().patchAgent({ id, activity: status })),
       window.bullpen.onTool((id, tool, detail) =>
-        store().upsertAgent({ id, doing: { tool, detail, at: Date.now() } })
+        store().patchAgent({ id, doing: { tool, detail, at: Date.now() } })
       ),
       window.bullpen.onWaiting((id, asked) =>
-        store().upsertAgent({ id, asked, activity: asked ? 'blocked' : 'working' })
+        store().patchAgent({ id, asked, activity: asked ? 'blocked' : 'working' })
       ),
-      window.bullpen.onCtx((id, ctx) => store().upsertAgent({ id, ctx })),
-      window.bullpen.onCost((id, cost) => store().upsertAgent({ id, cost })),
+      window.bullpen.onCtx((id, ctx) => store().patchAgent({ id, ctx })),
+      window.bullpen.onCost((id, cost) => store().patchAgent({ id, cost })),
       window.bullpen.onSteerQueued((id) => {
         window.bullpen.steers(id).then((notes) => store().setSteers(id, notes))
       }),
@@ -270,7 +255,7 @@ export default function App() {
         // A message from the god agent to a worker is the assignment: it is how
         // work reaches anyone here, and the monitor has nothing else to read.
         const text = [msg.subject, msg.body].filter(Boolean).join(' — ').trim()
-        if (text) store().upsertAgent({ id: to, task: { text, at: msg.ts || Date.now() } })
+        if (text) store().patchAgent({ id: to, task: { text, at: msg.ts || Date.now() } })
       })
     ]
     return () => off.forEach((fn) => fn())
@@ -407,7 +392,12 @@ export default function App() {
         cmd: d.cmd.trim() || 'claude',
         args: d.args.trim() ? d.args.trim().split(/\s+/) : [],
         cols,
-        rows
+        rows,
+        // With the spawn, not after it: the brief and the tool refusals are
+        // read once and appended to the CLI's system prompt. Told afterwards,
+        // main had already briefed this agent as whatever the floor's default
+        // role is, and `setRole` below only ever fixed where its cards go.
+        role: d.role
       })
       store().upsertAgent({
         id,
@@ -494,6 +484,19 @@ export default function App() {
    * running the shape it started on and nothing in the UI could move it. Their
    * conversations do not survive it, which is why the dialog says so first.
    */
+  /**
+   * A floor was applied. Agents follow it both ways: main stands down whoever
+   * the new one has no role for, and this brings up whoever it names and
+   * nobody is doing yet - without which a floor could be switched to and have
+   * nobody standing in half its roles until the app restarted.
+   */
+  const applyFloor = async (next: WorkflowInfo): Promise<void> => {
+    setWf(next)
+    setShape(next)
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
+  }
+
   const restartFloor = async (): Promise<void> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
     await window.bullpen.stopFixed()
@@ -587,6 +590,10 @@ export default function App() {
       await window.bullpen.kill(a.id)
     }
     store().removeAgent(a.id)
+    // The row is gone, so nothing will ever mount this host again. Without
+    // this the xterm instance and its 10k lines of scrollback stay alive for
+    // the life of the window, once per agent ever fired.
+    disposeTerminal(a.id)
   }
 
   /**
@@ -601,7 +608,14 @@ export default function App() {
   const restart = async (a: Agent): Promise<void> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
     try {
-      const state = await window.bullpen.spawn({ id: a.id, cwd: a.cwd, cmd: a.cli ?? 'claude', cols, rows })
+      const state = await window.bullpen.spawn({
+        id: a.id,
+        cwd: a.cwd,
+        cmd: a.cli ?? 'claude',
+        cols,
+        rows,
+        role: a.role
+      })
       store().upsertAgent({
         id: a.id,
         pid: state.pid,
@@ -795,12 +809,6 @@ export default function App() {
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
             </div>
-            {/* Mounted from the first visit and kept mounted: unmounting drops
-                the scrollback, but mounting up front would start a real shell
-                per agent for a tab nobody opened. */}
-            <div style={{ height: '100%', display: tab === 'shell' ? 'block' : 'none' }}>
-              {shellSeen.current && <Shell agent={current} />}
-            </div>
             {tab === 'monitor' && (
               <Monitor
                 agents={agents}
@@ -881,10 +889,6 @@ export default function App() {
   }
 
   const cols = visibleColumns(layout)
-  // What one unit of column weight is worth in pixels, so a column can tell
-  // whether its share would overrun the office floor's own width.
-  const perWeight = bodyW / (cols.reduce((n, c) => n + c.weight, 0) || 1)
-
 
   return (
     // color-scheme is what repaints the native scrollbars, which are drawn by
@@ -953,9 +957,8 @@ export default function App() {
       {settings && (
         <Settings
           workflow={wf}
+          onApplied={applyFloor}
           onRestartFloor={restartFloor}
-          // The same two switches the title bar has, in the place somebody
-          // looks for a switch. One state, two ways to reach it.
           mode={mode}
           onMode={(next) => {
             setMode(next)
@@ -974,16 +977,6 @@ export default function App() {
           }}
           onMoveGod={moveGod}
           onClose={() => setSettings(false)}
-          onApplied={async (next) => {
-            setWf(next)
-            setShape(next)
-            // Agents follow the floor both ways: main stands down whoever the
-            // new one has no role for, and this brings up whoever it names and
-            // nobody is doing yet. Without it a floor could be switched to and
-            // have nobody standing in half its roles until the app restarted.
-            const { cols, rows } = paneSize(document.querySelector('section'))
-            for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
-          }}
         />
       )}
 
@@ -1473,7 +1466,7 @@ function TitleBar({
   /** Lines added and removed in the selected agent's workspace, or null. */
   diffStat: { adds: number; dels: number } | null
   onToggleReview: () => void
-  /** Open the floor's shape - roles, routing, briefs. Set once, not per task. */
+  /** How this floor and this machine are set up. */
   onSettings: () => void
 }) {
   return (

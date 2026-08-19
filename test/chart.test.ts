@@ -5,6 +5,8 @@ import {
   connect,
   disconnect,
   edges,
+  freeRoleId,
+  staffed,
   layout,
   NODE_W,
   readTalk,
@@ -146,3 +148,76 @@ test('the line from the operator to dispatch is always drawn', () => {
   assert.equal(twice.length, 1)
 })
 
+
+test('a new role never lands on an id somebody already has', () => {
+  // Counting the roles was the bug: add two, delete the first of them, add a
+  // third, and the count comes back round to an id that is still in use - and
+  // the object spread that writes it overwrote that role without a word.
+  let roles: Record<string, unknown> = { boss: {}, builder: {} }
+  const a = freeRoleId(roles)
+  roles = { ...roles, [a]: {} }
+  const b = freeRoleId(roles)
+  roles = { ...roles, [b]: {} }
+  assert.notEqual(a, b)
+
+  delete roles[a]
+  const c = freeRoleId(roles)
+  assert.equal(c in roles, false, `${c} is already taken`)
+  assert.notEqual(c, b)
+})
+
+test('a floor writes its card rules in its own words, both ways', () => {
+  // Roles, columns, briefs and capabilities are all the floor's own language
+  // already. These four were the format's: a rule written `mở thẻ` was refused,
+  // so a floor could not be finished in the language the rest of it was in.
+  const columns = [
+    { key: 'dang_lam', label: 'đang làm' },
+    { key: 'cho_duyet', label: 'chờ duyệt' }
+  ]
+  const says = { open: 'mở thẻ', closes: 'đóng thẻ', theirs: 'thẻ của họ', when: 'khi' }
+  const rules = [
+    { from: 'a', to: 'b', status: 'open', when: 'giao việc' },
+    { from: 'b', to: 'a', status: 'cho_duyet', when: 'làm xong' },
+    { from: 'a', to: 'b', status: 'dang_lam', whose: 'to', when: 'trả lại' },
+    { from: 'b', to: 'a', status: 'closes' }
+  ]
+
+  const text = writeTalk(rules, columns, says)
+  assert.match(text, /mở thẻ · khi giao việc/)
+  assert.match(text, /đóng thẻ/)
+  assert.match(text, /\(thẻ của họ\)/)
+  assert.equal(text.includes('opens a card'), false, 'the format\'s own words are not written')
+
+  assert.deepEqual(readTalk(text, columns, 'a', 'b', says), rules)
+
+  // And a floor that never named them still reads the words it was written in.
+  const plain = writeTalk(rules, columns)
+  assert.match(plain, /opens a card · when giao việc/)
+  assert.deepEqual(readTalk(plain, columns, 'a', 'b'), rules)
+})
+
+test('saving the drawing fills in who stands, and never takes it away', () => {
+  // It used to force `fixed: undefined, hireable: true` on everyone but
+  // dispatch - so a floor that said it wanted a second agent standing from
+  // launch had that stripped the moment somebody opened the drawing and saved,
+  // and there was no way to say it again that survived.
+  const floor = {
+    dispatch: 'boss',
+    roles: {
+      boss: { label: 'the boss', can: [], brief: 'x' },
+      writer: { label: 'a writer', can: [], brief: 'y', fixed: { id: 'writer', name: 'Iris' } },
+      hand: { label: 'a hand', can: [], brief: 'z' }
+    }
+  } as unknown as WorkflowInfo
+
+  const out = staffed(floor)
+  assert.deepEqual(out.roles.boss.fixed, { id: 'boss', name: 'the boss' }, 'dispatch always stands')
+  assert.equal(out.roles.boss.hireable, undefined)
+  assert.deepEqual(out.roles.writer.fixed, { id: 'writer', name: 'Iris' }, 'and so does whoever was named')
+  assert.equal(out.roles.writer.hireable, undefined)
+  assert.equal(out.roles.hand.fixed, undefined, 'anybody the floor did not name is hired')
+  assert.equal(out.roles.hand.hireable, true)
+
+  // Saving twice changes nothing more.
+  assert.deepEqual(staffed(out), out)
+})

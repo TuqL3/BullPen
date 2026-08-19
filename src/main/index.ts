@@ -1,15 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
-import { checkWorkspace, readConfig, writeConfig } from './config.ts'
+import { checkWorkspace, mergeUi, readConfig, writeConfig } from './config.ts'
 import {
   changes as gitChanges,
   diff as gitDiff,
   discard as gitDiscard,
   discardBlock as gitDiscardBlock,
-  discardHunk as gitDiscardHunk,
   stats as gitStats
 } from './git.ts'
 import { ActivityLog } from './activity.ts'
@@ -36,7 +35,6 @@ import {
   deleteWorkflow,
   fixedId,
   formatDoc,
-  formatPath,
   hasPlaceFor,
   lint,
   listWorkflows,
@@ -48,9 +46,9 @@ import {
   roleOfFixedId,
   rolesWith,
   saveWorkflow,
+  pctOr,
   toMarkdown,
   type Candidate,
-  type Capability,
   type ColumnKind,
   type Workflow,
   workCwd
@@ -79,7 +77,7 @@ const rulebook = (): ReturnType<typeof readRules> => readRules(format().text)
 
 /** What the writer is told: the whole reference, and how to answer. */
 const generatorPrompt = (): string => generatorBrief(format().text, STARTER)
-import { Hive, HIRE, HUMAN, type Message } from './hive.ts'
+import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
 import { hireName, slug as nameId } from '../names.ts'
@@ -96,23 +94,12 @@ if (!app.isPackaged) {
 const BULLPEN_HOME = process.env.BULLPEN_HOME ?? join(app.getPath('home'), '.bullpen')
 const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
 
-/** Ids under this prefix are the operator's own shells, not hired agents. */
-const SHELL_PREFIX = 'shell:'
-const isShell = (id: string): boolean => id.startsWith(SHELL_PREFIX)
 
 const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
 const board = new Board(boardPath(BULLPEN_HOME))
 const activity = new ActivityLog()
-
-/**
- * What each agent has written, newest first, deduped by path. Bounded: an
- * overnight run must not grow this forever, and nobody scrolls past the last
- * few dozen files anyway.
- */
-const edits = new Map<string, { path: string; ts: number; tool: string }[]>()
-const EDIT_CAP = 60
 
 /** agentId -> the question it is stopped on in its own terminal, if any. */
 const waiting = new Map<string, string>()
@@ -331,8 +318,11 @@ const roleOf = (id: string): string =>
 const projectOf = (id: string): string =>
   hires.get(id)?.project ?? lastFloor.find((r) => r.id === id)?.project ?? ''
 
-const slugId = (name: string): string => slug(name).replace(/^-|-$/g, '')
-
+/**
+ * Project names, for matching a project to a directory. Not agent ids - those
+ * are `nameId`, the one the wizard also uses, so both ways of putting somebody
+ * on the floor derive the same id from the same name.
+ */
 const slug = (s: string): string => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')
 
 /**
@@ -697,10 +687,8 @@ function reportWhenQuiet(): void {
  */
 function reportFinished(id: string): void {
   const path = approvals.transcriptOf(id)
-  const at = Date.now()
   const say = (text: string | null): void => {
     activity.push('done', id, text ? `${id} finished — ${text}` : `${id} finished a turn`)
-    send('agent:finished', { id, text, at })
     notify('done', `${id} finished`, text ?? 'a turn', { tab: 'monitor', id })
   }
   if (!path) return say(null)
@@ -910,15 +898,36 @@ function createWindow(): void {
     win = null
   })
 
-  // Agents produce links; they open in the real browser, never in-app.
+  // Agents produce links; they open in the real browser, never in-app - and
+  // only http(s). The rendered anchor calls `ui:open`, which checks the scheme,
+  // but a middle-click never fires its onClick: Chromium treats it as "open in
+  // a new window" and it arrived here instead, unchecked. A memory file is
+  // written by an agent, and `file:` or a custom scheme would be a document
+  // choosing what this machine opens.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (openable(url)) shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // Nothing in this window is ever a different page. The renderer is a local
+  // file with the preload attached; letting a link navigate it would hand that
+  // bridge to whatever was linked.
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url !== win?.webContents.getURL()) e.preventDefault()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else win.loadFile(join(import.meta.dirname, '../renderer/index.html'))
 }
+
+/**
+ * Whether a link out of a rendered document may be handed to the desktop.
+ *
+ * Only http(s). A memory file, a brief and a workflow are all written by an
+ * agent, so a link in one is untrusted text - and `file:` or a custom scheme is
+ * that document choosing what this machine opens. One definition, because the
+ * two ways a link can leave the window are two places to forget it.
+ */
+const openable = (url: string): boolean => /^https?:\/\//i.test(url)
 
 /** One reader per agent, so a growing transcript is parsed once, not re-read. */
 const meters = new Map<string, Meter>()
@@ -979,8 +988,14 @@ const contextRule = (id: string, pct: number): void => {
  */
 const pushCtxSoon = (id: string): void => {
   if (pushCtx(id)) return
+  // Stop at the first one that lands. Without the flag all three ran whatever
+  // the earlier ones found, re-reading the transcript twice more per turn per
+  // agent for a reading that was already sent.
+  let got = false
   for (const delay of [1200, 4000, 10_000]) {
-    setTimeout(() => pushCtx(id), delay).unref?.()
+    setTimeout(() => {
+      if (!got) got = pushCtx(id)
+    }, delay).unref?.()
   }
 }
 
@@ -993,7 +1008,6 @@ function wire(): void {
     send('agent:trust', id, sandbox)
   })
   ptys.on('exit', (id: string, code: number) => {
-    if (isShell(id)) return send('agent:exit', id, code)
     // Drop the claim first: a pidfile outliving its process is what makes the
     // next startup consider killing whatever inherited that pid.
     clearPid(join(AGENTS_HOME, id))
@@ -1002,14 +1016,24 @@ function wire(): void {
     // it reads as live work, which is the board lying about the floor - the one
     // thing it must not do if it is what the operator watches.
     if (openCard(id)) cardTo(id, column('stuck'))
+    // A pty that dies mid-turn never sends the Stop hook that would have taken
+    // it out of `working`, so it stayed in there for the rest of the session:
+    // `reportWhenQuiet` waits for that set to empty and would never have fired
+    // again, and floor.json went on calling a dead agent busy. Halting one busy
+    // agent used to cost every progress report after it.
+    working.delete(id)
+    // Same reason: `waiting` is cleared by the Stop hook a killed pty never
+    // sends, and it is what stops the same question being announced twice - a
+    // stale entry would swallow the first question of whatever runs under that
+    // id next.
+    waiting.delete(id)
     activity.push('exit', id, `${id} exited (code ${code})`)
     send('agent:exit', id, code)
+    // It may have been the last one out.
+    reportWhenQuiet()
   })
 
-  approvals.on('edit', (agentId: string, path: string, tool: string) => {
-    const list = (edits.get(agentId) ?? []).filter((e) => e.path !== path)
-    list.unshift({ path, ts: Date.now(), tool })
-    edits.set(agentId, list.slice(0, EDIT_CAP))
+  approvals.on('edit', (agentId: string, path: string) => {
     send('code:edited', agentId, path)
   })
 
@@ -1079,7 +1103,7 @@ function wire(): void {
     }
     const staff: Candidate[] = ptys
       .list()
-      .filter((a) => a.status === 'running' && !isShell(a.id) && a.id !== from)
+      .filter((a) => a.status === 'running' && a.id !== from)
       .map((a) => ({
         id: a.id,
         role: roleOf(a.id),
@@ -1107,7 +1131,7 @@ function wire(): void {
     const name = nextHireName(project)
     try {
       const state = spawnAgent({
-        id: slugId(name),
+        id: nameId(name),
         cwd,
         cmd: 'claude',
         args: [],
@@ -1242,7 +1266,7 @@ function wire(): void {
     const name = nextHireName(project)
     try {
       const state = spawnAgent({
-        id: slugId(name),
+        id: nameId(name),
         cwd,
         cmd: 'claude',
         args: [],
@@ -1483,6 +1507,10 @@ function wire(): void {
   ipcMain.handle('agent:setRole', (_e, id: string, role: string) => {
     if (!wf.roles[role]) return false
     roles.set(id, role)
+    // The brief went out with the spawn and cannot be recalled, but what this
+    // role never does is answered per hook call and can be. Left out, an agent
+    // told its role after the fact kept the default role's refusals.
+    approvals.setDenied(id, wf.roles[role].never ?? [])
     return true
   })
 
@@ -1555,7 +1583,6 @@ function wire(): void {
       return { error: err instanceof Error ? err.message : String(err) }
     }
   })
-  ipcMain.handle('code:edits', (_e, agentId: string) => edits.get(agentId) ?? [])
   ipcMain.handle(
     'code:search',
     (_e, root: string, query: string, caseSensitive: boolean, regex: boolean, only?: string[]) => {
@@ -1566,39 +1593,6 @@ function wire(): void {
       }
     }
   )
-  /**
-   * A plain shell in an agent's workspace.
-   *
-   * Deliberately not spawnAgent(): a shell gets no settings file, no hooks, no
-   * mailbox and no pidfile. It is the operator's own terminal, not an agent, and
-   * giving it an agent's control plane would put its every command through the
-   * approvals gate that exists to police agents.
-   */
-  ipcMain.handle(
-    'shell:open',
-    (_e, agentId: string, cwd: string, size: { cols: number; rows: number }, fresh = false) => {
-    const base = SHELL_PREFIX + agentId
-    // Without `fresh`, opening the panel reattaches to the shell already there
-    // rather than starting a second one behind the first. With it, "new shell"
-    // means what it says - it used to hand back the running shell, so the
-    // button looked broken.
-    if (!fresh) {
-      const running = ptys.list().find((a) => a.id.startsWith(base) && a.status === 'running')
-      if (running) return running
-    }
-    let id = base
-    for (let n = 2; ptys.isRunning(id) && n < 50; n++) id = `${base}#${n}`
-    return ptys.spawn({
-      id,
-      cwd: resolve(cwd),
-      cmd: process.env.SHELL || 'bash',
-      args: [],
-      ...size,
-      env: { BULLPEN_FLOOR: floorPath(BULLPEN_HOME) }
-    })
-    }
-  )
-
   ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
   ipcMain.handle('git:diff', (_e, root: string, rel: string) => gitDiff(root, rel))
   ipcMain.handle('git:stats', (_e, root: string) => gitStats(root))
@@ -1617,15 +1611,6 @@ function wire(): void {
       return res
     }
   )
-  ipcMain.handle(
-    'git:discardHunk',
-    async (_e, root: string, rel: string, index: number, marker: string) => {
-      const res = await gitDiscardHunk(root, rel, index, marker)
-      if (res.ok) activity.push('discard', HUMAN, `you discarded one hunk of ${rel}`)
-      return res
-    }
-  )
-
   // The CLI draws its own prompt block and chrome from a theme of its own, so
   // it has to be told which one Bullpen is in - otherwise a dark ~/.claude
   // setting paints a black band down a light terminal.
@@ -1637,7 +1622,7 @@ function wire(): void {
     // the theme it started with, but a restarted one - and the next hire - will
     // not be left mismatched until the config is touched again.
     for (const id of ptys.list().map((a) => a.id)) {
-      if (!isShell(id)) approvals.installHook(id, join(AGENTS_HOME, id))
+      approvals.installHook(id, join(AGENTS_HOME, id))
     }
     return true
   })
@@ -1665,7 +1650,7 @@ function wire(): void {
      */
     stale: ptys
       .list()
-      .filter((a) => a.status === 'running' && !isShell(a.id))
+      .filter((a) => a.status === 'running')
       .filter((a) => (bornOn.get(a.id) ?? wf.name) !== wf.name)
       .map((a) => a.id)
   }))
@@ -1727,7 +1712,6 @@ function wire(): void {
   })
 
   /** The annotated empty floor, for somebody writing their first one. */
-  ipcMain.handle('workflow:starter', () => STARTER)
   /** The two-party floor a new chart is drawn on top of. */
   ipcMain.handle('workflow:blank', () => NEW_FLOOR)
 
@@ -1751,28 +1735,6 @@ function wire(): void {
     return dryRun(parsed.workflow, task)
   })
 
-  ipcMain.handle('workflow:format', () => format())
-
-  /**
-   * Replace the format document, or drop back to the one Bullpen ships.
-   *
-   * Written where `formatDoc` looks for it, so what the dialog just saved is
-   * what the next generation is briefed with - no reload, no restart.
-   */
-  ipcMain.handle('workflow:writeFormat', (_e, text: string) => {
-    const path = formatPath(BULLPEN_HOME)
-    try {
-      if (text.trim()) writeFileSync(path, text, 'utf8')
-      // Emptying the box is how you go back: the shipped document is what a
-      // missing file means, and leaving a blank one behind would read as an
-      // override that says nothing.
-      else if (existsSync(path)) rmSync(path)
-      return format()
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) }
-    }
-  })
-
   /**
    * Change part of the running workflow, without retyping the file.
    *
@@ -1789,13 +1751,26 @@ function wire(): void {
    * in front of them - the same text `workflow:patch` would write - so the file
    * can be read before it is the floor.
    */
+  /**
+   * A patch, with the two numbers in it made usable again.
+   *
+   * They come from number inputs, and a cleared input is `NaN` - which is a
+   * threshold nothing can ever be under.
+   */
+  const patched = (patch: Partial<Workflow>): Workflow => ({
+    ...wf,
+    ...patch,
+    reuseBelowPct: pctOr(patch.reuseBelowPct ?? wf.reuseBelowPct, wf.reuseBelowPct),
+    hireAbovePct: pctOr(patch.hireAbovePct ?? wf.hireAbovePct, wf.hireAbovePct)
+  })
+
   ipcMain.handle('workflow:preview', (_e, patch: Partial<Workflow>) => {
-    const next: Workflow = { ...wf, ...patch }
+    const next = patched(patch)
     return { markdown: toMarkdown(next), problems: lint(next, rulebook()) }
   })
 
   ipcMain.handle('workflow:patch', async (_e, patch: Partial<Workflow>) => {
-    const next: Workflow = { ...wf, ...patch }
+    const next = patched(patch)
     // Before `wf` moves, while the old floor can still say who was who.
     const retired = await retire(next)
     // Noted, not refused. A floor half-drawn is a floor mid-thought: somebody
@@ -1885,16 +1860,6 @@ function wire(): void {
     }
   })
 
-  /** Keep one without running it: a floor being written is not one in use. */
-  ipcMain.handle('workflow:save', (_e, markdown: string) => {
-    try {
-      const saved = saveWorkflow(BULLPEN_HOME, markdown)
-      return { name: saved.name }
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) }
-    }
-  })
-
   ipcMain.handle('workflow:delete', (_e, name: string) => {
     try {
       deleteWorkflow(BULLPEN_HOME, name)
@@ -1948,6 +1913,15 @@ function wire(): void {
     godId = fixedId(wf, wf.dispatch)
     // Roles learned under the old workflow name things this one may not have.
     for (const [id, role] of [...roles]) if (!wf.roles[role]) roles.delete(id)
+    // What a role never does was read once, at spawn. An agent that survives
+    // the switch kept the old floor's answer: a workflow that takes a tool away
+    // from a role did not take it away from anyone already running under it,
+    // and one that hands a tool back left them still refused. Re-stated from the
+    // workflow now in force, for everyone still on the floor.
+    for (const a of ptys.list()) {
+      if (a.status !== 'running') continue
+      approvals.setDenied(a.id, wf.roles[roleOf(a.id)]?.never ?? [])
+    }
     activity.push('spawn', 'bullpen', `workflow set to "${wf.name}"`)
     return { workflow: wf, markdown: toMarkdown(wf), retired }
   })
@@ -1993,11 +1967,13 @@ function wire(): void {
 
   // Used for the first briefing, which has the same paste problem.
   ipcMain.handle('agent:submit', (_e, id: string, text: string) => submitPrompt(id, text))
-  ipcMain.handle('agent:list', () => ptys.list())
   ipcMain.handle('agent:kill', (_e, id: string) => {
     // Halt takes the queue with it: those notes were waiting for a tool call
-    // this agent is not going to make.
+    // this agent is not going to make. Same for anything it was blocked on -
+    // left pending it stays in the approvals list, and the roster keeps the
+    // agent marked blocked, for a process that is already gone.
     approvals.clearSteers(id)
+    approvals.clearPending(id)
     return ptys.kill(id)
   })
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
@@ -2012,7 +1988,6 @@ function wire(): void {
     submitPrompt(t.agentId, t.prompt)
     console.log(`[bullpen] trigger fired for ${t.agentId}: ${t.prompt.slice(0, 60)}`)
     activity.push('trigger', t.agentId, `scheduled prompt fired: ${t.prompt.slice(0, 80)}`)
-    send('agent:trigger-fired', t.agentId, t.prompt)
     // Stamped by the board once this returns true; the panel reads it next tick.
     setTimeout(pushTriggers, 0).unref?.()
     return true
@@ -2045,11 +2020,6 @@ function wire(): void {
     questions.delete(qid)
     send('ask:pending', [...questions.values()])
     return true
-  })
-
-  ipcMain.handle('agent:setGod', (_e, id: string) => {
-    godId = id
-    return godId
   })
 
   /**
@@ -2115,19 +2085,11 @@ function wire(): void {
     board.setTaskStatus(id, status)
     pushTasks()
   })
-  ipcMain.handle('board:assignTask', (_e, id: string, agentId: string) => {
-    board.assignTask(id, agentId)
-    pushTasks()
-  })
   ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
   ipcMain.handle('board:addTask', (_e, id: string, text: string) => {
     const t = board.addTask(id, text)
     pushTasks()
     return t
-  })
-  ipcMain.handle('board:toggleTask', (_e, id: string) => {
-    board.toggleTask(id)
-    pushTasks()
   })
   ipcMain.handle('board:removeTask', (_e, id: string) => {
     board.removeTask(id)
@@ -2147,14 +2109,8 @@ function wire(): void {
     board.removeTrigger(id)
     pushTriggers()
   })
-  /**
-   * A link out of a rendered document.
-   *
-   * Only http(s): a memory file is written by an agent, and `file:` or a custom
-   * scheme would be a document choosing what this machine opens.
-   */
   ipcMain.handle('ui:open', (_e, url: string) => {
-    if (!/^https?:\/\//i.test(url)) return false
+    if (!openable(url)) return false
     shell.openExternal(url)
     return true
   })
@@ -2182,13 +2138,7 @@ function wire(): void {
       }
     ) => {
       const cfg = readConfig(BULLPEN_HOME)
-      const ui = {
-        fontSize: Math.min(24, Math.max(9, Number(next.fontSize ?? cfg.ui?.fontSize ?? 12.5))),
-        floor: (next.floor ?? cfg.ui?.floor ?? 'green').trim() || 'green',
-        // Merged per floor, so saving one chart does not wipe the others.
-        chart: { ...(cfg.ui?.chart ?? {}), ...(next.chart ?? {}) },
-        view: { ...(cfg.ui?.view ?? {}), ...(next.view ?? {}) }
-      }
+      const ui = mergeUi(cfg.ui, next)
       writeConfig(BULLPEN_HOME, { ...cfg, ui })
       return ui
     }
@@ -2268,11 +2218,8 @@ function wire(): void {
   ipcMain.handle('agent:steer', (_e, id: string, note: string) => approvals.steer(id, note))
   ipcMain.handle('agent:steers', (_e, id: string) => approvals.pendingSteers(id))
 
-  ipcMain.handle('approvals:list', () => approvals.listPending())
   ipcMain.handle('approvals:decide', (_e, id: string, d: 'allow' | 'deny') => approvals.decide(id, d))
 
-  ipcMain.handle('hive:send', (_e, msg) => hive.send(msg))
-  ipcMain.handle('hive:inbox', (_e, id: string) => hive.peekInbox(id))
 }
 
 app.whenReady().then(async () => {

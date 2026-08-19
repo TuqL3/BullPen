@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /**
@@ -361,7 +361,10 @@ export function read(root: string, rel: string): FileRead {
  */
 export function write(root: string, rel: string, text: string): void {
   const abs = inside(root, rel)
-  const st = statSync(abs)
-  if (st.isDirectory()) throw new Error(`${rel} is a directory`)
+  // Only when there is something there. `statSync` on a path that does not
+  // exist throws, so writing refused to create a file at all - and the memory
+  // panel's own "give this agent one" button answered ENOENT, because an agent
+  // with no CLAUDE.md is exactly the case that button exists for.
+  if (existsSync(abs) && statSync(abs).isDirectory()) throw new Error(`${rel} is a directory`)
   writeFileSync(abs, text, 'utf8')
 }

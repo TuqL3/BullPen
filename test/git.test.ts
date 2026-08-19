@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { changes, diff, discard, discardBlock, discardHunk, isRepo, stats } from '../src/main/git.ts'
+import { changes, diff, discard, discardBlock, isRepo, stats } from '../src/main/git.ts'
 import { blocks, parseDiff } from '../src/diff.ts'
 
 const git = (cwd: string, ...args: string[]): void => {
@@ -146,68 +146,6 @@ test('a deleted file comes back, and a path outside the workspace is refused', a
     const out = await discard(dir, '../../etc/hosts')
     assert.equal(out.ok, undefined)
     assert.ok(out.error)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-/** A file with two changes far enough apart that git emits two hunks. */
-const twoHunks = (): string => {
-  const dir = mkdtempSync(join(tmpdir(), 'bp-hunk-'))
-  git(dir, 'init', '-q')
-  git(dir, 'config', 'user.email', 'bullpen@test')
-  git(dir, 'config', 'user.name', 'Bullpen')
-  const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`)
-  writeFileSync(join(dir, 'f.txt'), lines.join('\n') + '\n')
-  git(dir, 'add', '-A')
-  git(dir, 'commit', '-qm', 'first')
-  lines[2] = 'CHANGED TOP'
-  lines[35] = 'CHANGED BOTTOM'
-  writeFileSync(join(dir, 'f.txt'), lines.join('\n') + '\n')
-  return dir
-}
-
-test('one hunk can be discarded while the rest of the file keeps its changes', async () => {
-  const dir = twoHunks()
-  try {
-    const before = parseDiff((await diff(dir, 'f.txt')).text)
-    assert.equal(before.hunks.length, 2, 'the fixture must produce two hunks')
-
-    assert.deepEqual(await discardHunk(dir, 'f.txt', 0, before.hunks[0].marker), { ok: true })
-
-    const text = readFileSync(join(dir, 'f.txt'), 'utf8')
-    assert.match(text, /^line 3$/m, 'the discarded hunk went back to HEAD')
-    assert.match(text, /CHANGED BOTTOM/, 'the hunk nobody touched is still there')
-    assert.equal(parseDiff((await diff(dir, 'f.txt')).text).hunks.length, 1)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a hunk discard is refused when the panel is out of date', async () => {
-  const dir = twoHunks()
-  try {
-    // The marker the panel is showing no longer matches the hunk at that index:
-    // applying anyway would revert some other part of the file.
-    const stale = await discardHunk(dir, 'f.txt', 0, '@@ -999,1 +999,1 @@')
-    assert.equal(stale.ok, undefined)
-    assert.match(stale.error ?? '', /changed under the panel/)
-    assert.match(readFileSync(join(dir, 'f.txt'), 'utf8'), /CHANGED TOP/, 'nothing was reverted')
-
-    const gone = await discardHunk(dir, 'f.txt', 9, '@@ -1,1 +1,1 @@')
-    assert.match(gone.error ?? '', /hunk is gone/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('an untracked file has no hunk to revert to, and says so', async () => {
-  const dir = repo()
-  try {
-    const out = await discardHunk(dir, 'src/new.ts', 0, '@@ -0,0 +1,1 @@')
-    assert.equal(out.ok, undefined)
-    assert.match(out.error ?? '', /not tracked/)
-    assert.equal(existsSync(join(dir, 'src/new.ts')), true, 'and it is left alone')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

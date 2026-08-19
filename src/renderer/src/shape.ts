@@ -26,8 +26,8 @@ export const setShape = (w: WorkflowInfo | null): void => {
 export const shape = (): WorkflowInfo | null => wf
 
 /** Whether a role answers to a word: its own name, or a capability it holds. */
-const holds = (role: string, word: string): boolean =>
-  word === role || (wf?.roles[role]?.can ?? []).includes(word)
+const holds = (w: WorkflowInfo | null, role: string, word: string): boolean =>
+  word === role || (w?.roles[role]?.can ?? []).includes(word)
 
 /**
  * The four questions the UI asks about a floor, answered the way main answers
@@ -37,28 +37,66 @@ const holds = (role: string, word: string): boolean =>
  * treat them as. It was a second copy of what `talks to` and the card rules
  * already said, and a floor could contradict itself between them.
  */
-export const rolesWith = (kind: string): string[] => {
-  const names = Object.keys(wf?.roles ?? {})
+/**
+ * The same four questions, asked of a floor that is not the running one.
+ *
+ * The canvas needs them about the drawing in front of somebody, which is a
+ * different floor from the one the app is on until they press save - and
+ * answering them twice, once here and once there, is how the drawing comes to
+ * disagree with what it will become.
+ */
+export const rolesWithIn = (w: WorkflowInfo | null, kind: string): string[] => {
+  const names = Object.keys(w?.roles ?? {})
+  // The rules when there are any, and what each word was declared to behave
+  // like when there are none - the same fallback main uses, and for the same
+  // reason: both answers come from the rules, so a floor with none could not be
+  // asked either of them.
   const fromRules = (status: string): string[] =>
-    names.filter((r) =>
-      (wf?.cardRules ?? []).some((rule) => rule.status === status && holds(r, rule.from))
-    )
+    (w?.cardRules ?? []).length
+      ? names.filter((r) =>
+          (w?.cardRules ?? []).some((rule) => rule.status === status && holds(w, r, rule.from))
+        )
+      : names.filter((r) =>
+          (w?.roles[r]?.can ?? []).some(
+            (c) =>
+              (w?.capabilities ?? []).find((d) => d.name === c)?.kind ===
+              (status === 'open' ? 'assigns' : 'checks')
+          )
+        )
 
   if (kind === 'speaksToHuman') {
-    if (wf?.voice && wf.roles[wf.voice]) return [wf.voice]
-    return names.filter((r) => (wf?.talksTo[r] ?? []).includes(wf?.human ?? 'you'))
+    if (w?.voice && w.roles[w.voice]) return [w.voice]
+    return names.filter((r) => (w?.talksTo[r] ?? []).includes(w?.human ?? 'you'))
   }
   if (kind === 'assigns') return fromRules('open')
   if (kind === 'checks') return fromRules('closes')
-  if (wf?.hires && wf.roles[wf.hires]) return [wf.hires]
+  if (w?.hires && w.roles[w.hires]) return [w.hires]
   const taken = new Set([
-    ...rolesWith('speaksToHuman'),
-    ...rolesWith('assigns'),
-    ...rolesWith('checks')
+    ...rolesWithIn(w, 'speaksToHuman'),
+    ...rolesWithIn(w, 'assigns'),
+    ...rolesWithIn(w, 'checks')
   ])
   const rest = names.filter((r) => !taken.has(r))
-  return rest.length ? rest : names.filter((r) => wf?.roles[r].hireable)
+  return rest.length ? rest : names.filter((r) => w?.roles[r].hireable)
 }
+
+export const rolesWith = (kind: string): string[] => rolesWithIn(wf, kind)
+
+/**
+ * The word this floor uses for the work itself.
+ *
+ * A capability is whatever the floor called it - `nghien-cuu`, `viet-kich-ban`
+ * - so "what does a new box do" cannot be answered from a list in the source.
+ * It is answered by asking who already does the work here and taking their
+ * word for it.
+ */
+export const buildsCapabilityIn = (w: WorkflowInfo | null): string | undefined =>
+  // Whatever this floor declared as the doing of the work, then whoever already
+  // does it, then anything at all. A new box does the work; it does not hand it
+  // out, which is what taking the first capability in the list used to make it.
+  (w?.capabilities ?? []).find((c) => c.kind === 'builds')?.name ??
+  w?.roles[rolesWithIn(w, 'builds')[0] ?? '']?.can[0] ??
+  (w?.capabilities ?? [])[0]?.name
 
 export const roleCan = (role: string, kind: string): boolean => rolesWith(kind).includes(role)
 

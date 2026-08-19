@@ -5,6 +5,8 @@ import {
   connect,
   disconnect,
   edges,
+  freeRoleId,
+  staffed,
   LABEL_H,
   layout,
   NODE_H,
@@ -13,7 +15,7 @@ import {
   writeTalk,
   type ChartNode
 } from './chart'
-import { readBrief, writeBrief } from '../../brief'
+import { buildsCapabilityIn } from './shape'
 import { useStore } from './store'
 import { LABEL, MONO } from './theme'
 
@@ -32,10 +34,13 @@ import { LABEL, MONO } from './theme'
  */
 export function OrgChart({
   workflow,
-  onApplied
+  onApplied,
+  onDirty
 }: {
   workflow: WorkflowInfo | null
   onApplied: (w: WorkflowInfo, markdown?: string) => void
+  /** Told whenever the drawing stops matching the floor that is running. */
+  onDirty?: (dirty: boolean) => void
 }) {
   /** The whole floor, edited in one place and saved in one go. */
   const [draft, setDraft] = useState<WorkflowInfo | null>(workflow)
@@ -50,11 +55,9 @@ export function OrgChart({
    */
   const [panel, setPanel] = useState<
     | {
-        kind: 'role' | 'file' | 'edge' | 'floors' | 'try'
+        kind: 'role' | 'file' | 'edge' | 'floors' | 'try' | 'company'
         id?: string
         to?: string
-        x: number
-        y: number
       }
     | null
   >(null)
@@ -158,6 +161,10 @@ export function OrgChart({
     }, 400)
   }
   const dirty = JSON.stringify(draft) !== JSON.stringify(workflow)
+  // Reported up so the dialog around this can refuse to be dismissed over an
+  // unsaved drawing: closing it unmounts the canvas, and a floor somebody has
+  // spent ten minutes on goes with it, without a word.
+  useEffect(() => onDirty?.(dirty), [dirty, onDirty])
   const at = (id: string): ChartNode | undefined => nodes.find((n) => n.id === id)
 
   const point = (e: React.PointerEvent): { x: number; y: number } => {
@@ -245,8 +252,13 @@ export function OrgChart({
 
   /** A new role, with enough in it to be a legal one. */
   const addRole = (): void => {
-    const id = `role_${Object.keys(draft.roles).length + 1}`
-    const builds = draft.capabilities[0]?.name
+    const id = freeRoleId(draft.roles)
+    // Whoever does the work on this floor, not whichever capability happens to
+    // be listed first. On a floor whose first one is `speaksToHuman`, a role
+    // drawn on the canvas answered to the rules about the boss - so reporting
+    // in opened a new card instead of moving its own, and the board grew
+    // instead of moving.
+    const builds = buildsCapabilityIn(draft)
     set({
       roles: {
         ...draft.roles,
@@ -261,7 +273,7 @@ export function OrgChart({
       talksTo: { ...draft.talksTo, [id]: [] }
     })
     setNodes([...nodes, { id, label: 'a new role', kind: 'role', x: 40, y: 40 + nodes.length * 20 }])
-    setPanel({ kind: 'role', id, x: 60, y: 60 })
+    setPanel({ kind: 'role', id })
   }
 
   const dropRole = (id: string): void => {
@@ -437,12 +449,19 @@ export function OrgChart({
           </span>
         )}
         <button
-          style={{ ...S.btn, ...(reading ? S.btnOn : {}) }}
-          onClick={() => setReading(!reading)}
+          style={{ ...S.btn, ...(reading && !panel ? S.btnOn : {}) }}
+          onClick={() => {
+            // One column, so opening the file puts away whatever was in it.
+            setPanel(null)
+            setReading(!reading || Boolean(panel))
+          }}
         >
           read it
         </button>
-        <button style={S.btn} onClick={() => setPanel({ kind: 'floors', x: 40, y: 40 })}>
+        <button style={S.btn} onClick={() => setPanel({ kind: 'company' })}>
+          the company
+        </button>
+        <button style={S.btn} onClick={() => setPanel({ kind: 'floors' })}>
           floors
         </button>
         {dirty && (
@@ -615,12 +634,7 @@ export function OrgChart({
                         // Only people have anything to open. `you` is where
                         // the work comes from on every floor there is.
                         if (n.kind === 'role') {
-                          setPanel({
-                            kind: 'role',
-                            id: n.id,
-                            x: (n.x - off.x + NODE_W + 40) * view.k + view.tx,
-                            y: (n.y - off.y) * view.k + view.ty
-                          })
+                          setPanel({ kind: 'role', id: n.id })
                         }
                       }}
                       onContextMenu={(e) => {
@@ -745,13 +759,7 @@ export function OrgChart({
               }}
               onClick={(e) => {
                 e.stopPropagation()
-                setPanel({
-                  kind: 'edge',
-                  id: from,
-                  to,
-                  x: (x - off.x + 26) * view.k + view.tx,
-                  y: (y - off.y) * view.k + view.ty
-                })
+                setPanel({ kind: 'edge', id: from, to })
               }}
             />
           ))}
@@ -768,7 +776,7 @@ export function OrgChart({
                   <button
                     style={S.menuItem}
                     onClick={() => {
-                      setPanel({ kind: 'role', id: menu.role, x: menu.x + 10, y: menu.y })
+                      setPanel({ kind: 'role', id: menu.role })
                       setMenu(null)
                     }}
                   >
@@ -798,7 +806,7 @@ export function OrgChart({
                   <button
                     style={S.menuItem}
                     onClick={() => {
-                      setPanel({ kind: 'try', x: menu.x, y: menu.y })
+                      setPanel({ kind: 'try' })
                       setMenu(null)
                     }}
                   >
@@ -819,37 +827,38 @@ export function OrgChart({
               )}
             </div>
           )}
+        </div>
 
-          {panel && (
-            <div
-              style={{
-                ...S.panel,
-                // The floors are cards with a floor drawn on each, and they
-                // wrap to three lines in a column meant for a form.
-                width: panel.kind === 'floors' ? 420 : PANEL_W,
-                left: Math.max(
-                  8,
-                  Math.min(
-                    panel.x,
-                    (board.current?.clientWidth ?? 700) -
-                      (panel.kind === 'floors' ? 420 : PANEL_W) -
-                      8
-                  )
-                ),
-                top: Math.max(
-                  8,
-                  Math.min(panel.y, (board.current?.clientHeight ?? 500) - PANEL_H - 8)
-                )
-              }}
-              onWheel={(e) => e.stopPropagation()}
-              onClick={(e) => e.stopPropagation()}
-              onContextMenu={(e) => e.stopPropagation()}
-            >
-              <button style={S.close} title="close" onClick={() => setPanel(null)}>
+        {/* Beside the drawing, never over it, and as tall as the dialog.
+            These were 330x460 boxes floating on the canvas: everything in them
+            scrolled inside a box smaller than the thing it described, and they
+            covered the drawing they were about. One column, one at a time -
+            you are either reading the file or editing one thing in it. */}
+        {(panel || reading) && (
+          <div
+            style={S.side}
+            onWheel={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.stopPropagation()}
+          >
+            <div style={S.sideHead}>
+              <span style={{ ...LABEL, color: 'var(--faint)', flex: 1 }}>
+                {panel ? PANEL_TITLE[panel.kind] : 'the whole file'}
+              </span>
+              <button
+                style={S.close}
+                title="close"
+                onClick={() => (panel ? setPanel(null) : setReading(false))}
+              >
                 ×
               </button>
-              {panel.kind === 'try' ? (
+            </div>
+            <div style={S.sideBody}>
+              {!panel ? (
+                <FilePanel floor={staffed(draft)} onText={fromText} onClose={() => setReading(false)} />
+              ) : panel.kind === 'try' ? (
                 <TryPanel dirty={dirty} />
+              ) : panel.kind === 'company' ? (
+                <CompanyPanel floor={draft} onChange={set} />
               ) : panel.kind === 'floors' ? (
                 <FloorsPanel
                   running={draft.name}
@@ -875,19 +884,6 @@ export function OrgChart({
                 <RoleInspector floor={draft} role={panel.id} onChange={set} />
               ) : null}
             </div>
-          )}
-        </div>
-
-        {/* The file, beside the drawing rather than over it: reading it while
-            moving a box is the point, and a panel that covers the canvas has
-            to be closed before the next change can be made. */}
-        {reading && (
-          <div style={S.side}>
-            <FilePanel
-              floor={staffed(draft)}
-              onText={fromText}
-              onClose={() => setReading(false)}
-            />
           </div>
         )}
       </div>
@@ -895,30 +891,6 @@ export function OrgChart({
   )
 }
 
-/**
- * Who is standing on this floor when it opens, and who is hired when needed.
- *
- * Only the one the operator types at. Anybody else is a context window being
- * paid for before there is work for them - and work handed to a role that has
- * nobody in it now puts somebody in it, so standing them up in advance buys
- * nothing. A floor that genuinely wants three agents at launch can still say so
- * in the file; this is what the drawing means when it says nothing.
- */
-function staffed(floor: WorkflowInfo): WorkflowInfo {
-  const standing = new Set([floor.dispatch])
-  const roles = Object.fromEntries(
-    Object.entries(floor.roles).map(([id, def]) => {
-      if (standing.has(id)) {
-        return [
-          id,
-          { ...def, hireable: undefined, fixed: def.fixed ?? { id, name: def.label || id } }
-        ]
-      }
-      return [id, { ...def, fixed: undefined, hireable: true }]
-    })
-  )
-  return { ...floor, roles }
-}
 
 /**
  * One role: a name, and what it does. Nothing else.
@@ -959,6 +931,55 @@ function RoleInspector({
           onChange={(e) => set({ label: e.target.value })}
         />
       </Row>
+
+      {/* What kind of work this one does, in the floor's own words. The card
+          rules are written against these, so a role holding none of them is a
+          role no rule can name - which reads as a card that never moves. */}
+      <div style={{ ...LABEL, marginTop: 8 }}>what kind of work</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 4px' }}>
+        What this one does on this floor. Add the words under <b>the company</b>.
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {floor.capabilities.length === 0 && (
+          <span style={{ color: 'var(--faint)' }}>This floor has named none yet.</span>
+        )}
+        {floor.capabilities.map((c) => {
+          const on = def.can.includes(c.name)
+          return (
+            <span
+              key={c.name}
+              title={c.what}
+              style={{ ...S.choice, ...(on ? S.choiceOn : null) }}
+              onClick={() =>
+                set({ can: on ? def.can.filter((x) => x !== c.name) : [...def.can, c.name] })
+              }
+            >
+              {c.name}
+            </span>
+          )
+        })}
+      </div>
+
+      {/* Whether somebody is at this desk when the app opens, or is hired when
+          there is work for them. Dispatch is neither - it is who you type at. */}
+      {role !== floor.dispatch && (
+        <label style={{ ...S.checkRow, marginTop: 10 }}>
+          <input
+            type="checkbox"
+            checked={Boolean(def.fixed)}
+            onChange={(e) =>
+              set(
+                e.target.checked
+                  ? { fixed: { id: role, name: def.label || role }, hireable: undefined }
+                  : { fixed: undefined, hireable: true }
+              )
+            }
+          />
+          <span style={{ color: 'var(--muted)' }}>
+            standing here from launch — otherwise hired when there is work
+          </span>
+        </label>
+      )}
 
       <div style={{ ...LABEL, marginTop: 8 }}>what this one does</div>
       <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 4px' }}>
@@ -1290,6 +1311,19 @@ function FloorsPanel({
                   }
                   onClick={async (e) => {
                     e.stopPropagation()
+                    // A shipped floor is only taken off the list and `show the
+                    // ones I removed` brings it back. One you wrote is a file,
+                    // deleted outright, with nothing anywhere that restores it -
+                    // and it sat one unguarded click from a card you click to
+                    // switch floors.
+                    if (
+                      !w.builtin &&
+                      !confirm(
+                        `Delete "${w.name}"? The file is removed and there is no way back to it.`
+                      )
+                    ) {
+                      return
+                    }
                     const res = await window.bullpen.deleteWorkflow(w.name)
                     if (res.error) return setError(res.error)
                     list()
@@ -1318,6 +1352,200 @@ function FloorsPanel({
       {error && <div style={{ color: 'var(--danger)' }}>{error.split('\n')[0]}</div>}
     </div>
   )
+}
+
+/**
+ * The company itself: what the work is called, and the stages a card moves
+ * through.
+ *
+ * These are the half of a floor the drawing cannot show. A teacher's floor and
+ * a youtuber's floor differ here more than they differ in boxes and arrows -
+ * one moves work through `cần soạn → chờ chấm → đã duyệt`, the other through
+ * `ý tưởng → chờ dựng → đã đăng` - and until this panel existed the only way
+ * to say either was to stop drawing and type the file.
+ *
+ * What this floor calls *you*, and the four words a card rule reserves, were
+ * here too and are not any more: renaming them changes how the file reads and
+ * nothing else - a card rule never reaches an agent, only the router - while
+ * renaming the human address silently strands every brief still written to the
+ * old one. The file can still say all five; a panel asking everybody about them
+ * was six controls for no change anybody could see.
+ */
+function CompanyPanel({
+  floor,
+  onChange
+}: {
+  floor: WorkflowInfo
+  onChange: (patch: Partial<WorkflowInfo>) => void
+}) {
+  const setCap = (at: number, patch: Partial<WorkflowInfo['capabilities'][number]>): void =>
+    onChange({ capabilities: floor.capabilities.map((c, i) => (i === at ? { ...c, ...patch } : c)) })
+  const setCol = (at: number, patch: Partial<WorkflowInfo['columns'][number]>): void =>
+    onChange({ columns: floor.columns.map((c, i) => (i === at ? { ...c, ...patch } : c)) })
+
+  return (
+    <div>
+      {/* Not the triggers tab's context row, which is one agent's rule for
+          typing `/compact` when its own window fills. These two decide which
+          agent is handed the next thing at all - and whether anybody is - so
+          they are the company's, and they are saved into the floor. */}
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>who takes the next task</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+        Work handed to a role goes to whoever is free. How much of its window an idle one may
+        already have used and still take it, and the point past which it counts as unavailable
+        even when it is doing nothing — past that, somebody new is hired instead.
+      </div>
+      <div style={S.line}>
+        <span style={{ color: 'var(--muted)', width: 108 }}>give it to one under</span>
+        <input
+          type="number"
+          style={{ ...S.field, width: 62 }}
+          value={floor.reuseBelowPct}
+          onChange={(e) => onChange({ reuseBelowPct: Number(e.target.value) })}
+        />
+        <span style={{ color: 'var(--faint)' }}>%</span>
+        <span style={{ color: 'var(--muted)', width: 92, marginLeft: 8 }}>hire past</span>
+        <input
+          type="number"
+          style={{ ...S.field, width: 62 }}
+          value={floor.hireAbovePct}
+          onChange={(e) => onChange({ hireAbovePct: Number(e.target.value) })}
+        />
+        <span style={{ color: 'var(--faint)' }}>%</span>
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 14 }}>the work</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+        What the people here do, in your words. Say what each behaves like and the board moves on
+        its own — the lines only need a rule when you want something else.
+      </div>
+      {floor.capabilities.map((c, i) => (
+        <div key={i} style={S.line}>
+          <input
+            style={{ ...S.field, width: 130 }}
+            value={c.name}
+            placeholder="nghien-cuu"
+            onChange={(e) => setCap(i, { name: e.target.value.trim() })}
+          />
+          <select
+            style={{ ...S.field, width: 112 }}
+            value={c.kind ?? ''}
+            title="what the floor does with this word when no rule is written"
+            onChange={(e) => setCap(i, { kind: e.target.value || undefined })}
+          >
+            <option value="">just a word</option>
+            <option value="speaksToHuman">reports to you</option>
+            <option value="assigns">hands work out</option>
+            <option value="builds">does the work</option>
+            <option value="checks">decides it passes</option>
+          </select>
+          <input
+            style={{ ...S.field, flex: 1 }}
+            value={c.what}
+            placeholder="what somebody doing this is for"
+            onChange={(e) => setCap(i, { what: e.target.value })}
+          />
+          <button
+            style={S.linkBtn}
+            title="take this one off"
+            onClick={() =>
+              onChange({
+                capabilities: floor.capabilities.filter((_, at) => at !== i),
+                // A role holding a word that no longer exists lints as a broken
+                // floor, so it goes from the roles with it.
+                roles: Object.fromEntries(
+                  Object.entries(floor.roles).map(([id, def]) => [
+                    id,
+                    { ...def, can: def.can.filter((w) => w !== c.name) }
+                  ])
+                )
+              })
+            }
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button
+        style={S.btn}
+        onClick={() =>
+          onChange({ capabilities: [...floor.capabilities, { name: freeName(floor), what: '' }] })
+        }
+      >
+        + a kind of work
+      </button>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 14 }}>the board</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+        The stages a card moves through. `start` is where a new one lands, `done` is finished, and
+        a floor needs both.
+      </div>
+      {floor.columns.map((c, i) => (
+        <div key={i} style={S.line}>
+          <input
+            style={{ ...S.field, width: 110 }}
+            value={c.label}
+            placeholder="chờ duyệt"
+            onChange={(e) => setCol(i, { label: e.target.value })}
+          />
+          <input
+            type="color"
+            style={{ ...S.field, width: 34, padding: 0 }}
+            value={c.bar}
+            onChange={(e) => setCol(i, { bar: e.target.value })}
+          />
+          <select
+            style={{ ...S.field, width: 92 }}
+            value={c.kind ?? ''}
+            onChange={(e) => setCol(i, { kind: e.target.value || undefined })}
+          >
+            <option value="">just a column</option>
+            {['start', 'working', 'waiting', 'stuck', 'done'].map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+          <button
+            style={S.linkBtn}
+            title="take this stage off"
+            onClick={() => onChange({ columns: floor.columns.filter((_, at) => at !== i) })}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button
+        style={S.btn}
+        onClick={() =>
+          onChange({
+            columns: [
+              ...floor.columns,
+              { key: freeColumnKey(floor), label: 'a new stage', bar: '#7fc7e8' }
+            ]
+          })
+        }
+      >
+        + a stage
+      </button>
+    </div>
+  )
+}
+
+/** A capability name nobody has taken. */
+const freeName = (floor: WorkflowInfo): string => {
+  for (let n = 1; ; n++) {
+    const name = `work_${n}`
+    if (!floor.capabilities.some((c) => c.name === name)) return name
+  }
+}
+
+/** A column key nobody has taken - the key is what a card is stored under. */
+const freeColumnKey = (floor: WorkflowInfo): string => {
+  for (let n = 1; ; n++) {
+    const key = `stage_${n}`
+    if (!floor.columns.some((c) => c.key === key)) return key
+  }
 }
 
 /**
@@ -1432,7 +1660,7 @@ function TalkBox({
     (to === floor.human ? r.to === floor.human : matchesRole(floor, to, r.to))
 
   const mine = floor.cardRules.filter(belongs)
-  const [text, setText] = useState(() => writeTalk(mine, floor.columns))
+  const [text, setText] = useState(() => writeTalk(mine, floor.columns, floor.says))
   const name = (r: string): string => (r === floor.human ? 'you' : (floor.roles[r]?.label ?? r))
 
   return (
@@ -1455,7 +1683,8 @@ function TalkBox({
             e.target.value,
             floor.columns,
             from,
-            to === floor.human ? floor.human : to
+            to === floor.human ? floor.human : to,
+            floor.says
           )
           onChange({ cardRules: [...kept, ...mineNow] as typeof floor.cardRules })
         }}
@@ -1474,19 +1703,32 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 /** The floating panel's box, which two places have to agree on. */
-const PANEL_W = 330
-const PANEL_H = 460
+/** What the column is showing, said once at the top of it. */
+const PANEL_TITLE: Record<string, string> = {
+  role: 'this role',
+  edge: 'this line',
+  company: 'the company',
+  floors: 'another floor',
+  try: 'try a task',
+  file: 'the whole file'
+}
 
 const S: Record<string, React.CSSProperties> = {
   wrap: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'hidden' },
   bar: { display: 'flex', gap: 6, alignItems: 'center', flex: '0 0 auto' },
+  sideHead: { display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto', marginBottom: 6 },
+  /** The one thing that scrolls, and it is as tall as the dialog. */
+  sideBody: { flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 2 },
   body: { flex: 1, display: 'flex', gap: 10, minHeight: 0 },
   side: {
     flex: '0 0 420px',
     minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
-    overflow: 'auto',
+    // The header stays where it is and `sideBody` is what moves: a title that
+    // scrolls away leaves a column of controls with nothing saying what they
+    // are about.
+    minHeight: 0,
     padding: 10,
     border: '1px solid var(--line)',
     background: 'var(--panel)'
@@ -1545,26 +1787,7 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer'
   },
   /** Over the drawing, near what was clicked - not a column that is always there. */
-  panel: {
-    position: 'absolute',
-    // Above the drawing and above the line labels: at z-index 2 the lines and
-    // their handles were painted over the top of it.
-    zIndex: 5,
-    width: PANEL_W,
-    maxHeight: PANEL_H,
-    // Padding and border inside the width, so the number the clamp uses is the
-    // number the panel is - it hung 22px off the right edge otherwise.
-    boxSizing: 'border-box',
-    overflow: 'auto',
-    background: 'var(--panel)',
-    border: '1px solid var(--line)',
-    boxShadow: '0 4px 18px rgba(0,0,0,0.45)',
-    padding: 10
-  },
   close: {
-    position: 'absolute',
-    right: 6,
-    top: 4,
     background: 'none',
     border: 0,
     color: 'var(--faint)',
@@ -1572,6 +1795,18 @@ const S: Record<string, React.CSSProperties> = {
     font: 'inherit'
   },
   line: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 },
+  /** A word you can turn on, for the ones a floor names itself. */
+  choice: {
+    border: '1px solid var(--line)',
+    background: 'var(--sunk)',
+    color: 'var(--muted)',
+    padding: '2px 7px',
+    font: `11px ${MONO}`,
+    cursor: 'pointer',
+    userSelect: 'none'
+  },
+  choiceOn: { background: 'var(--accent)', borderColor: 'var(--accent)', color: '#241f1a' },
+  checkRow: { display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' },
   card: {
     border: '1px solid var(--line)',
     background: 'var(--sunk)',

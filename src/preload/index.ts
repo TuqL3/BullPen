@@ -81,7 +81,7 @@ export type WorkflowInfo = {
   /** What a hire is when nothing said which kind. */
   hires?: string
   /** What this floor calls the things a role can do, and what each behaves like. */
-  capabilities: { name: string; what: string }[]
+  capabilities: { name: string; what: string; kind?: string }[]
   /** The board's columns, under this floor's names for them. */
   columns: { key: string; label: string; bar: string; kind?: string }[]
   /** What a message between two roles does to a card. First match wins. */
@@ -91,6 +91,12 @@ export type WorkflowInfo = {
   /** What the human is addressed as here, and what asking for an agent is called. */
   human: string
   hire: string
+  /**
+   * This floor's own words for the three things a card rule can say that are
+   * not the name of a column, and for the word before the reason. Absent means
+   * the format's own - which is what every floor written before this used.
+   */
+  says?: { open?: string; closes?: string; theirs?: string; when?: string }
 }
 
 export type Dispatch = { text: string; owner: string; project: string; ts: number }
@@ -117,7 +123,6 @@ export type FloorAgent = {
 export type GitChange = { path: string; code: string; staged: boolean; untracked: boolean }
 export type GitChanges = { repo: boolean; changes: GitChange[]; branch?: string; error?: string }
 export type CodeEntry = { name: string; path: string; dir: boolean; size: number }
-export type CodeEdit = { path: string; ts: number; tool: string }
 export type Hit = {
   path: string
   line: number
@@ -183,9 +188,17 @@ const api = {
   closeWindow: () => ipcRenderer.invoke('window:close'),
   /** macOS keeps its native traffic lights; everywhere else we draw our own. */
   isMac: process.platform === 'darwin',
-  spawn: (spec: { id: string; cwd: string; cmd?: string; args?: string[]; cols?: number; rows?: number }) =>
-    ipcRenderer.invoke('agent:spawn', spec),
-  listAgents: () => ipcRenderer.invoke('agent:list'),
+  /** `role` decides the brief the CLI is handed and the tools it is refused,
+   *  both read once at spawn - so it has to go out with the spawn, not after. */
+  spawn: (spec: {
+    id: string
+    cwd: string
+    cmd?: string
+    args?: string[]
+    cols?: number
+    rows?: number
+    role?: string
+  }) => ipcRenderer.invoke('agent:spawn', spec),
   kill: (id: string) => ipcRenderer.invoke('agent:kill', id),
 
   write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
@@ -200,11 +213,8 @@ const api = {
   onTool: (fn: (id: string, tool: string, detail: string) => void) => on('agent:tool', fn),
   /** `asked` is null once the agent is no longer stopped on its own question. */
   onWaiting: (fn: (id: string, asked: string | null) => void) => on('agent:waiting', fn),
-  ctx: (id: string): Promise<{ used: number; limit: number; pct: number; model: string } | null> =>
-    ipcRenderer.invoke('agent:ctx', id),
   onCtx: (fn: (id: string, ctx: { used: number; limit: number; pct: number; model: string }) => void) =>
     on('agent:ctx', fn),
-  cost: (id: string): Promise<AgentCost | null> => ipcRenderer.invoke('agent:cost', id),
   onCost: (fn: (id: string, cost: AgentCost) => void) => on('agent:cost', fn),
   steer: (id: string, note: string) => ipcRenderer.invoke('agent:steer', id, note),
   steers: (id: string): Promise<string[]> => ipcRenderer.invoke('agent:steers', id),
@@ -213,7 +223,6 @@ const api = {
   /** The queue was dropped rather than delivered - the agent was halted. */
   onSteerCleared: (fn: (id: string, notes: string[]) => void) => on('agent:steer-cleared', fn),
 
-  listApprovals: () => ipcRenderer.invoke('approvals:list'),
   decide: (id: string, decision: 'allow' | 'deny') => ipcRenderer.invoke('approvals:decide', id, decision),
   onPending: (fn: (p: unknown) => void) => on('approvals:pending', fn),
   onResolved: (fn: (p: unknown, decision: string) => void) => on('approvals:resolved', fn),
@@ -221,9 +230,6 @@ const api = {
   activity: (limit?: number): Promise<ActivityItem[]> => ipcRenderer.invoke('activity:list', limit),
   onActivity: (fn: (item: ActivityItem) => void) => on('activity:item', fn),
   /** An agent finished a turn, with the last thing it said. */
-  onFinished: (fn: (r: { id: string; text: string | null; at: number }) => void) =>
-    on('agent:finished', fn),
-
   askList: (): Promise<Question[]> => ipcRenderer.invoke('ask:list'),
   askAnswer: (qid: string, answer: string) => ipcRenderer.invoke('ask:answer', qid, answer),
   askDismiss: (qid: string) => ipcRenderer.invoke('ask:dismiss', qid),
@@ -235,7 +241,6 @@ const api = {
   lastDispatch: (): Promise<Dispatch | null> => ipcRenderer.invoke('dispatch:last'),
   onDispatch: (fn: (d: Dispatch) => void) => on('dispatch:new', fn),
 
-  setGod: (id: string) => ipcRenderer.invoke('agent:setGod', id),
   /** Say what a hand-made agent is for: it decides how its cards move. */
   setRole: (id: string, role: string) => ipcRenderer.invoke('agent:setRole', id, role),
   /**
@@ -293,7 +298,6 @@ const api = {
   ): Promise<{ markdown?: string; problems?: string[]; error?: string }> =>
     ipcRenderer.invoke('workflow:generate', description),
   /** An annotated empty floor, for a first workflow. */
-  workflowStarter: (): Promise<string> => ipcRenderer.invoke('workflow:starter'),
   /** A new chart: you, whoever takes what you dispatch, and the two rules between. */
   workflowBlank: (): Promise<string> => ipcRenderer.invoke('workflow:blank'),
   /**
@@ -321,20 +325,6 @@ const api = {
     ends?: string
     error?: string
   }> => ipcRenderer.invoke('workflow:dryRun', markdown, task),
-  /**
-   * The rules in force: what a floor may contain, and which checks run. `custom`
-   * says whether they are yours or the ones Bullpen ships.
-   */
-  workflowFormat: (): Promise<{ text: string; path: string; custom: boolean }> =>
-    ipcRenderer.invoke('workflow:format'),
-  /**
-   * Replace the format document with your own, or hand it back: an empty string
-   * deletes the override and the shipped one is in force again.
-   */
-  writeWorkflowFormat: (
-    text: string
-  ): Promise<{ text?: string; path?: string; custom?: boolean; error?: string }> =>
-    ipcRenderer.invoke('workflow:writeFormat', text),
   /** What the floor being drawn reads as, without saving it. */
   previewWorkflow: (
     patch: Partial<WorkflowInfo>
@@ -359,8 +349,6 @@ const api = {
   }> =>
     ipcRenderer.invoke('workflow:patch', patch),
   /** Keep one without running it. */
-  saveWorkflow: (markdown: string): Promise<{ name?: string; error?: string }> =>
-    ipcRenderer.invoke('workflow:save', markdown),
   deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('workflow:delete', name),
   /** Put back every floor that was taken off the list. */
@@ -416,7 +404,6 @@ const api = {
     ipcRenderer.invoke('code:read', root, rel),
   codeWrite: (root: string, rel: string, text: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('code:write', root, rel, text),
-  codeEdits: (agentId: string): Promise<CodeEdit[]> => ipcRenderer.invoke('code:edits', agentId),
   /** Plain text search across the agent's workspace. Bounded; see code.ts. */
   codeSearch: (
     root: string,
@@ -427,15 +414,6 @@ const api = {
     only?: string[]
   ): Promise<SearchResult> =>
     ipcRenderer.invoke('code:search', root, query, caseSensitive, regex, only),
-  /** `fresh` starts another shell beside the ones already open, rather than
-   *  handing back the one that is running. */
-  openShell: (
-    agentId: string,
-    cwd: string,
-    size: { cols: number; rows: number },
-    fresh = false
-  ): Promise<{ id: string; cwd: string; pid: number; status: string }> =>
-    ipcRenderer.invoke('shell:open', agentId, cwd, size, fresh),
   gitChanges: (root: string): Promise<GitChanges> => ipcRenderer.invoke('git:changes', root),
   gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
     ipcRenderer.invoke('git:diff', root, rel),
@@ -454,15 +432,6 @@ const api = {
     marker: string
   ): Promise<{ ok?: true; error?: string }> =>
     ipcRenderer.invoke('git:discardBlock', root, rel, hunk, block, marker),
-  /** The same for one hunk. `marker` is the `@@` line the panel is showing, so
-   *  a stale panel cannot revert the wrong part of the file. */
-  gitDiscardHunk: (
-    root: string,
-    rel: string,
-    index: number,
-    marker: string
-  ): Promise<{ ok?: true; error?: string }> =>
-    ipcRenderer.invoke('git:discardHunk', root, rel, index, marker),
   onEdited: (fn: (agentId: string, path: string) => void) => on('code:edited', fn),
   /** An agent Michael hired: main spawned it, the roster has never seen it. */
   onHired: (
@@ -494,23 +463,16 @@ const api = {
     ipcRenderer.invoke('search:text', q),
 
   setTaskStatus: (id: string, status: string) => ipcRenderer.invoke('board:setTaskStatus', id, status),
-  assignTask: (id: string, agentId: string) => ipcRenderer.invoke('board:assignTask', id, agentId),
   tasks: (id?: string) => ipcRenderer.invoke('board:tasks', id),
   addTask: (id: string, text: string) => ipcRenderer.invoke('board:addTask', id, text),
-  toggleTask: (id: string) => ipcRenderer.invoke('board:toggleTask', id),
   removeTask: (id: string) => ipcRenderer.invoke('board:removeTask', id),
   triggers: (id?: string) => ipcRenderer.invoke('board:triggers', id),
   addTrigger: (id: string, prompt: string, mins: number) =>
     ipcRenderer.invoke('board:addTrigger', id, prompt, mins),
   toggleTrigger: (id: string) => ipcRenderer.invoke('board:toggleTrigger', id),
   removeTrigger: (id: string) => ipcRenderer.invoke('board:removeTrigger', id),
-  onTriggerFired: (fn: (id: string, prompt: string) => void) => on('agent:trigger-fired', fn),
   memory: (cwd: string): Promise<{ name: string; text: string } | null> =>
     ipcRenderer.invoke('agent:memory', cwd),
-
-  sendMail: (msg: { from: string; to: string; subject: string; body: string }) =>
-    ipcRenderer.invoke('hive:send', msg),
-  inbox: (id: string) => ipcRenderer.invoke('hive:inbox', id),
   onDeliver: (fn: (d: unknown) => void) => on('hive:deliver', fn),
   /** The board, whenever it changes - agents write to it as well as you do. */
   onTasks: (fn: (tasks: unknown[]) => void) => on('board:tasks', fn),

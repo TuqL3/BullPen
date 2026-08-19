@@ -45,6 +45,12 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
   useEffect(() => {
     setMode('read')
     setNote('')
+    // Cleared, not left standing while the new one is read. `memory()` is a
+    // round trip, and `split` is one click away the whole time it is in flight
+    // - opening the editor in that window seeded the draft from the agent you
+    // just left, and saving wrote their rules into this one's workspace, which
+    // is the thing switching agents is supposed to make impossible.
+    setDoc(null)
     load()
   }, [agent?.id, agent?.cwd])
 
@@ -148,7 +154,10 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
           <span
             key={m}
             style={{ ...S.choice, ...(mode === m ? S.choiceOn : null) }}
-            onClick={() => (m === 'read' ? setMode('read') : open('split'))}
+            onClick={() => {
+              if (loading) return
+              return m === 'read' ? setMode('read') : open('split')
+            }}
           >
             {m}
           </span>

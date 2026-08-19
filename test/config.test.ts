@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { checkWorkspace, configPath, readConfig, writeConfig } from '../src/main/config.ts'
+import { checkWorkspace, configPath, mergeUi, readConfig, writeConfig } from '../src/main/config.ts'
 
 const home = (): string => mkdtempSync(join(tmpdir(), 'bp-cfg-'))
 
@@ -139,3 +139,33 @@ test('floors taken off the list survive a restart', () => {
   rmSync(home, { recursive: true, force: true })
 })
 
+
+test('a ui preference nobody named survives one that is set', () => {
+  // Removing a shipped floor is a note in `ui.hidden` - it has no file to
+  // delete. The prefs handler rebuilt `ui` from the four fields it knew about,
+  // so changing the font size, or dragging one box on the chart, put every
+  // removed floor back on the list without a word.
+  const current = {
+    fontSize: 12.5,
+    floor: 'green',
+    hidden: ['analyst-chain', 'solo'],
+    chart: { 'floor-a': { boss: { x: 1, y: 2 } } },
+    view: { 'floor-a': { k: 1, tx: 0, ty: 0 } }
+  }
+
+  const bigger = mergeUi(current, { fontSize: 16 })
+  assert.deepEqual(bigger.hidden, ['analyst-chain', 'solo'], 'still removed')
+  assert.equal(bigger.fontSize, 16)
+  assert.equal(bigger.floor, 'green', 'and untouched fields keep their value')
+
+  // One floor's chart saved does not wipe another's, and hidden still stands.
+  const moved = mergeUi(current, { chart: { 'floor-b': { boss: { x: 9, y: 9 } } } })
+  assert.deepEqual(Object.keys(moved.chart ?? {}).sort(), ['floor-a', 'floor-b'])
+  assert.deepEqual(moved.hidden, ['analyst-chain', 'solo'])
+  assert.deepEqual(moved.view, current.view)
+
+  // Out-of-range font sizes are still clamped rather than trusted.
+  assert.equal(mergeUi(current, { fontSize: 400 }).fontSize, 24)
+  assert.equal(mergeUi(current, { fontSize: 1 }).fontSize, 9)
+  assert.equal(mergeUi(undefined, {}).floor, 'green')
+})

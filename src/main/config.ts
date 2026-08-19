@@ -188,3 +188,25 @@ export function checkWorkspace(dir: string, home: string): string | null {
   if (!existsSync(path) && !existsSync(parent)) return `${parent} does not exist`
   return null
 }
+
+/**
+ * Fold a partial UI preference into the one on disk.
+ *
+ * Here rather than inline in the handler because the handler rebuilt the whole
+ * `ui` object from the four fields it knew about, and `hidden` was not one of
+ * them - so changing the font size, or dragging one box on the chart, silently
+ * put every floor the operator had removed back on the list. Anything this does
+ * not name is carried through untouched, which is the only version of this that
+ * stays right when a fifth field is added.
+ */
+export function mergeUi(current: Config['ui'], next: NonNullable<Config['ui']>): NonNullable<Config['ui']> {
+  return {
+    ...current,
+    ...next,
+    fontSize: Math.min(24, Math.max(9, Number(next.fontSize ?? current?.fontSize ?? 12.5))),
+    floor: (next.floor ?? current?.floor ?? 'green').trim() || 'green',
+    // Per floor, so saving one chart does not wipe the others.
+    chart: { ...(current?.chart ?? {}), ...(next.chart ?? {}) },
+    view: { ...(current?.view ?? {}), ...(next.view ?? {}) }
+  }
+}

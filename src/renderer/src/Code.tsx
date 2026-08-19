@@ -234,6 +234,11 @@ function Search({
    * with no rows loaded searches itself when it is opened.
    */
   const [extra, setExtra] = useState<Record<string, Hit[]>>({})
+  // Keyed by path alone, so it outlived the search it was fetched for: expand a
+  // capped file, change the query, expand it again, and the early return handed
+  // back the previous query's lines under the new one. Dropped whenever what is
+  // being searched for changes.
+  useEffect(() => setExtra({}), [query, aa, re, agent.cwd])
   const loadFile = async (path: string): Promise<void> => {
     if (byFile[path] || extra[path]) return
     const one = await window.bullpen.codeSearch(agent.cwd, query, aa, re, [path])
@@ -977,6 +982,8 @@ function Editor({
   // Kept in a ref so `:w` writes the current buffer rather than the text this
   // effect closed over when the file was opened.
   const view = useRef<EditorView | null>(null)
+  /** The text this buffer was last filled from, so an untouched one is known. */
+  const loaded = useRef(text)
 
   useEffect(() => {
     if (!host.current) return
@@ -1050,8 +1057,26 @@ function Editor({
       })
     })
     view.current = v
+    loaded.current = text
     return () => v.destroy()
   }, [path])
+
+  /**
+   * Take a newer copy of the file, but only over a buffer nobody has typed in.
+   *
+   * The editor is keyed on the path, so re-opening a file an agent has since
+   * rewritten changed nothing: the panel went on showing what was read the
+   * first time, and Ctrl-S wrote that back over the agent's work. Replacing it
+   * only when the document still matches what was loaded is the half that is
+   * always safe - a buffer with unsaved edits in it is never touched.
+   */
+  useEffect(() => {
+    const v = view.current
+    if (!v || text === loaded.current) return
+    if (v.state.doc.toString() !== loaded.current) return
+    v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } })
+    loaded.current = text
+  }, [text])
 
   /**
    * Put the cursor on the line that was clicked, and scroll it into view.
@@ -1140,17 +1165,6 @@ const STATUS_COLOUR = (code: string): string => {
 }
 
 const base = (p: string): string => p.split('/').pop() ?? p
-
-/** Hook payloads carry absolute paths; the panels work in workspace-relative ones. */
-const rel = (root: string, p: string): string =>
-  p.startsWith(root) ? p.slice(root.length).replace(/^\//, '') : p
-
-const ago = (ts: number): string => {
-  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.round(s / 60)}m`
-  return `${Math.round(s / 3600)}h`
-}
 
 const size = (n: number): string => (n < 1024 ? `${n}b` : `${Math.round(n / 1024)}k`)
 

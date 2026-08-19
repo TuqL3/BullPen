@@ -66,7 +66,7 @@ export type Reserved = { human: string; hire: string }
  * `subject` is the project, `body` is the briefing the new agent starts with,
  * and `cwd` names the directory when the project does not exist yet.
  */
-export const HIRE = 'hire'
+const HIRE = 'hire'
 
 /**
  * File-based agent mailbox.

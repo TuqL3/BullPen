@@ -16,6 +16,8 @@ export type ReapResult = {
   id: string
   pid: number
   outcome: 'killed' | 'already-gone' | 'not-ours'
+  /** Carried through so the SIGKILL pass can re-check it; see `forceKill`. */
+  marker?: string
 }
 
 const PID_FILE = 'pid.json'
@@ -124,7 +126,7 @@ export function reapOrphans(agentsRoot: string): ReapResult[] {
     } catch {
       // Raced with its own exit; the SIGKILL below is a no-op then.
     }
-    out.push({ id, pid: rec.pid, outcome: 'killed' })
+    out.push({ id, pid: rec.pid, outcome: 'killed', marker: rec.marker })
     rmSync(file, { force: true })
   }
   return out
@@ -138,7 +140,14 @@ export function forceKill(results: ReapResult[]): void {
   for (const r of results) {
     if (r.outcome !== 'killed') continue
     try {
-      if (isAlive(r.pid)) process.kill(r.pid, 'SIGKILL')
+      if (!isAlive(r.pid)) continue
+      // The pid was ours when SIGTERM went out. It may not be by now: the
+      // process can have exited in the wait and the number been handed to
+      // something else. The marker check is the same one that decided to kill
+      // it in the first place, and skipping it here would make the second pass
+      // the unsafe half of a guard the first half takes seriously.
+      if (r.marker && !processCommand(r.pid).includes(r.marker)) continue
+      process.kill(r.pid, 'SIGKILL')
     } catch {
       // Already dead - the desired state.
     }

@@ -59,6 +59,21 @@ export {
 export type CapabilityDef = {
   name: string
   what: string
+  /**
+   * Which of the four this word behaves like, when the floor says.
+   *
+   * Read again after being ignored for a while. The card rules say the same
+   * thing and say it better - `drafts → proofs: in review` names both sides -
+   * so this was a second copy that could disagree with them. But it is the only
+   * thing a floor can say *before* there are any rules, and without it a floor
+   * drawn from scratch cannot be asked who assigns or who checks: both answers
+   * come from the rules, and the rules were what we were trying to derive.
+   *
+   * So it is consulted only when there are no card rules at all. A floor with
+   * one written rule is read the way it always was, and the two can never
+   * contradict each other because only one of them is ever asked.
+   */
+  kind?: CapabilityKind
 }
 
 /**
@@ -164,10 +179,10 @@ export const hasColumn = (w: Workflow, kind: ColumnKind): boolean =>
 
 /** The four kinds as capabilities, for a floor that declares none of its own. */
 export const DEFAULT_CAPABILITIES: CapabilityDef[] = [
-  { name: 'speaksToHuman', what: 'may write to "you"' },
-  { name: 'assigns', what: 'hands work out and may hire' },
-  { name: 'builds', what: 'does the work and reports when done' },
-  { name: 'checks', what: 'decides whether it passes' }
+  { name: 'speaksToHuman', kind: 'speaksToHuman', what: 'may write to "you"' },
+  { name: 'assigns', kind: 'assigns', what: 'hands work out and may hire' },
+  { name: 'builds', kind: 'builds', what: 'does the work and reports when done' },
+  { name: 'checks', kind: 'checks', what: 'decides whether it passes' }
 ]
 
 
@@ -281,7 +296,25 @@ export type Workflow = {
   voice?: string
   /** What a hire is when nothing said which kind. Empty means the first hireable one. */
   hires?: string
+  /**
+   * This floor's own words for the three things a card rule can say that are
+   * not the name of a column.
+   *
+   * A floor is written in whatever language its people work in - roles, board
+   * columns, briefs and capabilities all already are. These three were not:
+   * `opens a card`, `closes it` and `(their card)` were matched in English, so
+   * a rule written `mở thẻ` was refused and the file could not be finished in
+   * the language the rest of it was in. Absent means the format's own words,
+   * which every floor written before this used.
+   */
+  says?: { open?: string; closes?: string; theirs?: string; when?: string }
 }
+
+/** What this floor calls a rule that opens a card, closes one, or moves theirs. */
+export const saysOpen = (w: Pick<Workflow, 'says'>): string => w.says?.open?.trim() || 'opens a card'
+export const saysCloses = (w: Pick<Workflow, 'says'>): string => w.says?.closes?.trim() || 'closes it'
+export const saysTheirs = (w: Pick<Workflow, 'says'>): string => w.says?.theirs?.trim() || 'their card'
+export const saysWhen = (w: Pick<Workflow, 'says'>): string => w.says?.when?.trim() || 'when'
 
 /**
  * A blank left unfilled in the starter: `«Display Name»`.
@@ -322,8 +355,24 @@ const holds = (w: Workflow, role: string, word: string): boolean =>
  */
 export const rolesWith = (w: Workflow, kind: CapabilityKind): string[] => {
   const names = Object.keys(w.roles)
+  /**
+   * Who a rule of this shape names, or - on a floor that has written none -
+   * whoever holds a word the floor declared as that kind.
+   *
+   * The rules are the better answer and they win whenever there are any: they
+   * name both sides. But a floor drawn from scratch has none, and both of the
+   * questions the derived rules need are answered by the rules - so a floor
+   * with no rules could not be asked who assigns, and nothing it did reached
+   * the board. The capability's own bracket is what it can be asked instead.
+   */
   const fromRules = (status: string): string[] =>
-    names.filter((r) => w.cardRules.some((rule) => rule.status === status && holds(w, r, rule.from)))
+    w.cardRules.length
+      ? names.filter((r) => w.cardRules.some((rule) => rule.status === status && holds(w, r, rule.from)))
+      : names.filter((r) =>
+          (w.roles[r]?.can ?? []).some(
+            (c) => w.capabilities.find((d) => d.name === c)?.kind === (status === 'open' ? 'assigns' : 'checks')
+          )
+        )
 
   if (kind === 'speaksToHuman') {
     if (w.voice && w.roles[w.voice]) return [w.voice]
@@ -343,6 +392,49 @@ export const rolesWith = (w: Workflow, kind: CapabilityKind): string[] => {
   ])
   const rest = names.filter((r) => !taken.has(r))
   return rest.length ? rest : names.filter((r) => w.roles[r].hireable)
+}
+
+/**
+ * What a floor that has written no card rules of its own does to the board.
+ *
+ * Every one of these was a branch in `cards.ts` once. They moved into the file
+ * so a floor of writers could say `drafts → proofs: in review` and have it mean
+ * something - and then no floor shipped with any, so a floor out of the box
+ * moved no cards at all and every arrow had to be written on by hand before
+ * anything appeared on the board.
+ *
+ * They are back as a default rather than a branch: derived from who does what
+ * and what the board's stages are for, consulted only when the floor has
+ * written nothing, and beaten by any rule that is written. Roles are named
+ * rather than capabilities, because the capability is whatever this floor
+ * called it and the role is not.
+ */
+export function defaultCardRules(w: Workflow): CardRule[] {
+  if (w.cardRules.length) return w.cardRules
+  const voice = rolesWith(w, 'speaksToHuman')
+  const assigns = rolesWith(w, 'assigns')
+  const builds = rolesWith(w, 'builds')
+  const checks = rolesWith(w, 'checks')
+  const col = (kind: ColumnKind): string => columnFor(w, kind)
+  const out: CardRule[] = []
+  const add = (from: string, to: string, status: string, whose?: 'to'): void => {
+    if (!from || !to || !status) return
+    out.push({ from, to, status, ...(whose ? { whose } : {}) })
+  }
+
+  // Handing work over opens a card, whoever hands it over.
+  for (const a of [...assigns, ...voice]) add(a, 'staff', 'open')
+  // Built, and waiting on whoever decides it passed.
+  for (const b of builds) for (const a of assigns) add(b, a, col('waiting'))
+  for (const b of builds) for (const c of checks) add(b, c, col('waiting'))
+  // Sent back: the card that moves is the builder's, not the checker's.
+  for (const c of checks) for (const b of builds) add(c, b, col('working'), 'to')
+  // Passed. This closes the work being checked as well as the checker's card.
+  for (const c of checks) for (const a of assigns) add(c, a, 'closes')
+  // And up, until somebody tells the human.
+  for (const a of assigns) for (const v of voice) add(a, v, col('done'))
+  for (const v of voice) add(v, w.human, col('done'))
+  return out
 }
 
 export const can = (w: Workflow, role: string, kind: CapabilityKind): boolean =>
@@ -681,6 +773,18 @@ export function lint(w: Workflow, rules?: Rules): string[] {
  * Hand-edited JSON is the point of this file, so a bad shape has to come back
  * as a sentence rather than a crash on the first missing field.
  */
+/**
+ * A percentage, or the one that was already there.
+ *
+ * The two context thresholds arrive from a number input, and an input somebody
+ * has cleared hands back `NaN`. Stored, it made `pickForRole` compare against
+ * it - every comparison false, so nobody was ever free and every hand-off hired
+ * somebody new - and put "reuse one whose ctxPct is under NaN" into a brief a
+ * real agent then tried to follow.
+ */
+export const pctOr = (v: unknown, fallback: number): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.min(100, Math.max(1, Math.round(v))) : fallback
+
 export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'A workflow must be a JSON object.' }
   const o = raw as Record<string, unknown>
@@ -740,7 +844,13 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
     typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : fallback
 
   const caps = Array.isArray(o.capabilities)
-    ? (o.capabilities as CapabilityDef[]).filter((c) => c && typeof c.name === 'string')
+    ? (o.capabilities as CapabilityDef[])
+        .filter((c) => c && typeof c.name === 'string')
+        .map((c) => ({
+          name: c.name,
+          what: typeof c.what === 'string' ? c.what : '',
+          ...((CAPABILITY_KINDS as readonly string[]).includes(c.kind ?? '') ? { kind: c.kind } : {})
+        }))
     : []
   const cols = Array.isArray(o.columns)
     ? (o.columns as Column[]).filter((c) => c && typeof c.key === 'string' && c.key.trim())
@@ -771,6 +881,16 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
     hire: typeof o.hire === 'string' && o.hire.trim() ? o.hire.trim() : HIRE_PARTY,
     ...(typeof o.voice === 'string' && o.voice.trim() ? { voice: o.voice.trim() } : {}),
     ...(typeof o.hires === 'string' && o.hires.trim() ? { hires: o.hires.trim() } : {}),
+    ...(o.says && typeof o.says === 'object'
+      ? {
+          says: Object.fromEntries(
+            Object.entries(o.says as Record<string, unknown>).filter(
+              ([k, v]) =>
+                ['open', 'closes', 'theirs', 'when'].includes(k) && typeof v === 'string' && v.trim()
+            )
+          ) as Workflow['says']
+        }
+      : {}),
     dispatch: typeof o.dispatch === 'string' ? o.dispatch : Object.keys(roles)[0] ?? '',
     entry: typeof o.entry === 'string' ? o.entry : typeof o.dispatch === 'string' ? o.dispatch : '',
     reuseBelowPct: pct(o.reuseBelowPct, 50),
@@ -855,7 +975,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
 
   /** `- key: value` out of a block of lines, case- and spacing-insensitive. */
   const field = (block: string[], key: string): string | null => {
-    const re = new RegExp(`^\\s*[-*]\\s*${key}\\s*:\\s*(.+)$`, 'i')
+    const re = new RegExp(`^\\s*[-*+]\\s*${key}\\s*:\\s*(.+)$`, 'i')
     for (const l of block) {
       const m = re.exec(l)
       if (m) return m[1].trim()
@@ -864,7 +984,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
   }
   /** A bare `- flag` with no value. */
   const flag = (block: string[], word: string): boolean =>
-    block.some((l) => new RegExp(`^\\s*[-*]\\s*${word}\\s*$`, 'i').test(l))
+    block.some((l) => new RegExp(`^\\s*[-*+]\\s*${word}\\s*$`, 'i').test(l))
 
   // `Number('')` is 0, not NaN, so a missing field has to be caught before the
   // conversion - otherwise every unset threshold reads as zero and lints as
@@ -969,23 +1089,30 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
 
   // `- drafts (builds) — writes the first version`. The kind in brackets is what
   // the floor does with it; without one, the name has to be a kind itself.
-  const CAP_LINE = /^\s*[-*]\s*([\w-]+)\s*(?:\(([\w]+)\))?\s*(?:[—–·:-]+\s*(.*))?$/
+  const CAP_LINE = /^\s*[-*+]\s*([\w-]+)\s*(?:\(([\w]+)\))?\s*(?:[—–·:-]+\s*(.*))?$/
   const capabilities: CapabilityDef[] = []
   for (const line of asides.caps ?? []) {
     const m = CAP_LINE.exec(line)
     if (!m) continue
-    // A bracket used to say which of four things the app should treat it as.
-    // Nothing reads that now - the card rules and `talks to` already say it -
-    // so anything in brackets is ignored rather than refused: a floor written
-    // last week still opens.
-    capabilities.push({ name: m[1], what: (m[3] ?? '').trim() })
+    // `- drafts (builds) — writes the first version`. What the floor does with
+    // the word, for a floor that has not written any card rules yet. Anything
+    // in the brackets that is not one of the four is ignored rather than
+    // refused: a floor written before this still opens.
+    const kind = (CAPABILITY_KINDS as readonly string[]).includes(m[2] ?? '')
+      ? (m[2] as CapabilityKind)
+      : undefined
+    capabilities.push({ name: m[1], what: (m[3] ?? '').trim(), ...(kind ? { kind } : {}) })
   }
 
   // `- in_review: In review #c9a2e8 (waiting)`. The key is this board's own -
   // it is what a card is stored under - and the kind in brackets is what the
   // floor uses the column for when nobody sent a message.
+  // The label is whatever is left once the colour and the kind have been taken
+  // off the end - not "anything that is not a # or a bracket". Excluding them
+  // meant a column called `C# work` or `to #do` matched nothing at all and was
+  // dropped without a word, taking the board's starting column with it.
   const COL_LINE =
-    /^\s*[-*]\s*([\w-]+)\s*[:·—–]\s*([^#(]*?)\s*(#[0-9a-fA-F]{3,8})?\s*(?:\(([\w]+)\))?\s*$/
+    /^\s*[-*+]\s*([\w-]+)\s*[:·—–]\s*(.*?)\s*(#[0-9a-fA-F]{3,8})?\s*(?:\(([\w]+)\))?\s*$/
   const written: Column[] = []
   for (const line of asides.board ?? []) {
     const m = COL_LINE.exec(line)
@@ -1023,12 +1150,29 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     return hit?.key ?? null
   }
 
+  /**
+   * What this floor calls the three things a rule can say that are not a column.
+   *
+   * The rest of a floor is written in the language its people work in; these
+   * were matched in English, so a rule written `mở thẻ` was refused and the
+   * file could not be finished in the language the rest of it was in. The
+   * format's own words still read, so nothing written before this stopped.
+   */
+  const said3 = (key: string, fallback: string): string =>
+    (field(header, key) ?? '').trim().toLowerCase() || fallback
+  const OPENS = said3('opens a card', 'opens a card')
+  const CLOSES = said3('closes it', 'closes it')
+  const THEIRS = said3('their card', 'their card')
+  const WHEN = said3('when', 'when')
+  const esc = (w: string): string => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const THEIRS_AT_END = new RegExp(`\\((${esc(THEIRS)}|their card|theirs)\\)\\s*$`, 'i')
+
   // `- drafts → assigns: in review`, and the two that are not columns:
   // `opens a card`, and `closes it` - which finishes the work being checked too.
   // `:` only. `·` already means something on this line - it separates what
   // happens from when it happens - and taking it as the first separator too
   // read "when: ..." as the status.
-  const RULE_LINE = /^\s*[-*]\s*(.+?)\s*(?:→|->|=>)\s*(.+?)\s*:\s*(.+?)\s*$/
+  const RULE_LINE = /^\s*[-*+]\s*(.+?)\s*(?:→|->|=>)\s*(.+?)\s*:\s*(.+?)\s*$/
   const cardRules: CardRule[] = []
   for (const line of asides.rules ?? []) {
     const m = RULE_LINE.exec(line)
@@ -1036,14 +1180,19 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     // "doing (their card) · when they send it back" - the bracket says whose
     // card moves, and anything after the dot is why the rule is there.
     const [saidPart, ...whenParts] = m[3].split('·')
-    const when = whenParts.join('·').replace(/^\s*when\s+/i, '').trim()
+    const when = whenParts
+      .join('·')
+      .replace(new RegExp(`^\\s*(?:${esc(WHEN)}|when)\\s+`, 'i'), '')
+      .trim()
     const said = saidPart.trim().toLowerCase()
-    const theirs = /\((their card|theirs)\)\s*$/i.test(said)
-    const words = saidPart.replace(/\((their card|theirs)\)\s*$/i, '').trim()
-    const status = /^opens?\b/.test(said) ? 'open' : /^closes?\b/.test(said) ? 'closes' : columnKey(words)
+    const theirs = THEIRS_AT_END.test(said)
+    const words = saidPart.replace(THEIRS_AT_END, '').trim()
+    const opens = said.startsWith(OPENS) || /^opens?\b/.test(said)
+    const closes = said.startsWith(CLOSES) || /^closes?\b/.test(said)
+    const status = opens ? 'open' : closes ? 'closes' : columnKey(words)
     if (!status) {
       return {
-        error: `"${m[3].trim()}" is not a column on this board, and not "opens a card" or "closes it".`
+        error: `"${m[3].trim()}" is not a column on this board, and not "${OPENS}" or "${CLOSES}".`
       }
     }
     cardRules.push({
@@ -1057,7 +1206,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
 
   // `- {{team}} — Falcon`. The braces are optional in the file; what reaches
   // `renderBrief` is the bare name, because that is what it substitutes.
-  const WORD_LINE = /^\s*[-*]\s*\{?\{?([\w.-]+)\}?\}?\s*[—–:-]+\s*(.*)$/
+  const WORD_LINE = /^\s*[-*+]\s*\{?\{?([\w.-]+)\}?\}?\s*[—–:-]+\s*(.*)$/
   const words: Record<string, string> = {}
   for (const line of asides.words ?? []) {
     const m = WORD_LINE.exec(line)
@@ -1090,7 +1239,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     // never told. Nothing errored; the instruction was simply gone.
     let end = 0
     for (let j = 0; j < body.length; j++) {
-      if (/^\s*[-*]\s+\S/.test(body[j])) {
+      if (/^\s*[-*+]\s+\S/.test(body[j])) {
         end = j + 1
         continue
       }
@@ -1134,7 +1283,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     const OWN = new Set(['agent', 'can', 'does', 'talks to', 'talksto', 'cli', 'cwd', 'never'])
     const attrs: Record<string, string> = {}
     for (const line of block) {
-      const m = /^\s*[-*]\s*([^:]+?)\s*:\s*(.+)$/.exec(line)
+      const m = /^\s*[-*+]\s*([^:]+?)\s*:\s*(.+)$/.exec(line)
       if (m && !OWN.has(m[1].trim().toLowerCase())) attrs[m[1].trim()] = m[2].trim()
     }
     roles[role] = {
@@ -1183,6 +1332,16 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
       human: field(header, 'human address')?.trim() || HUMAN_PARTY,
       hire: field(header, 'hire address')?.trim() || HIRE_PARTY,
       ...(field(header, 'reports to you') ? { voice: field(header, 'reports to you')!.trim() } : {}),
+      ...(OPENS !== 'opens a card' || CLOSES !== 'closes it' || THEIRS !== 'their card' || WHEN !== 'when'
+        ? {
+            says: {
+              ...(OPENS !== 'opens a card' ? { open: field(header, 'opens a card')!.trim() } : {}),
+              ...(CLOSES !== 'closes it' ? { closes: field(header, 'closes it')!.trim() } : {}),
+              ...(THEIRS !== 'their card' ? { theirs: field(header, 'their card')!.trim() } : {}),
+              ...(WHEN !== 'when' ? { when: field(header, 'when')!.trim() } : {})
+            }
+          }
+        : {}),
       ...(field(header, 'hires') ? { hires: field(header, 'hires')!.trim() } : {})
     }
   }
@@ -1202,12 +1361,18 @@ export function toMarkdown(w: Workflow): string {
   if (w.human !== HUMAN_PARTY) out.push(`- human address: ${w.human}`)
   if (w.hire !== HIRE_PARTY) out.push(`- hire address: ${w.hire}`)
   if (w.voice) out.push(`- reports to you: ${w.voice}`)
+  if (w.says?.open) out.push(`- opens a card: ${w.says.open}`)
+  if (w.says?.closes) out.push(`- closes it: ${w.says.closes}`)
+  if (w.says?.theirs) out.push(`- their card: ${w.says.theirs}`)
+  if (w.says?.when) out.push(`- when: ${w.says.when}`)
   if (w.hires) out.push(`- hires: ${w.hires}`)
 
   // Capabilities first: a role's `- can:` line names them, and reading
   // `can: drafts` before anything says what drafting is is reading backwards.
   out.push('', '## capabilities')
-  for (const c of w.capabilities) out.push(`- ${c.name}${c.what ? ` — ${c.what}` : ''}`)
+  for (const c of w.capabilities) {
+    out.push(`- ${c.name}${c.kind ? ` (${c.kind})` : ''}${c.what ? ` — ${c.what}` : ''}`)
+  }
 
   out.push('', '## roles')
   for (const [role, def] of Object.entries(w.roles)) {
@@ -1239,12 +1404,12 @@ export function toMarkdown(w: Workflow): string {
   for (const r of w.cardRules) {
     const said =
       r.status === 'open'
-        ? 'opens a card'
+        ? saysOpen(w)
         : r.status === 'closes'
-          ? 'closes it'
+          ? saysCloses(w)
           : (w.columns.find((c) => c.key === r.status)?.label ?? r.status)
-    const whose = r.whose === 'to' ? ' (their card)' : ''
-    const when = r.when ? ` · when ${r.when}` : ''
+    const whose = r.whose === 'to' ? ` (${saysTheirs(w)})` : ''
+    const when = r.when ? ` · ${saysWhen(w)} ${r.when}` : ''
     out.push(`- ${r.from} → ${r.to}: ${said}${whose}${when}`)
   }
 

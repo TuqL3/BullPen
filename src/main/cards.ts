@@ -1,4 +1,12 @@
-import { can, columnFor, hasCapability, hasColumn, rolesWith, type Workflow } from './workflow.ts'
+import {
+  can,
+  columnFor,
+  defaultCardRules,
+  hasCapability,
+  hasColumn,
+  rolesWith,
+  type Workflow
+} from './workflow.ts'
 
 /**
  * What one message does to the board.
@@ -55,7 +63,10 @@ export function routeCard(
   // goes. Parking it in wait_test on such a floor leaves it there forever.
   const checked = rolesWith(w, 'checks').length > 0
 
-  for (const rule of w.cardRules) {
+  // What the floor wrote, or - when it wrote nothing - what the roles and the
+  // board already imply. A drawing with boxes and arrows on it moves cards
+  // without anybody writing a rule; writing one takes over completely.
+  for (const rule of defaultCardRules(w)) {
     // The operator is a party to the floor without being an agent on it: they
     // hand work over and they are reported to. Their side of a rule is matched
     // by address, because they have no role to match by - and a rule about

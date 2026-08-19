@@ -203,6 +203,21 @@ const flat = (s: string): string => s.trim().toLowerCase().replace(/[\s-]+/g, '_
 const RULE_LINE = /^(.+?)\s*(?:→|->|=>)\s*(.+?)\s*:\s*(.+)$/
 
 /**
+ * The words this floor uses for the things a rule can say that are not columns.
+ *
+ * Read from the floor rather than written here, because the rest of it is: a
+ * floor whose board is `chờ duyệt` writes its rules in the same language, and
+ * the panel that draws them has to read and write the same words the file does.
+ * The format's own are the fallback, so nothing written before this stopped.
+ */
+export type Says = { open?: string; closes?: string; theirs?: string; when?: string }
+const opensWord = (s?: Says): string => s?.open?.trim() || 'opens a card'
+const closesWord = (s?: Says): string => s?.closes?.trim() || 'closes it'
+const theirsWord = (s?: Says): string => s?.theirs?.trim() || 'their card'
+const whenWord = (s?: Says): string => s?.when?.trim() || 'when'
+const esc = (w: string): string => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
  * Read the lines somebody typed. A line that names no column is left out - it
  * is half-typed rather than wrong, and refusing it mid-keystroke would delete
  * the rule the moment they reached for a different column.
@@ -211,23 +226,27 @@ export function readTalk(
   text: string,
   columns: { key: string; label: string }[],
   from: string,
-  to: string
+  to: string,
+  says?: Says
 ): Talk[] {
+  const theirsAtEnd = new RegExp(`\\((${esc(theirsWord(says))}|their card|theirs)\\)\\s*$`, 'i')
+  const leadingWhen = new RegExp(`^\\s*(?:${esc(whenWord(says))}|when)\\s+`, 'i')
   const out: Talk[] = []
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/^\s*[-*]\s*/, '').trim()
+    const line = raw.replace(/^\s*[-*+]\s*/, '').trim()
     if (!line) continue
     const m = RULE_LINE.exec(line)
     // No `a → b:` on the line means they left the names to the arrow.
     const said = m ? m[3] : line
     const [head, ...rest] = said.split('·')
-    const when = rest.join('·').replace(/^\s*when\s+/i, '').trim()
-    const theirs = /\((their card|theirs)\)\s*$/i.test(head)
-    const words = head.replace(/\((their card|theirs)\)\s*$/i, '').trim()
+    const when = rest.join('·').replace(leadingWhen, '').trim()
+    const theirs = theirsAtEnd.test(head)
+    const words = head.replace(theirsAtEnd, '').trim()
 
-    const status = /^opens?\b/i.test(words)
+    const low = words.toLowerCase()
+    const status = low.startsWith(opensWord(says).toLowerCase()) || /^opens?\b/i.test(low)
       ? 'open'
-      : /^closes?\b/i.test(words)
+      : low.startsWith(closesWord(says).toLowerCase()) || /^closes?\b/i.test(low)
         ? 'closes'
         : (columns.find((c) => c.key === flat(words) || flat(c.label) === flat(words))?.key ?? '')
     if (!status) continue
@@ -243,18 +262,68 @@ export function readTalk(
 }
 
 /** And back out, in the same words the file uses. */
-export function writeTalk(rules: Talk[], columns: { key: string; label: string }[]): string {
+export function writeTalk(
+  rules: Talk[],
+  columns: { key: string; label: string }[],
+  says?: Says
+): string {
   return rules
     .map((r) => {
       const said =
         r.status === 'open'
-          ? 'opens a card'
+          ? opensWord(says)
           : r.status === 'closes'
-            ? 'closes it'
+            ? closesWord(says)
             : (columns.find((c) => c.key === r.status)?.label ?? r.status)
-      const tail = `${said}${r.whose === 'to' ? ' (their card)' : ''}${r.when ? ` · when ${r.when}` : ''}`
+      const tail = `${said}${r.whose === 'to' ? ` (${theirsWord(says)})` : ''}${
+        r.when ? ` · ${whenWord(says)} ${r.when}` : ''
+      }`
       return `- ${r.from} → ${r.to}: ${tail}`
     })
     .join('\n')
 }
 
+
+/**
+ * An id for a role nobody has named yet.
+ *
+ * Counting the roles was wrong: add two, delete an earlier one, add a third,
+ * and the count lands back on an id that already exists - which the spread that
+ * writes it silently overwrote, taking that role's brief and its arrows with
+ * it. The first free number instead, so it is free whatever was deleted.
+ */
+export function freeRoleId(roles: Record<string, unknown>, stem = 'role'): string {
+  for (let n = 1; ; n++) {
+    const id = `${stem}_${n}`
+    if (!(id in roles)) return id
+  }
+}
+
+/**
+ * Who is standing on this floor when it opens, and who is hired when needed.
+ *
+ * Dispatch always stands: it is who the operator types at. Everyone else is
+ * hired when there is work for them, unless the floor said otherwise - and the
+ * "unless" is the whole of this. It used to force `fixed: undefined` on every
+ * other role, so a floor that named a second agent to stand from launch had
+ * that stripped the moment somebody opened the drawing and pressed save.
+ */
+export function staffed(floor: WorkflowInfo): WorkflowInfo {
+  const roles = Object.fromEntries(
+    Object.entries(floor.roles).map(([id, def]) => {
+      // Dispatch is the one role that cannot be hired into: it is who the
+      // operator types at, and there has to be somebody there at launch.
+      if (id === floor.dispatch) {
+        return [id, { ...def, hireable: undefined, fixed: def.fixed ?? { id, name: def.label || id } }]
+      }
+      // Filled in, never overwritten. This used to force `fixed: undefined,
+      // hireable: true` on everyone else - so a floor that said it wanted a
+      // second agent standing from launch had that stripped the moment somebody
+      // opened the drawing and pressed save, and there was no way to say it
+      // again that survived.
+      if (def.fixed) return [id, { ...def, hireable: undefined }]
+      return [id, { ...def, hireable: true }]
+    })
+  )
+  return { ...floor, roles }
+}

@@ -73,7 +73,12 @@ export type Approval = {
   createdAt: number
 }
 
-export type MailEvent = { to: string; from: string; subject: string; ts: number }
+/**
+ * `seq` is what the office floor animates off: the list is a sliding window of
+ * the last 200, so its length stops growing and an index into it stops moving.
+ * A number that only ever goes up is the one thing a window cannot invalidate.
+ */
+export type MailEvent = { to: string; from: string; subject: string; ts: number; seq: number }
 
 type State = {
   agents: Agent[]
@@ -86,11 +91,12 @@ type State = {
   selected: string | null
   select: (id: string) => void
   upsertAgent: (a: Partial<Agent> & { id: string }) => void
+  patchAgent: (a: Partial<Agent> & { id: string }) => void
   removeAgent: (id: string) => void
   setApprovals: (a: Approval[]) => void
   addApproval: (a: Approval) => void
   removeApproval: (id: string) => void
-  addMail: (m: MailEvent) => void
+  addMail: (m: Omit<MailEvent, 'seq'>) => void
   setSteers: (agentId: string, notes: string[]) => void
   touch: (agentId: string, ts: number) => void
 }
@@ -100,7 +106,7 @@ type State = {
  * off this - avatar pose from `activity`, envelopes from `mail` - so it needs
  * no new plumbing in main.
  */
-export const useStore = create<State>((set, get) => ({
+export const useStore = create<State>((set) => ({
   agents: [],
   approvals: [],
   mail: [],
@@ -128,6 +134,25 @@ export const useStore = create<State>((set, get) => ({
         }
         return { agents: [...s.agents, fresh], selected: s.selected ?? a.id }
       }
+      const agents = [...s.agents]
+      agents[i] = { ...agents[i], ...a }
+      return { agents }
+    }),
+
+  /**
+   * Update somebody already on the roster, and nobody else.
+   *
+   * Main goes on talking about an agent for a moment after it is fired: `kill`
+   * returns when the signal is sent, the `exit` event arrives after that, and a
+   * late status or cost reading can be in flight too. Every one of those is a
+   * partial patch, and `upsertAgent` treats a partial for an unknown id as a
+   * new agent - so firing a running agent put the row straight back on the
+   * roster, nameless, with no workspace and whatever the default role is.
+   */
+  patchAgent: (a) =>
+    set((s) => {
+      const i = s.agents.findIndex((x) => x.id === a.id)
+      if (i === -1) return s
       const agents = [...s.agents]
       agents[i] = { ...agents[i], ...a }
       return { agents }
@@ -177,7 +202,8 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   // Bounded: an idle overnight run must not grow this array forever.
-  addMail: (m) => set((s) => ({ mail: [...s.mail.slice(-199), m] })),
+  addMail: (m) =>
+    set((s) => ({ mail: [...s.mail.slice(-199), { ...m, seq: (s.mail.at(-1)?.seq ?? 0) + 1 }] })),
 
 
   setSteers: (agentId, notes) => set((s) => ({ steers: { ...s.steers, [agentId]: notes } })),

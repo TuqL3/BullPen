@@ -112,3 +112,60 @@ test('the seat never lands on a fired agent even when core agents are present', 
   useStore.getState().removeAgent('dave')
   assert.equal(useStore.getState().selected, 'michael')
 })
+
+test('a late event about a fired agent does not put it back on the roster', () => {
+  // `kill` returns when the signal is sent; the exit event, and any status,
+  // context or cost reading still in flight, arrive after that - by which time
+  // the row is gone. Fed through `upsertAgent` every one of them treated the
+  // partial as a new agent and the fired row came straight back, nameless and
+  // with no workspace.
+  reset()
+  hire('michael')
+  hire('quinn')
+  useStore.getState().removeAgent('quinn')
+  assert.deepEqual(useStore.getState().agents.map((a) => a.id), ['michael'])
+
+  const late = useStore.getState().patchAgent
+  late({ id: 'quinn', status: 'exited', exitCode: 0, activity: 'idle' })
+  late({ id: 'quinn', activity: 'working' })
+  late({ id: 'quinn', ctx: { used: 1, limit: 2, pct: 50, model: 'claude-opus-5' } })
+  assert.deepEqual(
+    useStore.getState().agents.map((a) => a.id),
+    ['michael'],
+    'a fired agent stays fired'
+  )
+
+  // And it is still an update for anyone who is on the roster.
+  late({ id: 'michael', activity: 'working' })
+  assert.equal(useStore.getState().agents[0].activity, 'working')
+})
+
+test('the mail list is a window, and what has been seen is not its length', () => {
+  // The office floor walks an agent across the room for each new message, and
+  // tracked "how many have I seen" as an index into this list. The list keeps
+  // only the last 200, so once it filled its length stopped growing, the index
+  // sat on the end, and every message after the two-hundredth was skipped: the
+  // floor stopped moving for the rest of the session. `seq` only goes up.
+  useStore.setState({ mail: [] })
+  const add = useStore.getState().addMail
+  for (let n = 1; n <= 260; n++) add({ from: 'a', to: 'b', subject: `msg ${n}`, ts: n })
+
+  const mail = useStore.getState().mail
+  assert.equal(mail.length, 200, 'still a window')
+  assert.equal(mail.at(-1)?.seq, 260, 'and the newest knows it is the 260th')
+  assert.equal(mail[0].seq, 61, 'the oldest 60 fell off the front')
+
+  // What the floor does: take everything past the last one it walked.
+  let seen = 0
+  let walked = 0
+  for (const m of mail) {
+    if (m.seq <= seen) continue
+    walked++
+  }
+  seen = mail.at(-1)?.seq ?? 0
+  assert.equal(walked, 200, 'every message still in the window is new to a fresh floor')
+
+  add({ from: 'a', to: 'b', subject: 'one more', ts: 261 })
+  const after = useStore.getState().mail.filter((m) => m.seq > seen)
+  assert.deepEqual(after.map((m) => m.subject), ['one more'], 'and the next one is not skipped')
+})

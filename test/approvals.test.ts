@@ -70,6 +70,53 @@ test('writes escape the sandbox only with a human in the loop', () => {
     'allow',
     'reads outside the sandbox are not escalated - only writes'
   )
+  // Every writing tool, not a hand-copied subset of them: the list here went
+  // out of step with the one the edit log uses and MultiEdit walked straight
+  // out of the sandbox.
+  for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+    assert.equal(
+      a.classify('dwight', { tool_name: tool, tool_input: { file_path: '/etc/hosts' } }).verdict,
+      'ask',
+      `${tool} outside the sandbox must be escalated`
+    )
+  }
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('halting an agent resolves what it was blocked on', async () => {
+  // Left pending, the request outlives the process it was about: the queue goes
+  // on offering allow/deny and the roster keeps the agent marked blocked.
+  const { a: approvals, root } = fresh()
+  const resolved: string[] = []
+  approvals.on('resolved', (_p: unknown, decision: string) => resolved.push(decision))
+
+  const port = await approvals.start()
+  const asked = fetch(
+    `http://127.0.0.1:${port}/hook?agent=dwight&token=${approvals.token}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf /home/lukas/projects' }
+      })
+    }
+  )
+  // The request is parked until somebody decides; wait for it to be queued.
+  while (approvals.listPending().length === 0) await new Promise((r) => setTimeout(r, 5))
+
+  assert.equal(approvals.clearPending('dwight'), 1)
+  assert.deepEqual(approvals.listPending(), [], 'nothing is left in the queue')
+  assert.deepEqual(resolved, ['deny'], 'and it is resolved the way a human would have')
+
+  const out = (await (await asked).json()) as {
+    hookSpecificOutput: { permissionDecision: string }
+  }
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+
+  // Somebody else's request is not touched.
+  assert.equal(approvals.clearPending('jim'), 0)
+  approvals.stop()
   rmSync(root, { recursive: true, force: true })
 })
 

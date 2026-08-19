@@ -135,3 +135,21 @@ test('stopping closes the door', async () => {
   assert.equal(hooks.running, false)
   await assert.rejects(() => post(url, '{"body":"go"}', { 'x-bullpen-token': token }))
 })
+
+test('a malformed url is answered, not thrown', async () => {
+  // `read` decodes the path to find who a task is addressed to, and a lone `%`
+  // makes decodeURIComponent throw. Thrown out of a request handler that is an
+  // uncaught exception in the main process - a bad URL took the whole app down.
+  const { hooks, url, token } = await up()
+  const refused: unknown[] = []
+  hooks.on('refused', (r) => refused.push(r))
+
+  const res = await post(`${url}/%`, 'do a thing', { 'x-bullpen-token': token })
+  assert.equal(res.status, 400)
+  assert.equal(refused.length, 1)
+
+  // Still open, and still working, afterwards.
+  const ok = await post(url, 'a real task', { 'x-bullpen-token': token })
+  assert.equal(ok.status, 202)
+  await hooks.stop()
+})

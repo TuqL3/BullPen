@@ -10,7 +10,7 @@
     "dev:cold": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types --experimental-test-module-mocks --import ./test/raw-loader.mjs --test test/*.test.ts",
     "verify:hook": "node --experimental-strip-types scripts/verify-hook.ts",
     "postinstall": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty",
     "build:mac": "electron-vite build && electron-builder --mac",

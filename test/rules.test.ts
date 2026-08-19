@@ -2,17 +2,14 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import {
-  entityOf,
-  fieldsOf,
-  isOpen,
-  lawOn,
-  lawSays,
-  readRules,
-  readType,
-  sayType,
-  writeRules
-} from '../src/rules.ts'
+import { lawOn, readRules, readType, type Field, type Rules } from '../src/rules.ts'
+
+/** What the settings pane used to ask for, now that nothing but this does. */
+const entityOf = (r: Rules, name: string) => r.entities.find((e) => e.name === name) ?? null
+const fieldsOf = (r: Rules, name: string): Field[] =>
+  entityOf(r, name)?.fields.filter((f) => !f.open) ?? []
+const isOpen = (r: Rules, name: string): boolean =>
+  Boolean(entityOf(r, name)?.fields.some((f) => f.open))
 import { lint } from '../src/main/workflow.ts'
 import { DEFAULT_WORKFLOW } from './floors.ts'
 
@@ -101,9 +98,10 @@ test('laws are listed with an id and the sentence a person is shown', () => {
   )
   assert.ok(lawOn(mine, 'must-open'))
   assert.ok(!lawOn(mine, 'no-such-law'))
-  assert.match(lawSays(mine, 'must-open'), /card rule must open a card/)
-  // An id nobody wrote down answers with itself rather than an empty string.
-  assert.equal(lawSays(mine, 'invented'), 'invented')
+  assert.match(
+    mine.laws.find((l) => l.id === 'must-open')?.says ?? '',
+    /card rule must open a card/
+  )
 })
 
 test('a rules file that will not parse is empty, not an exception', () => {
@@ -171,31 +169,3 @@ test('every law the rules name is a law the linter asks about', () => {
  * The dialog edits this as a form, so what it hands back has to still be the
  * rules: a file to read, diff and keep, not a blob only this app can open.
  */
-test('the rules survive being written back out', () => {
-  const back = readRules(writeRules(RULES))
-  assert.deepEqual(
-    back.entities.map((e) => e.name),
-    RULES.entities.map((e) => e.name)
-  )
-  assert.deepEqual(back.laws, RULES.laws)
-  for (const entity of RULES.entities) {
-    assert.deepEqual(
-      entityOf(back, entity.name)?.fields,
-      entity.fields,
-      `"${entity.name}" changed on the way round`
-    )
-  }
-})
-
-test('a type says itself the way it was written', () => {
-  for (const said of [
-    'text',
-    'percent',
-    'list of capability',
-    'one of start, working, done',
-    'role or address'
-  ]) {
-    assert.equal(sayType(readType(said)), said)
-  }
-})
-

@@ -18,6 +18,7 @@ import {
   listWorkflows,
   parseMarkdown,
   parseWorkflow,
+  pctOr,
   pickForRole,
   refuseMail,
   renderBrief,
@@ -1132,3 +1133,226 @@ test('a capability, a column and a rule may be written with any separator', () =
   assert.equal(w.cardRules[0].status, 'open')
 })
 
+
+test('a bullet may be written -, * or +, and losing one is never silent', () => {
+  // `+` is a markdown bullet like the other two, and every regex in the parser
+  // took `[-*]`. A line written with it was not a bullet, so it was dropped -
+  // and lint had nothing to complain about, because what it described was gone
+  // rather than wrong. A `+ hireable` left a role nobody could be hired into;
+  // a `+ builds -> checks: ...` left a card rule that never moved a card.
+  const floor = (bullet: string): string =>
+    [
+      '# bullets',
+      'one line.',
+      '',
+      '## capabilities',
+      `${bullet} speaks - may write to "you"`,
+      `${bullet} builds - does the work`,
+      `${bullet} checks - decides whether it passes`,
+      '',
+      '## roles',
+      '',
+      '### boss · the boss',
+      `${bullet} agent: chief · Chief`,
+      `${bullet} can: speaks`,
+      `${bullet} talks to: dev, you`,
+      `${bullet} dispatch`,
+      '',
+      '### dev · a builder',
+      `${bullet} can: builds`,
+      `${bullet} talks to: boss`,
+      `${bullet} hireable`,
+      '',
+      '## board',
+      `${bullet} todo: todo #7fc7e8 (start)`,
+      `${bullet} doing: doing #e8cf6a (working)`,
+      `${bullet} done: done #7fd8a0 (done)`,
+      '',
+      '## card rules',
+      `${bullet} speaks → builds: opens a card`,
+      `${bullet} builds → speaks: done`,
+      '',
+      '## briefs',
+      '',
+      '### boss',
+      'You hand work to the builder.',
+      '',
+      '### dev',
+      'You build what you are given and report when it is done.',
+      ''
+    ].join('\n')
+
+  const dashed = parseMarkdown(floor('-'))
+  assert.ok('workflow' in dashed, `the dashed floor must parse: ${JSON.stringify(dashed)}`)
+  if (!('workflow' in dashed)) return
+
+  for (const bullet of ['*', '+']) {
+    const other = parseMarkdown(floor(bullet))
+    assert.ok('workflow' in other, `"${bullet}" must parse: ${JSON.stringify(other)}`)
+    if (!('workflow' in other)) continue
+    assert.deepEqual(other.workflow, dashed.workflow, `"${bullet}" read differently from "-"`)
+  }
+})
+
+test('a column keeps its name whatever is in it, or says it cannot', () => {
+  // The label was matched as "anything that is not a # or a bracket", so a
+  // column called `C# work` matched nothing, and a line that matches nothing is
+  // skipped rather than refused - the board came back one column short, and the
+  // one it lost was whichever the operator had just renamed.
+  const floor = (label: string): string =>
+    [
+      '# labels',
+      'one line.',
+      '',
+      '## capabilities',
+      '- speaks - may write to "you"',
+      '- builds - does the work',
+      '',
+      '## roles',
+      '',
+      '### boss · the boss',
+      '- agent: chief · Chief',
+      '- can: speaks',
+      '- talks to: dev, you',
+      '- dispatch',
+      '',
+      '### dev · a builder',
+      '- can: builds',
+      '- talks to: boss',
+      '- hireable',
+      '',
+      '## board',
+      `- todo: ${label} #7fc7e8 (start)`,
+      '- doing: doing #e8cf6a (working)',
+      '- done: done #7fd8a0 (done)',
+      '',
+      '## briefs',
+      '',
+      '### boss',
+      'You hand work to the builder.',
+      '',
+      '### dev',
+      'You build it and report when done.',
+      ''
+    ].join('\n')
+
+  for (const label of ['plain', 'to #do', 'C# work', 'deadbeef', 'fix #abc123 now', 'x · y']) {
+    const r = parseMarkdown(floor(label))
+    assert.ok('workflow' in r, `"${label}" must parse: ${JSON.stringify(r)}`)
+    if (!('workflow' in r)) continue
+    const todo = r.workflow.columns.find((c) => c.key === 'todo')
+    assert.ok(todo, `the column called "${label}" went missing`)
+    assert.equal(todo?.label, label)
+    assert.equal(todo?.bar, '#7fc7e8', `"${label}" swallowed the colour`)
+    assert.equal(todo?.kind, 'start')
+    assert.equal(r.workflow.columns.length, 3)
+  }
+})
+
+test('a threshold nobody typed a number into does not empty the floor', () => {
+  // Both come from number inputs, and a cleared one is NaN. Stored, every
+  // `ctxPct < hireAbovePct` was false - so nobody was ever free, every hand-off
+  // hired somebody new, and the brief told a real agent to "reuse one whose
+  // ctxPct is under NaN".
+  assert.equal(pctOr(NaN, 70), 70)
+  assert.equal(pctOr(undefined, 70), 70)
+  assert.equal(pctOr(null, 70), 70)
+  assert.equal(pctOr('80', 70), 70, 'a string is not a percentage')
+  assert.equal(pctOr(Infinity, 70), 70)
+  assert.equal(pctOr(55, 70), 55)
+  assert.equal(pctOr(55.4, 70), 55, 'rounded, because a board is not that precise')
+  assert.equal(pctOr(0, 70), 1, 'and clamped into a range a floor can run on')
+  assert.equal(pctOr(400, 70), 100)
+
+  // What it protects: with a usable ceiling an idle agent is pickable.
+  const w = { ...DEFAULT_WORKFLOW, hireAbovePct: pctOr(NaN, 70) } as unknown as Workflow
+  const role = rolesWith(w, 'builds')[0]
+  const picked = pickForRole(w, role, [{ id: 'quinn', role, idle: true, ctxPct: 12 }])
+  assert.equal(picked, 'quinn', 'somebody with an empty window is free')
+})
+
+test('a floor may name the four words the format kept for itself', () => {
+  // Roles, columns, capabilities and briefs are already the floor's own
+  // language. `opens a card`, `closes it`, `(their card)` and `when` were not,
+  // so a card rule written in Vietnamese was refused and the file could not be
+  // finished in the language the rest of it was in.
+  const floor = [
+    '# kenh',
+    'Chủ kênh giao ý tưởng.',
+    '',
+    '- human address: chu-kenh',
+    '- opens a card: mở thẻ',
+    '- closes it: đóng thẻ',
+    '- their card: thẻ của họ',
+    '- when: khi',
+    '',
+    '## capabilities',
+    '- dieu-phoi - nhận việc và giao xuống',
+    '- viet - viết kịch bản',
+    '',
+    '## roles',
+    '',
+    '### quan-ly · quản lý',
+    '- agent: michael · Michael',
+    '- can: dieu-phoi',
+    '- talks to: bien-kich, chu-kenh',
+    '- dispatch',
+    '',
+    '### bien-kich · biên kịch',
+    '- can: viet',
+    '- talks to: quan-ly',
+    '- hireable',
+    '',
+    '## board',
+    '- y-tuong: ý tưởng #7fc7e8 (start)',
+    '- dang-viet: đang viết #e8cf6a (working)',
+    '- da-dang: đã đăng #7fd8a0 (done)',
+    '',
+    '## card rules',
+    '- dieu-phoi → viet: mở thẻ · khi giao ý tưởng',
+    '- viet → dieu-phoi: đang viết (thẻ của họ) · khi bắt đầu',
+    '- viet → dieu-phoi: đóng thẻ · khi xong',
+    '',
+    '## briefs',
+    '',
+    '### quan-ly',
+    'Bạn chuyển việc cho "bien-kich" rồi báo lại "chu-kenh".',
+    '',
+    '### bien-kich',
+    'Bạn viết kịch bản và báo lại.',
+    ''
+  ].join('\n')
+
+  const r = parseMarkdown(floor)
+  assert.ok('workflow' in r, `must parse: ${JSON.stringify(r)}`)
+  if (!('workflow' in r)) return
+  const w = r.workflow
+
+  assert.equal(w.human, 'chu-kenh')
+  assert.deepEqual(w.says, { open: 'mở thẻ', closes: 'đóng thẻ', theirs: 'thẻ của họ', when: 'khi' })
+  assert.deepEqual(
+    w.cardRules.map((c) => [c.status, c.whose ?? '', c.when ?? '']),
+    [
+      ['open', '', 'giao ý tưởng'],
+      ['dang-viet', 'to', 'bắt đầu'],
+      ['closes', '', 'xong']
+    ]
+  )
+
+  // Written back out in the floor's own words, and read back the same.
+  const md = toMarkdown(w)
+  assert.match(md, /- dieu-phoi → viet: mở thẻ · khi giao ý tưởng/)
+  assert.equal(md.includes('opens a card ·'), false)
+  const again = parseMarkdown(md)
+  assert.ok('workflow' in again)
+  if ('workflow' in again) assert.deepEqual(again.workflow, w, 'the floor changed on the way round')
+})
+
+test('a floor that names none of them still reads the words it was written in', () => {
+  for (const w of PRESETS) {
+    assert.equal(w.says, undefined, `"${w.name}" should not carry words it never named`)
+    const back = parseMarkdown(toMarkdown(w))
+    assert.ok('workflow' in back, `"${w.name}" must still parse`)
+    if ('workflow' in back) assert.deepEqual(back.workflow.cardRules, w.cardRules)
+  }
+})

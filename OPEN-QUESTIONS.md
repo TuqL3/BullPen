@@ -798,3 +798,679 @@ are already on, and reloading mid-drawing would be worse than the staleness.
 **Breaks if wrong:** an agent still briefed on the old floor is not restarted by
 this - the reload is the window, not the floor. `stale` names them and
 `restart the standing ones` is still the way.
+
+## 37. Dead-code sweep: what came out, and the two things left standing
+
+A pass over the whole tree for code nothing reaches. Removed: `src/brief.ts`
+and its test (the structured role-brief builder, superseded by the plain brief
+textarea in `OrgChart`), sixteen preload API functions with no renderer caller
+and the main IPC handlers behind them, the per-agent `edits` map that only that
+dead handler read, `board.toggleTask` (superseded by `setTaskStatus`) and
+`board.assignTask`, `git.discardHunk` (the panel discards per block, not per
+hunk), and a handful of unused locals the type checker names under
+`--noUnusedLocals`.
+
+One finding was left in place rather than deleted:
+
+- `split.ts` and `layout.ts` carry two copies of the same grid algebra
+  (`compact`, `moveTo`, `moveToNewColumn`, `resizeColumns`, `resizeRows`,
+  `clamp`, `MIN_SHARE`) over different types. `layout.ts` could be built on
+  `split.ts`, but the tests import both directly under `node --test`, which
+  needs explicit `.ts` extensions the renderer does not otherwise use.
+
+**Breaks if wrong:** the preload functions were judged dead by searching the
+renderer for `bullpen.<name>`; a call built from a computed key would not have
+been found. None exists today.
+
+## 38. Four bugs the sweep turned up, and what each one cost
+
+- **Fired agents leaked their terminal.** `disposeTerminal` was written and
+  never called, and nothing else deleted from the `terms` map, so every agent
+  ever fired kept its xterm instance and ten thousand lines of scrollback for
+  the life of the window. Wired into the two places an id stops existing:
+  `fire` on the roster, and closing a shell.
+
+- **`MultiEdit` walked out of the sandbox unasked.** The write check listed its
+  tools by hand - `Write`, `Edit`, `NotebookEdit` - beside a `WRITING_TOOLS` set
+  that had four in it. A `MultiEdit` to any path outside the workspace was
+  classified `allow` with nobody asked. It reads the set now, which is the only
+  copy.
+
+- **Halting a blocked agent left its request in the queue.** `agent:kill` threw
+  away queued steers and nothing else, so a pending approval outlived the
+  process it was about: the queue went on offering allow/deny, and the roster
+  kept the agent marked blocked, for a pty that had already gone. Kill now
+  denies what the agent was waiting on, which is what the renderer listens for.
+
+- **The SIGKILL pass did not re-check the marker.** `reapOrphans` refuses to
+  kill a pid whose command line does not carry the marker written at spawn, and
+  then `forceKill` ran two seconds later on the pid alone. A process that exited
+  in that window and had its number reused would have been killed by the half of
+  the guard that was not looking. `forceKill` now runs the same check.
+
+**Breaks if wrong:** the terminal disposal assumes no path re-mounts a
+`TerminalHost` for an id after it leaves the roster. `TerminalDeck` is driven by
+`agents.map(a => a.id)` and by one shell id, so nothing does today; a future
+list that keeps fired agents visible would need the dispose moved.
+
+## 39. Second sweep: six more, and where the sweep stopped
+
+- **A hire could only ever be hired once on a long-named project.** `hireName`
+  built `<project>-2` and slugged it afterwards, and `slug` caps at 32
+  characters - so on a project whose slug was already 31 long the `-2` was cut
+  off and every number from 2 to 99 produced the same id as the first. Past the
+  roster of given names, the second hire onto such a project collided with the
+  first and the spawn threw. The numbered names are slugs to begin with now, so
+  the id the availability check was asked about is the id the agent is spawned
+  under.
+
+- **Two different slug functions decided agent ids.** The wizard used
+  `names.slug`; main's hire path used a near-identical local one that folded no
+  diacritics and had no length cap. Same name, two ids, depending on which way
+  somebody joined the floor. Main's copy is gone.
+
+- **An agent that died mid-turn stayed "working" forever.** The set is emptied
+  by the Stop hook, which a killed or crashed pty never sends. `reportWhenQuiet`
+  waits for that set to empty, so halting one busy agent silently ended every
+  progress report for the rest of the session, and floor.json went on calling
+  the dead agent busy. Cleared on exit, and the floor is re-checked there.
+
+- **Applying a workflow did not re-state what a role never does.** Tool refusals
+  are read once, at spawn. A floor that took `Bash` away from testers did not
+  take it away from the tester already running - and one that handed it back
+  left them still refused. Re-applied to everyone still running when a workflow
+  is set.
+
+- **An agent made in the wizard was briefed as the wrong role.** The renderer
+  spawned first and called `setRole` afterwards, but the brief and the tool
+  refusals are both read at spawn - so the agent was briefed as the floor's
+  default role whatever the wizard's dropdown said, and `setRole` only ever
+  fixed where its cards went. The role goes out with the spawn now, and
+  `setRole` re-states the refusals for any caller that still arrives late.
+
+- **Adding a role in the chart could overwrite one.** The new id was
+  `role_<count+1>`, so adding two, deleting the earlier one and adding a third
+  landed back on an id still in use - and the spread that writes it took that
+  role's brief and its arrows with it, silently. `freeRoleId` in `chart.ts`
+  takes the first number nobody has.
+
+Also collapsed: `Approvals.onLifecycle` parsed the same hook body five times,
+once per question it asked of it. That is the shape the `MultiEdit` gap in §38
+came in - the same thing said in more than one place, and one copy left behind.
+
+**Where this stopped.** `src/main/index.ts` has no test harness: it imports
+`electron` at module scope, so nothing under `node --test` can load it. The four
+findings in it were read out of the source and fixed there; the two in
+`names.ts` and `chart.ts` have tests that fail without the fix. Not swept:
+`Code.tsx`, `Settings.tsx`, `Floor.tsx` and the tab components, which are React
+with no harness either.
+
+## 40. Third sweep: the renderer and the inbound door
+
+- **A malformed webhook URL took the whole app down.** `read` decodes the path
+  to find who a task is addressed to, and `POST /task/%` makes
+  `decodeURIComponent` throw. Thrown out of an http request handler that is an
+  uncaught exception in the main process, so one bad URL from an authenticated
+  sender ended the run. It answers 400 now, and the body-size cap grew a flag so
+  a chunk queued behind `req.destroy()` cannot answer a second time either -
+  `writeHead` throws once the headers are out, the same crash by another road.
+
+- **Firing a running agent left a ghost row on the roster.** `kill` returns when
+  the signal is sent; the exit event, and any status, tool, context or cost
+  reading still in flight, arrive after that - by which time `removeAgent` has
+  run. Every one of those handlers went through `upsertAgent`, which treats a
+  partial for an unknown id as a new agent, so the row came straight back:
+  nameless, no workspace, whatever the default role is. The seven handlers that
+  are updates by nature now use `patchAgent`, which touches nobody it does not
+  already have. Creating still goes through `upsertAgent`, where it belongs.
+
+- **Switching agents mid-read could write one agent's rules into another's
+  workspace.** The memory tab clears the draft when the agent changes, but not
+  the document it was read from - and `memory()` is a round trip with `split`
+  one click away the whole time it is in flight. Opening the editor in that
+  window seeded the draft from the agent you had just left. The document is
+  cleared with the draft now, and the mode switch is inert while a read is out.
+
+**Not fixed, deliberately.** `code.ts` compiles the operator's own regex and
+runs it against every file; its time budget is checked per file, so a
+catastrophically backtracking pattern (`(a+)+$`) freezes the main process inside
+a single `exec` and the window has to be killed. Node has no regex timeout and
+the fix is a worker thread, which is more machinery than a box you typed into
+yourself is worth. Worth revisiting only if search ever runs on somebody else's
+input.
+
+**How far the app was actually run.** Booted twice against a scratch
+`BULLPEN_HOME`, which leaves it on the first-run setup screen and spawns no
+agents - main comes up clean, and the only console output is WSL2's own GPU and
+network-service complaints. The renderer's console is not readable from a
+headless run, so the renderer findings above were read out of the source, not
+watched happening.
+
+## 41. Fourth sweep: two more, and one thing proved right
+
+- **A shell could be handed to the wrong agent.** Shell ids are `shell:<agent>`
+  and `shell:<agent>#2` upwards, matched with a plain `startsWith` on the base -
+  so `morgan` asking for its shell was handed `morgan-2`'s: a live prompt in
+  somebody else's workspace, labelled with morgan's name and morgan's directory.
+  That is the one thing a per-agent shell panel exists to make impossible. The
+  test is `isShellOf` in `names.ts` now, which is also where `SHELL_PREFIX` and
+  `isShellId` moved - main and the renderer had a copy each, with a comment
+  saying so.
+
+  Firing an agent also left its shells running. The row goes off the roster and
+  the panel is keyed on a selected agent, so they became processes nobody could
+  reach and nothing would stop before quit - each with a shell in that
+  workspace. `shell:closeFor` takes them down with the agent. Halting one still
+  leaves them alone on purpose: the process stopped, the directory did not.
+
+- **Changing the font size put every removed floor back on the list.** The prefs
+  handler rebuilt `ui` from the four fields it knew about, and `ui.hidden` - how
+  a shipped floor is removed, since it has no file to delete - was not one of
+  them. Dragging one box on the chart did it too. The merge is `mergeUi` in
+  `config.ts` now, spreading what it was given before naming anything, so the
+  next field added does not repeat this.
+
+**Proved right rather than fixed.** `blockPatch` and `discardBlock` - the only
+destructive path the panel offers - were fuzzed against real git: 1250 random
+edit/discard rounds across five seeds, each checked against an oracle that
+computes the expected file independently of the patch builder. No mismatches, no
+spurious refusals. That is the code this sweep most expected to find something
+in.
+
+**Still not swept.** `workflow.ts` (1392 lines, but the best-tested file here),
+`presets.ts`, `Settings.tsx`, `OrgChart.tsx` beyond its draft and persistence
+paths, and the office-floor renderer. Also unfixed and known: `testerReported`
+closes every waiting card on the project, so two features under test at once are
+both closed by one pass - the cards carry no link back to what was tested, and
+adding one is a change to the board's shape rather than a fix.
+
+## 42. Fifth sweep: the rest of the tree
+
+Everything not yet read, read. Five more:
+
+- **A `+` bullet was silently dropped.** Every regex in the workflow parser took
+  `[-*]`; markdown's third bullet was not one of them, and `src/markdown.ts` -
+  which does accept it - is what makes that an oversight rather than a rule. A
+  line written `+ hireable` was not a bullet, so it vanished: the role stayed,
+  nobody could be hired into it, and lint had nothing to say because what it
+  describes was gone rather than wrong. Fuzzing the shipped floors found 128
+  such lines - `+ builds → checks: ...` leaves a card rule that never moves a
+  card, `+ todo: ...` leaves the board a column short. Fixed in `workflow.ts`,
+  `rules.ts` and `chart.ts` together.
+
+- **A file that did not exist yet could not be written.** `code.ts`'s `write`
+  stat'd the path before writing, and stat throws on a path that is not there.
+  The memory panel offers to give an agent a `CLAUDE.md` when it has none, which
+  is exactly that case: the button answered ENOENT. Both guards it actually
+  needs - not a directory, not outside the workspace - still stand.
+
+- **A link in an agent's document could carry any scheme past the check.** The
+  rendered anchor calls `ui:open`, which allows only http(s) - but it is a real
+  `<a href>`, and a middle-click never fires its onClick. Chromium treats that
+  as "open in a new window", which arrived at `setWindowOpenHandler` and was
+  handed to `shell.openExternal` unchecked. An agent writing
+  `[read this](file:///…)` into its own memory file had a link that, middle-
+  clicked, told the desktop to open it. One `openable()` now guards both exits,
+  and `will-navigate` is blocked outright - the window is a local page with the
+  preload attached, and no link should ever replace it.
+
+- **The rules pane lost edits between its tabs.** The form and the `as text` tab
+  were independent drafts of one file: editing the form, switching to text and
+  saving wrote the untouched original back. Switching now carries whichever side
+  was changed.
+
+- **Two agents could be drawn in one chair.** `assignDesks` wraps with `i %
+  desks.length`, so an office smaller than the roster seats people on top of
+  each other. Left as it is - the alternative is deciding what a full office
+  should look like, which is a design question, not a fix. Flagged rather than
+  guessed at.
+
+**The one that changes how to read every other finding.** The shipped
+`src/rules.md` declares no laws, and `lint` treats a rulebook with none as
+"nothing to check" - so with the stock configuration `workflow:set` refuses
+nothing and the chart's lint panel is always empty. That is deliberate and
+rules.md says so in prose ("There are none: a floor is whatever you drew"), but
+it means every parser-tolerance finding above lands unguarded rather than being
+caught on the way in, and the code comment at `workflow:set` about refusing bad
+floors describes a check that does not currently run. Related: every shipped
+preset fails `must-open` and the assigns law with all laws switched on, because
+floors now ship with no card rules - so turning those two on in Settings makes
+all six presets unsaveable. Worth a decision, not a patch.
+
+**Proved right rather than fixed.** No `dangerouslySetInnerHTML` anywhere in the
+renderer - `parseMarkdown` produces data and `Markdown.tsx` draws it, so an
+agent's memory file has no HTML path. `contextIsolation: true`,
+`nodeIntegration: false`. The office layout was fuzzed 800 times across every
+panel shape: no path crosses a wall, no seat lands outside the grid, no path
+jumps a cell. `rules.md` round-trips through `readRules`/`writeRules`
+unchanged and reads the same with all three bullets. Every shipped preset
+round-trips through markdown. `src/markdown.ts` survives unclosed fences, CRLF,
+tabs, seven hashes and a 200k-character line.
+
+**Read, nothing found:** `cards.ts`, `dryrun.ts`, `god.ts`, `config.ts`,
+`activity.ts`, `presets.ts`, `pty.ts`, `trust.ts`, `hive.ts`, `catalog.ts`,
+`roster.ts`, `fleet.ts`, `keys.ts`, `theme.ts`, `main.tsx`, `Avatar.tsx`,
+`Markdown.tsx`, `Commands.tsx`, `AddAgent.tsx`, `Graph.tsx`, `Workers.tsx`,
+`Activity.tsx`, `sprite.ts`, `tiles.ts`, and the four build scripts.
+
+## 43. Sixth sweep, and an honest map of what has actually been read
+
+§42 claimed the tree had been read. It had not: `tiles.ts`, `catalog.ts`,
+`Activity.tsx`, `Commands.tsx` and `fleet.ts` had been grepped, not read, and
+`Floor.tsx` and the two build scripts had not been opened. Reading them found
+one more, and it is not a small one:
+
+- **The office floor stopped animating after 200 messages.** `Floor.tsx` walked
+  an agent across the room for each new message and tracked how many it had seen
+  as an index into `store.mail`. That list is a sliding window of the last 200 -
+  so once it filled, its length stopped growing, the index sat on the end, and
+  every message from the two-hundred-and-first on was skipped. No walking, no
+  envelopes, no conversation bubbles, for the rest of the session. Each mail
+  event carries a `seq` now, which only goes up, and the floor reads that.
+
+Also: `npm run verify:hook` printed `FAILED` verdicts and still exited 0, so
+nothing that checks a status could tell a working approvals layer from a
+decorative one. It sets a non-zero exit now, the way `after-pack.mjs` throws.
+
+**Two checks in `lint` ignore the rulebook.** `on(id)` gates almost everything,
+but "the floor's voice may not write to the human" and "a column with no key"
+run whatever the rules file says. Harmless - both are stricter, not looser - but
+the design is "the rules file decides which of these run", and two of them do not
+answer to it. Not changed: gating them would make an already-empty lint emptier.
+
+**What has genuinely been read, and what has not.** Read end to end: everything
+in `src/main` except `index.ts` and `workflow.ts`, everything in `src/` root,
+`preload/index.ts` by its API surface, and in the renderer `store.ts`,
+`chart.ts`, `shape.ts`, `split.ts`, `layout.ts`, `roster.ts`, `fleet.ts`,
+`file.ts`, `prefs.ts`, `keys.ts`, `theme.ts`, `catalog.ts`, `Terminal.tsx`,
+`Shell.tsx`, `Commands.tsx`, `Markdown.tsx`, `Avatar.tsx`, `main.tsx`, the four
+`floor/` files, and every tab except the tail of `Monitor.tsx` and
+`Triggers.tsx`. Plus all four build scripts.
+
+Read in part, and this is where anything left is likely to be: `main/index.ts`
+(~2400 lines, most of it), `main/workflow.ts` (~1400, the parser and lint but
+not all of `toMarkdown` or `renderBrief`), `App.tsx` (~2000), `OrgChart.tsx`
+(~1650, its draft/persist/save paths and the panels, not the drag and paint
+code), `Code.tsx` (~1450, the git and discard paths, not the editor), and
+`Settings.tsx` (~1000, the rules and webhook panes). Roughly 4,000 of the
+tree's 16,500 lines have not been read line by line, almost all of it rendering
+and layout in the six largest files.
+
+## 44. The last four thousand lines
+
+The six biggest files, read the rest of the way through. Five more, and one
+correction to §42.
+
+- **A column whose name had a `#` in it disappeared.** The board parser matched
+  a label as "anything that is not a `#` or a bracket", so `- todo: C# work
+  #7fc7e8 (start)` matched nothing - and a line that matches nothing is skipped,
+  not refused. The board came back a column short, and the one it lost was
+  whichever had just been renamed. The colour and the kind are taken off the end
+  now and the label is whatever is left.
+
+- **Deleting a floor you wrote asked nothing.** One click on `remove`, next to a
+  card you click to switch floors, and `rmSync` took the file. A shipped floor
+  is only hidden and `show the ones I removed` brings it back; one you wrote had
+  no way back at all. It confirms now - and only for those, because hiding a
+  preset is reversible and a confirm on it is noise.
+
+- **Re-opening a file an agent had rewritten showed the old copy.** The editor
+  is keyed on the path, so a second open of the same file changed nothing it
+  would rebuild for: the panel went on showing what was read the first time, and
+  Ctrl-S wrote that back over the agent's work. A buffer nobody has typed in
+  now takes the newer text; one with unsaved edits in it is never touched.
+
+- **Search kept the previous query's lines.** Expanding a file whose rows fell
+  past the cap fetches them and caches by path - not by what was being searched
+  for - so changing the query and expanding the same file again showed the old
+  hits under the new search. The cache is dropped when the query changes.
+
+- **A cleared threshold box emptied the floor.** Both context thresholds come
+  from number inputs, and `Number('')` is `NaN`. Stored, every `ctxPct <
+  hireAbovePct` was false, so nobody was ever free and every hand-off hired
+  somebody new - and the brief handed a real agent "reuse one whose ctxPct is
+  under NaN". `pctOr` guards them at `workflow:patch`, which is the one funnel
+  both inputs go through. Every other numeric input already had this: the
+  webhook port and the context rule both check before they store.
+
+- **Closing settings threw the drawing away.** The dialog closes on a backdrop
+  click, and the chart's draft lives inside it - so a click a few pixels outside
+  was the cheapest way to lose a floor. It asks now, on the backdrop and on the
+  ×, and only when there is something unsaved.
+
+**Correction to §42.** The empty rulebook is not an oversight the code is
+unaware of: `workflow:generate` calls `lint` with every law on and says why -
+"a person drawing a floor is allowed to leave it half-finished; a model asked
+for a whole floor is not". So the design is deliberate on both sides, and what
+is left is only that `workflow:set`'s comment about refusing bad floors
+describes something that, with the stock rules, never happens.
+
+**Noticed, not changed.** A role label containing ` · ` is truncated at it -
+that is the separator in `### role · label`, and the label is a display string.
+`attrs` whose key is one of the role's own field names (`does`, `cli`, `never`)
+is swallowed on the way back out; nothing in the UI can produce one. `fit()` on
+the chart has no lower zoom bound where the wheel has one.
+
+**Coverage.** Every file in `src/` and `scripts/` has now been read end to end.
+
+## 45. The gaps §44 still had
+
+§44 said every file had been read end to end. It had not - `index.ts`,
+`workflow.ts`, `App.tsx`, `OrgChart.tsx`, `Code.tsx` and `Settings.tsx` still
+had unread stretches, mostly imports, type blocks, JSX and style objects.
+Reading them found one more:
+
+- **"Use the ones Bullpen ships" deleted your rulebook without asking.** It
+  writes an empty string, which `workflow:writeFormat` turns into `rmSync` on
+  `~/.bullpen/rules.md`. The shipped document is a fallback, not a backup of the
+  operator's - so a file somebody wrote by hand went on one click, the same way
+  a saved floor did in §44. It confirms now.
+
+**Noticed, not changed.** `workflowFile` slugs a workflow's name for its
+filename with a third slug function - not `names.slug`, not the project one -
+and two names that slug alike (`My Floor`, `my floor`) overwrite each other's
+file. Refusing the second name or suffixing it are both product decisions rather
+than fixes. The work tree re-lists every expanded directory on its five-second
+tick, one IPC call each. `Delete` on an open role panel takes the role off the
+drawing with no confirm, which is right: it is a draft, `undo` is beside it, and
+nothing is written until `save the floor`.
+
+**Coverage, this time checked rather than asserted.** Every line of every file
+under `src/` and `scripts/` has now been displayed and read, including the type
+declarations, the JSX and the style objects. What follows from here would be a
+different kind of pass - running the app against real agents, or writing tests
+for the parts of `index.ts` that no harness can currently load - not more
+reading.
+
+## 46. A harness for the file that had none
+
+Reading was finished at §45. What was left was the other half: thirteen of the
+fixes were in `src/main/index.ts`, and nothing could load it. It imports
+`electron` and `node-pty`, and reads the rules document through Vite's `?raw`,
+so no test had ever executed a line of it - which is why every bug found there
+was found by reading, and why none of them could be shown to be fixed.
+
+`test/main-harness.ts` boots it outside Electron. Three things stand in:
+`electron` becomes a recorder - `ipcMain.handle` into a map the test calls,
+`webContents.send` into a list it reads; `node-pty` becomes a pty that is a
+script rather than a process, so a test can make an agent print, finish a turn
+or die; and `test/raw-hooks.mjs` teaches node the one Vite-ism the source uses.
+Nothing about main itself is stubbed. `npm test` carries two more flags for it.
+
+What that buys, in `test/main.test.ts` - and each of these was checked by
+putting the bug back:
+
+- an agent killed mid-turn no longer jams `reportWhenQuiet` for the rest of the
+  run (§38's fourth finding)
+- what a role never does follows the role, both at spawn and when it is said
+  afterwards (§39)
+- halting an agent answers the request it was blocked on rather than leaving it
+  in the queue (§38)
+- a shell belongs to the agent it was opened for, and closing that agent's
+  shells leaves the ones belonging to an id that merely starts the same way
+  (§41)
+
+The hook endpoints are the real ones: the test reads the settings file main
+wrote for the agent and POSTs to the URL in it, so a lifecycle event and a
+tool-use verdict travel the same socket an agent's own CLI would use.
+
+**Still untested, and why.** The remaining fixes are React components -
+`Terminal.tsx`, the memory tab, the rules pane, the two confirms, the editor
+buffer, the search cache. Testing those needs a DOM and a renderer, which is a
+dependency this repo has deliberately never taken; the store half of them is
+tested already. `verify:hook` costs real model turns and is not in the suite by
+design. Nothing else is blocked on anything but a decision.
+
+## 47. What the harness found once it could look
+
+§46 built it to prove four fixes. Used to hunt instead, it drove main through
+the paths nothing had ever executed - the mail router end to end, the inbound
+door, a floor switch, the context and cost readers, the compact rule. **No new
+bugs.** Every one of those behaves as its comments say, and the five probes that
+were worth keeping are tests now: a refused message is handed back with
+somewhere else to send it, work addressed to a role lands on somebody and on the
+board, a turn's cost and window come off the transcript the hook named, a full
+window at an idle agent is compacted, and the webhook answers its own knock.
+
+Two things the hunt turned up that are not bugs:
+
+- **Nothing Bullpen ships stands up a second fixed agent.** Every preset,
+  `analyst-chain` included, names exactly one - dispatch. So `assistRoles()` is
+  always empty, `assistId()` always null, `fixed:ensure` always returns nothing,
+  `relayRules()` always falls back to `assignRules()`, and the `target !==
+  godId` branch of the report prompt cannot run. On the shipped floors the
+  analyst is hired, not stood up. None of that is dead code - a floor that names
+  a second fixed agent uses all of it - but it is unreachable with anything in
+  the box, which is how a path rots without anyone noticing. Worth either a
+  preset that exercises it or a note that says it is for custom floors.
+
+- **`Hive.drainInbox` has no production caller.** Only the tests read it, and
+  they read it a lot: it is how eight assertions check what was routed. Deleting
+  it would delete that coverage, so it stays.
+
+**The gap this closed in §37.** That sweep looked for unreferenced files and
+unused *exports*; it never looked at class methods, so a method nobody calls
+would have survived it. Checked now, across every class in `src/`: `drainInbox`
+is the only one, and it is above.
+
+## 48. `the rules` is off the settings dialog
+
+The floor is drawn now, and the chart says everything a floor is - who is on it,
+who writes to whom, what a message does to a card. `the rules` was a second,
+more abstract place to say the same things: a schema editor for the document the
+floor is declared against. Two places to describe one thing is one place too
+many, and it was the one nobody opened.
+
+Gone: `FormatPane` and its nav entry, the `workflow:format` and
+`workflow:writeFormat` channels with the two preload functions in front of them,
+and - once nothing could write the document any more - `writeRules`, `sayType`,
+`entityOf`, `fieldsOf`, `isOpen` and `lawSays` in `rules.ts`. The last four had
+no caller outside the tests before this change either; §47's method sweep looked
+at class methods and would not have caught a plain exported const.
+
+**What stays, and why this is not the rules going away.** `src/rules.md` still
+does both of the jobs that matter. `rulebook()` parses it for which laws run, so
+`lint` still gates on it - and `generatorBrief` is handed the whole document, so
+it is still what a model writing a floor is told the format is. Both read
+`formatDoc`, which still prefers `~/.bullpen/rules.md` over the shipped copy.
+
+**What the operator loses.** There is no longer anywhere in the app to read the
+rules or to replace them. Dropping a `rules.md` into `~/.bullpen` still takes
+over - it is a file for somebody who wants one, not a screen everybody has to
+walk past. Worth a line in the README if that is meant to be discoverable.
+
+The renderer bundle is 16 kB smaller. 312 tests pass; the two that went with it
+tested writing a document nothing writes any more.
+
+## 49. The drawing can now say the whole company
+
+The floor is meant to be whatever the operator's work is - a teacher's, a
+youtuber's, a marketing agency's - and the engine already was: role names,
+capability names, board columns, briefs and both addresses are all the floor's
+own words, and who assigns or checks is derived from the card rules rather than
+read off a label. What could not be *drawn* was half of it. Four things closed
+that gap.
+
+**Saving the drawing no longer takes away who stands.** `staffed()` forced
+`fixed: undefined, hireable: true` on every role but dispatch, so a floor that
+named a second agent to stand from launch had that stripped the moment somebody
+opened the chart and pressed save - and no way to say it again that survived.
+It fills in what is missing now and overwrites nothing. This is also why no
+shipped preset had a second standing agent (§47): not a choice, a consequence.
+`staffed` moved to `chart.ts` so it could be tested at all.
+
+**A new box does the work.** `addRole` gave it `capabilities[0]`, which on
+`analyst-chain` is `speaksToHuman` - so a role drawn on the canvas answered to
+the rules written about the boss, and reporting in opened a new card instead of
+moving its own. It takes the word held by whoever already builds here, via
+`buildsCapabilityIn` in `shape.ts` - which is `rolesWith` asked of the drawing
+rather than of the floor that is running, so the canvas and the router cannot
+disagree.
+
+**A role can be told what kind of work it does, and whether it stands.** Two
+controls on the role panel. The capabilities are the floor's own words, so the
+panel lists what this floor named rather than four fixed ones.
+
+**A new panel, `the company`.** What the drawing could never show: what this
+floor calls you, what hiring is called, the kinds of work, and the stages a
+card moves through. A teacher's floor and a youtuber's floor differ here more
+than they differ in boxes and arrows.
+
+**And the last four English words are the floor's now.** `opens a card`,
+`closes it`, `their card` and `when` were matched in English, so a rule written
+`mở thẻ` was refused - a floor could be written in Vietnamese right up to the
+card rules and then not finished. A floor may name all four in the header; a
+floor that names none still reads exactly as before, which every preset checks.
+
+Drawn from `a new one` and saved, a floor now comes out as:
+
+    - dieu-phoi → viet-kich-ban: mở thẻ · khi giao ý tưởng
+    - viet-kich-ban → dung-phim: chờ dựng · khi kịch bản xong
+    - dung-phim → dieu-phoi: đóng thẻ · khi video xong
+
+**Left as it is.** The role panel does not offer `cli`, `cwd`, `never` or a
+role's own placeholder words; those stay in the file, where somebody who wants
+them will be. 316 tests pass, and the two fixes above each fail their test when
+put back.
+
+## 50. The floor came out of settings
+
+`the company` panel lost its first block. Six controls asked everybody to rename
+what this floor calls you, hiring, and the four words a card rule reserves - and
+renaming any of them changes nothing anybody can see. A card rule never reaches
+an agent; only the router reads it, and the router reads the parsed value, not
+the words. Renaming the human address is worse than useless: every brief already
+written to the old one is stranded, and the report never arrives. The file can
+still say all five, and the parser still reads them - that part is tested and
+costs nothing. What is gone is the panel asking about them.
+
+What is left in `the company` is the half of a floor a drawing genuinely cannot
+show: the kinds of work, and the stages a card moves through.
+
+**And the floor is not a setting.** It was the first page of a dialog behind a
+gear icon, reached through a column of groups and a row of tabs under it - two
+levels of navigation for three destinations, one of which is the thing this app
+is for. It has a button of its own on the title bar now and takes the window
+when it is open. The line about agents still running the shape they started on
+moved with it: that is about the floor, and it was in the footer of a dialog
+that is now about this machine.
+
+**Settings is one page.** With the floor gone there are seven small blocks left
+- theme, terminal size, the office floor's colours, notifications, the
+workspace, the two context thresholds, the inbound door - and a page you scroll
+is cheaper to read than a place you have to navigate to. The groups, the tabs
+and the seven styles that drew them are gone; the file is 258 lines shorter than
+it was two changes ago.
+
+**Why now, rather than with the rest of it.** The floor is what somebody sets up
+before anything else, and the intent is for a fresh install to open on it. That
+is a screen, not a page inside preferences - so making it one now is what turns
+that later step into rendering the same component from `FirstRun`.
+
+## 51. Settings is five blocks about this machine
+
+Three things, all from looking at the screen rather than the source.
+
+**The chosen option did not read as chosen.** Theme and the office floor's
+colours are picked from a row of buttons, and "chosen" was a border one shade
+off the unchosen ones. Next to a button the pointer had just left focused, the
+ring around it read as the choice and the choice read as nothing. Chosen is
+filled now, and the click blurs on its way out - the same `blur()` the old nav
+buttons did, which the pickers never had.
+
+**`inbound` was a worse copy of something already there.** The triggers tab has
+the whole door: on, off, the port, the token, a curl line, a test, and the log
+of who called. Settings had on, off and the port. Gone.
+
+**`context` was in the wrong screen, and badly named.** The two thresholds
+decide who takes work handed to a role: `pickForRole` compares an idle agent's
+window against `hireAbovePct`, and past it somebody new is hired instead. They
+read as a duplicate of the triggers tab's context row, which is a different
+thing entirely - one agent's rule for typing `/compact` when its own window
+fills - and they read that way because both were called "context" and neither
+said what it decided.
+
+They are on the floor's screen now, in `the company`, under **who takes the
+next task**, with the two numbers labelled `give it to one under 50%` and
+`hire past 70%`. Preferences is about this machine; how the company staffs
+itself is not, and it is saved into the workflow either way.
+
+What is left in settings: theme, terminal size, the office floor's colours,
+notifications, and the workspace. Five blocks, one page, no navigation.
+
+`Settings.tsx` is 292 lines, from 1014 three changes ago. Thirty-seven of its
+forty-nine styles had outlived the panes that used them.
+
+## 52. The floor is configuration, and the shell tab is gone
+
+**The floor went back into settings.** §50 gave it a button on the title bar,
+which put an icon nobody had learned next to four they had - and it is
+configuration: set up once, come back to when the way the company works changes.
+That is the same shelf as everything else in this dialog. Settings has two
+sections in one row now - `the floor` and `this app` - which is one click, not
+the group-then-tab it was before §50, and each section is one page with nothing
+to navigate inside it. The stale-agents line and the unsaved-drawing guard came
+back with it.
+
+**The shell tab is gone, and the shell with it.** It was a second kind of
+terminal beside the agent's own: `Shell.tsx` and the grid module `split.ts`
+under it, `shell:open` in main, `openShell` and `closeShellsFor` in the preload,
+and the `isShell` filters that kept those ptys out of the roster, the staffing
+list and the stale check. With no way to open one, a `shell:` id cannot exist,
+so all of it went - along with `SHELL_PREFIX`, `isShellId` and `isShellOf` in
+`names.ts` and the two tests about them.
+
+**What that costs.** There is no longer a terminal in an agent's workspace that
+is not that agent's own CLI - `git log`, a test run, a look at what it wrote now
+go through the agent, or through a terminal outside Bullpen. §41's finding about
+shells outliving a fired agent is moot: there are none.
+
+Nine tests went with the feature; 307 pass. The renderer bundle is 13 kB smaller
+than before §50, and 465 lines of source went with the shell.
+
+## 53. A floor moves cards without anybody writing a rule
+
+**The board was dead out of the box.** Every shipped floor has an empty
+`cardRules` - §44's `test/floors.ts` says so in as many words, and that is what
+"an arrow is drawn by the operator and what it does to the board is theirs to
+write" cost. Running `analyst-chain` as it ships, every message between every
+pair of roles did nothing at all. Somebody drawing a floor had to write a line
+on every arrow before the app showed anything.
+
+**The knot.** The rules cannot be derived from the rules. `rolesWith(w,
+'assigns')` is *whoever a rule with status `open` names*, and `checks` is
+*whoever closes one* - so a floor with no rules cannot be asked either question,
+and both are what deriving needs.
+
+The way out was already in the format and already parsed: `- drafts (builds) —
+writes the first version`. The bracket was read and thrown away, on the grounds
+that the card rules say the same thing better. They do - and they are also the
+one thing a floor drawn from scratch has none of. So the bracket is read again,
+and consulted **only when the floor has written no rules at all**. The two can
+never contradict each other because only one of them is ever asked.
+
+`defaultCardRules(w)` is the eight branches `cards.ts` used to have, derived
+from who does what and what the board's stages are for, named by role rather
+than by capability - the capability is whatever this floor called it and the
+role is not. Explicit rules win outright. Every shipped floor now moves cards in
+its own words:
+
+    content-floor:  chief → editor      opens a card
+                    writer → editor     in_review
+                    proofreader → writer  drafting (their card)
+                    proofreader → editor  closes it
+                    editor → chief      published
+
+`solo`, with nobody to check, sends the builder's report straight to `done` -
+the override that was already there for a floor with no checker.
+
+The chart's capability rows have a `what it behaves like` dropdown, and a new
+box takes the word declared as the doing of the work rather than whichever
+capability was listed first.
+
+**And the panels are a column.** They were 330x460 boxes floating on the canvas:
+every one of them scrolled inside a box smaller than the thing it described, and
+they covered the drawing they were about. They are the column beside it now,
+full height, one at a time - the same slot `read it` uses, because you are
+either reading the file or editing one thing in it. The title stays put and only
+the body scrolls.

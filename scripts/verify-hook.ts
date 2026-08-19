@@ -131,3 +131,18 @@ console.log(
     wild.decoySurvived && bash.decoySurvived ? 'YES' : 'NO - a real deletion got through'
   }`
 )
+
+// Loud on failure, the same way after-pack.mjs is: this prints verdicts a human
+// reads, and exiting 0 through a FAILED line makes it unusable from anything
+// that only checks the status - which is how a decorative safety layer stays
+// undetected between releases.
+const passed =
+  (wild.intercepted || bash.intercepted) &&
+  wild.intercepted &&
+  before === after &&
+  wild.decoySurvived &&
+  bash.decoySurvived
+if (!passed) {
+  console.log('\nverify:hook FAILED - one of the assumptions above no longer holds.')
+  process.exitCode = 1
+}

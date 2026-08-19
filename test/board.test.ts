@@ -97,7 +97,7 @@ test('toggle and remove persist', () => {
   const { board, root } = fresh()
   const a = board.addTask('michael', 'one')!
   const b = board.addTask('michael', 'two')!
-  board.toggleTask(a.id)
+  board.setTaskStatus(a.id, 'done')
   board.removeTask(b.id)
 
   const reopened = new Board(boardPath(root))
@@ -164,15 +164,6 @@ test('a board written before statuses existed still loads', () => {
     ['todo', 'done'],
     'the column is derived from done rather than left undefined'
   )
-  rmSync(root, { recursive: true, force: true })
-})
-
-test('a card can be reassigned', () => {
-  const { board, root } = fresh()
-  const t = board.addTask('michael', 'hand over')!
-  board.assignTask(t.id, 'dwight')
-  assert.equal(board.tasks('dwight').length, 1)
-  assert.equal(board.tasks('michael').length, 0)
   rmSync(root, { recursive: true, force: true })
 })
 

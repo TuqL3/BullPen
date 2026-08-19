@@ -129,12 +129,6 @@ export class Board extends EventEmitter {
     return task
   }
 
-  toggleTask(id: string): void {
-    const t = this.data.tasks.find((x) => x.id === id)
-    if (!t) return
-    this.setTaskStatus(id, t.status === 'done' ? 'todo' : 'done')
-  }
-
   setTaskStatus(id: string, status: TaskStatus): void {
     const t = this.data.tasks.find((x) => x.id === id)
     // No vocabulary check here: the columns are the workflow's, and this file
@@ -146,13 +140,6 @@ export class Board extends EventEmitter {
     // by key. A floor that calls its last column `published` leaves this false,
     // which is only ever read by a board old enough to have no status at all.
     t.done = status === 'done'
-    this.save()
-  }
-
-  assignTask(id: string, agentId: string): void {
-    const t = this.data.tasks.find((x) => x.id === id)
-    if (!t) return
-    t.agentId = agentId
     this.save()
   }
 

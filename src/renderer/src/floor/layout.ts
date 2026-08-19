@@ -20,16 +20,6 @@ export const MIN_ROWS = 14
 export const MAX_COLS = 44
 export const MAX_ROWS = 44
 
-/**
- * The widest the office is ever drawn, in pixels.
- *
- * The floor is a pixel grid with a column cap, so past this every extra pixel of
- * panel is empty carpet. The column it lives in takes this as a ceiling: on a
- * big monitor it stops here instead of stretching, and on a small one it still
- * shrinks, because a ceiling is not a fixed width.
- */
-export const FLOOR_MAX_W = MAX_COLS * TILE
-
 export type Cell =
   | 'floor'
   | 'rug'
@@ -204,7 +194,6 @@ export function buildOffice(cols: number, rows: number): Office {
     const inX0 = meeting.x0 - 1
     const inX1 = meeting.x1 - 1
     const inY0 = partTop
-    const inY1 = roomBottom - 1
     // One tile of floor on three sides, three on the screen side: a meeting room
     // needs somewhere to stand and something to look at, and a table pushed up
     // against the wall the screen is on leaves neither.

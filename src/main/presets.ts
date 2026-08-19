@@ -318,10 +318,10 @@ const CONTENT: Workflow = {
   reuseBelowPct: 50,
   hireAbovePct: 70,
   capabilities: [
-    { name: 'speaks', what: 'the only one who answers you' },
-    { name: 'commissions', what: 'decides what gets written and by whom' },
-    { name: 'drafts', what: 'writes the first version' },
-    { name: 'proofs', what: 'sends it back or lets it through' }
+    { name: 'speaks', kind: 'speaksToHuman', what: 'the only one who answers you' },
+    { name: 'commissions', kind: 'assigns', what: 'decides what gets written and by whom' },
+    { name: 'drafts', kind: 'builds', what: 'writes the first version' },
+    { name: 'proofs', kind: 'checks', what: 'sends it back or lets it through' }
   ],
   columns: [
     { key: 'briefed', label: 'briefed', bar: '#7fc7e8', kind: 'start' },
@@ -428,10 +428,10 @@ const SUPPORT: Workflow = {
   reuseBelowPct: 50,
   hireAbovePct: 70,
   capabilities: [
-    { name: 'speaks', what: 'the only one who reports to you' },
-    { name: 'triages', what: 'reads what came in and decides who takes it' },
-    { name: 'answers', what: 'writes the reply to the customer' },
-    { name: 'verifies', what: 'reads the reply before it goes out' }
+    { name: 'speaks', kind: 'speaksToHuman', what: 'the only one who reports to you' },
+    { name: 'triages', kind: 'assigns', what: 'reads what came in and decides who takes it' },
+    { name: 'answers', kind: 'builds', what: 'writes the reply to the customer' },
+    { name: 'verifies', kind: 'checks', what: 'reads the reply before it goes out' }
   ],
   columns: [
     { key: 'inbox', label: 'inbox', bar: '#7fc7e8', kind: 'start' },

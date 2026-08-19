@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { routeCard, type CardMove } from '../src/main/cards.ts'
 import { DEFAULT_WORKFLOW, PRESETS } from './floors.ts'
+import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 import type { Workflow } from '../src/main/workflow.ts'
 
 const HUMAN = 'you'
@@ -236,3 +237,42 @@ test('a rule can be written about the person running the floor', () => {
   )
 })
 
+
+test('a floor nobody has written a rule on still moves cards', () => {
+  // Every shipped floor has an empty `cardRules`, and for a while that meant
+  // the board never moved: work was handed over, done and reported, and nothing
+  // appeared on it. Somebody drawing a floor had to write a rule on every line
+  // before the app did anything visible.
+  //
+  // What each word behaves like is enough to say what a message does, so a
+  // floor that has written nothing is read that way instead.
+  for (const w of SHIPPED) {
+    assert.deepEqual(w.cardRules, [], `"${w.name}" is expected to ship with none`)
+    const roleOf = (id: string): string => id
+    const names = Object.keys(w.roles)
+    const moves = names.flatMap((from) =>
+      [...names, w.human]
+        .filter((to) => to !== from)
+        .map((to) => routeCard(w, { from, to, subject: 'x', body: '' }, roleOf, w.human))
+        .filter(Boolean)
+    )
+    assert.ok(moves.length > 0, `"${w.name}" moves no cards at all`)
+    assert.ok(
+      moves.some((m) => m?.kind === 'open'),
+      `"${w.name}" never opens one`
+    )
+    assert.ok(
+      moves.some((m) => m?.kind === 'move' || m?.kind === 'checked'),
+      `"${w.name}" opens cards and never moves them`
+    )
+  }
+})
+
+test('a rule somebody wrote beats what the floor would have done', () => {
+  // The default is what a floor means when it says nothing. One written line
+  // takes over: the floors these tests run against write all eight, and the
+  // router has always read exactly those.
+  const w = { ...SOLO, cardRules: [{ from: 'god', to: 'dev', status: 'blocked' }] } as Workflow
+  const move = routeCard(w, { from: 'god', to: 'dev', subject: 'x', body: '' }, (id) => id, HUMAN)
+  assert.deepEqual(move, { kind: 'move', agent: 'god', status: 'blocked' })
+})

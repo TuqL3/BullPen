@@ -70,21 +70,37 @@ export class Webhooks extends EventEmitter {
       }
 
       let size = 0
+      let over = false
       const chunks: Buffer[] = []
       req.on('data', (c: Buffer) => {
         size += c.length
         // Stopped mid-stream: reading a gigabyte to then reject it is the same
-        // as accepting it, for anything that matters here.
+        // as accepting it, for anything that matters here. The flag is what
+        // keeps a chunk already queued behind the destroy from answering a
+        // second time - `writeHead` throws once the headers are out, and a
+        // throw in here is an uncaught exception in the main process.
         if (size > MAX_BODY) {
-          reply(413, `bodies over ${MAX_BODY} bytes are refused`)
-          req.destroy()
+          if (!over) {
+            over = true
+            reply(413, `bodies over ${MAX_BODY} bytes are refused`)
+            req.destroy()
+          }
           return
         }
         chunks.push(c)
       })
       req.on('end', () => {
-        if (size > MAX_BODY) return
-        const task = read(req, url, Buffer.concat(chunks).toString('utf8'))
+        if (over) return
+        // `read` decodes the path, and a malformed escape - `/task/%` - makes
+        // `decodeURIComponent` throw. Thrown from a request handler that is one
+        // uncaught exception, which is the whole app, so a bad URL answers 400.
+        let task: Incoming | null
+        try {
+          task = read(req, url, Buffer.concat(chunks).toString('utf8'))
+        } catch {
+          this.emit('refused', { from: sourceOf(req), why: 'malformed url' })
+          return reply(400, 'that url is not something we can read - check the escaping')
+        }
         if (!task) {
           this.emit('refused', { from: sourceOf(req), why: 'empty body' })
           return reply(400, 'send something to do: a line of text, or json with a body field')

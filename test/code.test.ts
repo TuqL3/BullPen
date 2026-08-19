@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -202,5 +202,29 @@ test('one file can be searched on its own, with the same matcher', () => {
     assert.deepEqual(one.matched, [{ path: 'src/b.ts', count: 1 }])
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a file that does not exist yet can be written', () => {
+  // The memory panel offers to give an agent a CLAUDE.md when it has none -
+  // which is the one case `write` refused, because it stat'd the path first and
+  // stat throws on a path that is not there. The button answered ENOENT.
+  const root = mkdtempSync(join(tmpdir(), 'bullpen-new-'))
+  try {
+    assert.equal(existsSync(join(root, 'CLAUDE.md')), false, 'nothing there to begin with')
+    write(root, 'CLAUDE.md', '# Morgan\n\nAlways run the tests.\n')
+    assert.match(readFileSync(join(root, 'CLAUDE.md'), 'utf8'), /Always run the tests/)
+
+    // And it still overwrites one that is already there.
+    write(root, 'CLAUDE.md', '# Morgan\n\nAnd read the diff.\n')
+    assert.match(readFileSync(join(root, 'CLAUDE.md'), 'utf8'), /And read the diff/)
+
+    // The two things it must still refuse.
+    mkdirSync(join(root, 'src'))
+    assert.throws(() => write(root, 'src', 'x'), /is a directory/)
+    assert.throws(() => write(root, '../escaped.md', 'x'), /outside the workspace/)
+    assert.equal(existsSync(join(root, '..', 'escaped.md')), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

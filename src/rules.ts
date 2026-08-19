@@ -102,7 +102,6 @@ export function readRules(text: string): Rules {
 
   let entity: Entity | null = null
   let inLaw = false
-  let pending = ''
 
   for (const line of lines) {
     const head = /^##\s+(.+)$/.exec(line)
@@ -115,11 +114,10 @@ export function readRules(text: string): Rules {
         entity = { name: named[1].trim(), what: '', fields: [] }
         entities.push(entity)
       }
-      pending = ''
       continue
     }
 
-    const bullet = /^\s*[-*]\s+(.+)$/.exec(line)
+    const bullet = /^\s*[-*+]\s+(.+)$/.exec(line)
     if (!bullet) {
       // The paragraph under a heading is what that entity is for - all of it.
       // Taking only the first line cut every sentence off at the width somebody
@@ -159,74 +157,9 @@ export function readRules(text: string): Rules {
         .filter((f) => !/^match\s/i.test(f) && !/^default\s/i.test(f))
         .join(' · ')
     })
-    pending = ''
   }
-  void pending
   return { entities, laws, text }
 }
 
-/**
- * The rules, written back out.
- *
- * Round-trips through `readRules`, because the settings dialog edits the schema
- * as a form and has to hand back something that is still the rules - a file a
- * person can read, diff and put in a repository, rather than a blob only this
- * app understands.
- */
-export function writeRules(rules: Rules): string {
-  const out: string[] = ['# Rules', '', RULES_INTRO]
-
-  for (const entity of rules.entities) {
-    out.push('', `## entity: ${entity.name}`)
-    if (entity.what) out.push('', entity.what)
-    out.push('')
-    for (const f of entity.fields) {
-      const flags = [
-        f.required ? 'required' : '',
-        f.unique ? 'unique' : '',
-        f.match ? `match ${f.match}` : '',
-        f.fallback ? `default ${f.fallback}` : '',
-        f.what
-      ].filter(Boolean)
-      out.push(`- ${f.name} · ${sayType(f.type)}${flags.length ? ` · ${flags.join(' · ')}` : ''}`)
-    }
-  }
-
-  out.push('', '## law', '', LAW_INTRO, '')
-  for (const l of rules.laws) out.push(`- \`${l.id}\` — ${l.says}`)
-  return out.join('\n') + '\n'
-}
-
-/** A type, said the way the rules say it. The inverse of `readType`. */
-export function sayType(t: FieldType): string {
-  if (t.kind === 'list') return `list of ${sayType(t.of)}`
-  if (t.kind === 'oneOf') return `one of ${t.of.join(', ')}`
-  if (t.kind === 'ref') return t.to.join(' or ')
-  return t.kind
-}
-
-const RULES_INTRO = `Every floor is declared against this. Nothing outside it exists: a line the
-rules do not name is refused rather than ignored, and a check the rules do not
-list is not run.`
-
-const LAW_INTRO = `Each line is a check that runs. Take one out and it stops running; the words
-after the dash are what a person is told when it fails.`
-
-/** One entity by name, or null. */
-export const entityOf = (rules: Rules, name: string): Entity | null =>
-  rules.entities.find((e) => e.name === name) ?? null
-
-/** The fields of an entity that a floor may write, in the order the rules list them. */
-export const fieldsOf = (rules: Rules, entity: string): Field[] =>
-  entityOf(rules, entity)?.fields.filter((f) => !f.open) ?? []
-
-/** Whether this entity takes lines the rules did not name. */
-export const isOpen = (rules: Rules, entity: string): boolean =>
-  Boolean(entityOf(rules, entity)?.fields.some((f) => f.open))
-
 /** Whether a law is switched on. Removing its line from the rules turns it off. */
 export const lawOn = (rules: Rules, id: string): boolean => rules.laws.some((l) => l.id === id)
-
-/** What a person is told when a law fails, in the rules' own words. */
-export const lawSays = (rules: Rules, id: string): string =>
-  rules.laws.find((l) => l.id === id)?.says ?? id
