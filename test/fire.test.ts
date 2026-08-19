@@ -1,6 +1,29 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { useStore } from '../src/renderer/src/store.ts'
+import { setShape } from '../src/renderer/src/shape.ts'
+import type { WorkflowInfo } from '../src/preload/index.ts'
+
+/**
+ * Who cannot be fired is the workflow's answer, not a name in the source, so
+ * the store has to be told the shape before it can refuse anything.
+ */
+const FLOOR = {
+  name: 'test-floor',
+  description: '',
+  dispatch: 'god',
+  entry: 'ba',
+  reuseBelowPct: 50,
+  hireAbovePct: 70,
+  roles: {
+    god: { can: ['speaksToHuman'], label: 'the boss', fixed: { id: 'michael', name: 'Michael' }, brief: '' },
+    ba: { can: ['assigns'], label: 'the analyst', fixed: { id: 'ba', name: 'Iris' }, brief: '' },
+    dev: { can: ['builds'], label: 'a developer', hireable: true, brief: '' }
+  },
+  talksTo: { god: ['ba', 'you'], ba: ['god', 'dev', 'hire'], dev: ['ba'] }
+} as unknown as WorkflowInfo
+
+setShape(FLOOR)
 
 const hire = (id: string, role: 'god' | 'ba' | 'dev' = 'dev'): void =>
   useStore.getState().upsertAgent({ id, name: id, role })
@@ -58,7 +81,7 @@ test('a fired agent takes its pending approvals with it', () => {
   assert.deepEqual(useStore.getState().approvals, [], 'an approval nobody can answer would sit in ask-me forever')
 })
 
-test('Michael and the analyst cannot be fired - the floor needs both', () => {
+test('the floor\'s own agents cannot be fired - a workflow says which those are', () => {
   reset()
   hire('michael', 'god')
   hire('iris', 'ba')
@@ -69,7 +92,7 @@ test('Michael and the analyst cannot be fired - the floor needs both', () => {
   assert.deepEqual(
     useStore.getState().agents.map((a) => a.id),
     ['michael', 'iris', 'dave'],
-    'dispatch routes through Michael and every hire reports to Iris; neither has a re-hire path'
+    'dispatch routes through one and every hire reports to the other; neither has a re-hire path'
   )
 
   useStore.getState().removeAgent('dave')

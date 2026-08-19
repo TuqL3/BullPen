@@ -49,6 +49,16 @@ const HALF_WRITTEN_MS = 3000
 export const HUMAN = 'you'
 
 /**
+ * What those two are called on this floor.
+ *
+ * `you` and `hire` are the defaults and what every brief Bullpen ships uses,
+ * but they are words in a message rather than mechanism: a floor that addresses
+ * its operator as `boss` says so in its workflow, and the router has to answer
+ * to that instead. Set by main whenever a workflow is applied.
+ */
+export type Reserved = { human: string; hire: string }
+
+/**
  * Reserved recipient: a request to hire. Michael has to be able to put someone
  * on a project that has nobody free, and the alternative - an IPC only the UI
  * can call - is a capability he could never reach.
@@ -83,6 +93,25 @@ export class Hive extends EventEmitter {
    * may write to anyone.
    */
   gate: ((from: string, to: string) => string | null) | null = null
+
+  /**
+   * Turn an address that is not an agent id into one.
+   *
+   * A message to `dev` used to die: `dev` is a role, not somebody, and an agent
+   * handing work down had to know who was on the floor, whether they were free,
+   * and how full their window was - before it could address the envelope. This
+   * asks the app to answer all three, which may mean hiring somebody. Returning
+   * null keeps the old behaviour: the message is dead and the sender is told.
+   */
+  staff: ((to: string, from: string, msg: Message) => string | null) | null = null
+
+  /**
+   * The two addresses that are not agents, under this floor's names for them.
+   *
+   * Defaults to `you` and `hire`, which is what they were when they were
+   * constants - a floor that never renames them cannot tell the difference.
+   */
+  reserved: Reserved = { human: HUMAN, hire: HIRE }
 
   // Plain assignment, not a constructor parameter property: `node
   // --experimental-strip-types` rejects parameter properties, and that is how
@@ -192,18 +221,23 @@ export class Hive extends EventEmitter {
           this.emit('blocked', msg, why)
         }
 
-        if (msg.to === HUMAN || msg.to === HIRE) {
+        if (msg.to === this.reserved.human || msg.to === this.reserved.hire) {
           const why = this.gate?.(msg.from, msg.to) ?? null
           if (why) {
             refuse(why)
             continue
           }
-          this.emit(msg.to === HUMAN ? 'question' : 'hire', msg)
+          this.emit(msg.to === this.reserved.human ? 'question' : 'hire', msg)
           continue
         }
 
+        // An id if it is one, otherwise whoever the app puts in that role.
+        const named =
+          msg.to === '*' || agents.includes(msg.to)
+            ? msg.to
+            : (this.staff?.(msg.to, from, msg) ?? msg.to)
         const addressed =
-          msg.to === '*' ? agents.filter((a) => a !== from) : agents.includes(msg.to) ? [msg.to] : []
+          named === '*' ? agents.filter((a) => a !== from) : agents.includes(named) ? [named] : []
         // Per target, so a broadcast reaches the part of the floor it is
         // allowed to reach rather than being refused whole.
         const blocked = addressed

@@ -1,6 +1,7 @@
 import { faceFor } from '../roster'
 import { LABEL, MONO } from '../theme'
 import type { Agent, MailEvent } from '../store'
+import { dispatchAgent } from '../shape'
 
 /**
  * Who talks to whom, drawn from real mail traffic rather than a declared org
@@ -30,9 +31,10 @@ export function Graph({ agents, mail }: { agents: Agent[]; mail: MailEvent[] }) 
   const cx = size / 2
   const cy = size / 2
 
-  // The operator's own clone sits at the centre; everyone else rings it. That
-  // is the actual shape of the floor - mail flows through the god agent.
-  const god = agents.find((a) => a.role === 'god')
+  // Whoever a task is dispatched to sits at the centre; everyone else rings
+  // them. That is the actual shape of the floor - work arrives through one
+  // agent, and which one is the workflow's answer, not this file's.
+  const god = dispatchAgent(agents)
   const ring = agents.filter((a) => a.id !== god?.id)
 
   const pos = new Map<string, { x: number; y: number }>()

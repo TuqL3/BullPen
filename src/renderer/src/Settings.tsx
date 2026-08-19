@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { WorkflowInfo } from '../../preload/index'
 import { Markdown } from './Markdown'
-import { WORKFLOW_SPEC } from '../../workflow-spec'
+import { OrgChart } from './OrgChart'
+import { FLOORS } from './floor/tiles'
+import { onEnter } from './keys'
+import { readBrief, writeBrief } from '../../brief'
+import { readRules, readType, sayType, writeRules, type Field, type Rules } from '../../rules'
 import { LABEL, MONO } from './theme'
 
 
@@ -32,373 +36,164 @@ const nameOf = (md: string): string => (/^#\s+(.+)$/m.exec(md)?.[1] ?? '').trim(
  * prose with six structural lines buried in it; the panel beside it is those
  * six lines, read back out of the same parse the router will do.
  */
+/**
+ * The sections of this dialog.
+ *
+ * It was one screen, for one thing: the workflow. Everything else adjustable
+ * was a button somewhere else in the app - the theme and the bell in the title
+ * bar, the workspace on an agent's own header, the webhook three tabs away -
+ * which is a settings screen scattered across the product rather than absent.
+ */
+/**
+ * The sections of this dialog, grouped by what is being changed.
+ *
+ * It grew as a flat list - floor, roles, try it, board, format, look, agents -
+ * which is seven things in one column with nothing saying that four of them are
+ * the same document and three are this machine. Grouped, and the markdown is
+ * where it belongs: one entry at the bottom of the floor, for people who would
+ * rather type it.
+ */
+const GROUPS = [
+  {
+    key: 'floor',
+    title: 'the floor',
+    hint: 'who is on it and how work moves - drawn, not typed',
+    items: [['chart', 'chart']]
+  },
+  {
+    key: 'app',
+    title: 'this app',
+    hint: 'this machine, not this floor',
+    items: [
+      ['look', 'look & alerts'],
+      ['agents', 'agents & doors'],
+      ['format', 'the rules']
+    ]
+  }
+] as const
+type Section = (typeof GROUPS)[number]['items'][number][0]
+
 export function Settings({
   workflow,
   onClose,
   onApplied,
-  onRestartFloor
+  onRestartFloor,
+  mode,
+  onMode,
+  notifyOn,
+  onNotify,
+  prefs,
+  onPrefs,
+  onMoveGod
 }: {
   workflow: WorkflowInfo | null
   onClose: () => void
   onApplied: (w: WorkflowInfo) => void
   /** Take the standing agents down and bring them back on the running shape. */
   onRestartFloor: () => Promise<void>
+  mode: 'light' | 'dark'
+  onMode: (m: 'light' | 'dark') => void
+  notifyOn: boolean
+  onNotify: (on: boolean) => void
+  /** How the app is drawn on this machine: terminal size, floor colours. */
+  prefs: { fontSize: number; floor: string }
+  onPrefs: (next: { fontSize?: number; floor?: string }) => void
+  /** Pick a new workspace for the standing agents. Restarts them. */
+  onMoveGod: () => Promise<void>
 }) {
-  const [saved, setSaved] = useState<Saved[]>([])
-  const [text, setText] = useState('')
-  const [problems, setProblems] = useState<string[]>([])
-  const [preview, setPreview] = useState<WorkflowInfo | null>(null)
-  const [note, setNote] = useState('')
+  const [section, setSection] = useState<Section>('chart')
+  const group = GROUPS.find((g) => g.items.some(([key]) => key === section)) ?? GROUPS[0]
+  /** Agents that are still running the shape they were spawned on. */
   const [stale, setStale] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
-  const [help, setHelp] = useState(false)
-  /** The sentence a floor is described in, before there is a file for it. */
-  /** The describe-a-floor dialog: open, what was asked, and what came back. */
-  const [describing, setDescribing] = useState(false)
-  /**
-   * Two different questions, and conflating them is what made `apply` go grey
-   * the moment a workflow was picked from the list:
-   *
-   * `running` is what the floor is on now - `apply` is offered whenever the
-   * editor differs from it, which is exactly when there is a switch to make.
-   * `loaded` is the text as it arrived in the editor - unsaved work is the
-   * difference from that, which is what closing has to warn about.
-   */
-  const [running, setRunning] = useState('')
-  const [loaded, setLoaded] = useState('')
+
+  useEffect(() => {
+    window.bullpen.workflow().then((r) => setStale(r.stale))
+  }, [workflow])
 
   /**
-   * The source and its rendering scroll together.
+   * A pane saved a change to the running floor.
    *
-   * Proportionally, not line for line: rendered text is shorter than its source
-   * - a heading loses its hashes, a bullet loses its dash - so matching pixels
-   * would drift apart down the page. `syncing` is the loop guard: setting
-   * scrollTop fires the other pane's own scroll handler.
-   *
-   * Only these two. The structure panel is a summary of the whole document
-   * rather than a view of part of it, so there is no position in it to keep.
+   * Nothing else has to be told: the canvas holds the whole floor and reloads
+   * from the prop, and the rest of the dialog is about this machine.
    */
-  const editorRef = useRef<HTMLTextAreaElement>(null)
-  const readRef = useRef<HTMLDivElement>(null)
-  const syncing = useRef(false)
+  const patched = (next: WorkflowInfo): void => onApplied(next)
 
-  const sync = (from: HTMLElement | null, to: HTMLElement | null): void => {
-    if (!from || !to || syncing.current) return
-    const fromMax = from.scrollHeight - from.clientHeight
-    const toMax = to.scrollHeight - to.clientHeight
-    if (fromMax <= 1 || toMax <= 1) return
-    syncing.current = true
-    to.scrollTop = (from.scrollTop / fromMax) * toMax
-    requestAnimationFrame(() => {
-      syncing.current = false
-    })
+  /** Take the standing agents down and bring them back on the shape now running. */
+  const moveFloor = async (): Promise<void> => {
+    setBusy(true)
+    await onRestartFloor()
+    setStale([])
+    setBusy(false)
   }
 
-  /**
-   * Drop the focus ring a mouse click leaves behind.
-   *
-   * A toggle that keeps focus after being clicked off still looks pressed, and
-   * on a button whose whole job is "on or off" that reads as the click not
-   * having worked. Keyboard focus is untouched: tabbing to it still rings it,
-   * because nothing here removes the outline.
-   */
   const unfocus = (e: React.MouseEvent<HTMLElement>): void => e.currentTarget.blur()
 
-  /**
-   * Take me to the thing that is wrong.
-   *
-   * A problem naming a blank is a place in the document, and reading it out of
-   * the text was the operator's job: five blanks scattered through forty lines
-   * of brief, found by eye. The linter already knows which one it means - it
-   * quotes it - so the list becomes what it always described, a set of places
-   * to go.
-   *
-   * Searched forward from where the cursor is and wrapped, so the same blank
-   * appearing in two roles walks between them rather than always landing on the
-   * first.
-   */
-  const goTo = (problem: string): void => {
-    const blank = /«[^»]*»/.exec(problem)?.[0]
-    const box = editorRef.current
-    if (!blank || !box) return
-    const from = box.selectionEnd
-    const at = text.indexOf(blank, from) === -1 ? text.indexOf(blank) : text.indexOf(blank, from)
-    if (at === -1) return
-    box.focus()
-    box.setSelectionRange(at, at + blank.length)
-    // Selecting does not scroll on its own when the range is off-screen. Line
-    // height times the line number is close enough, and centred so there is
-    // context above it rather than the blank pinned to the top edge.
-    const line = text.slice(0, at).split('\n').length
-    box.scrollTop = Math.max(0, line * LINE_PX - box.clientHeight / 2)
-  }
-
-  /**
-   * Tab walks the blanks, the way it walks the fields of a form - which is what
-   * a half-filled template is. Only while any are left: once they are gone the
-   * key goes back to moving focus out of the box, which is what it is for.
-   */
-  const onTab = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.key !== 'Tab' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
-    const box = e.currentTarget
-    const rest = text.slice(box.selectionEnd)
-    const ahead = /«[^»]*»/.exec(rest)
-    const found = ahead
-      ? { at: box.selectionEnd + ahead.index, len: ahead[0].length }
-      : (() => {
-          const first = /«[^»]*»/.exec(text)
-          return first ? { at: first.index, len: first[0].length } : null
-        })()
-    if (!found) return
-    e.preventDefault()
-    box.setSelectionRange(found.at, found.at + found.len)
-    const line = text.slice(0, found.at).split('\n').length
-    box.scrollTop = Math.max(0, line * LINE_PX - box.clientHeight / 2)
-  }
-
-  const reload = (): Promise<void> => window.bullpen.workflowList().then(setSaved)
-
-  useEffect(() => {
-    reload()
-    window.bullpen.workflow().then((r) => {
-      setText(r.markdown)
-      setRunning(r.markdown)
-      setLoaded(r.markdown)
-      setStale(r.stale)
-    })
-  }, [])
-
-  /**
-   * Checked as you type, not only on apply: every problem the linter finds is
-   * one that fails silently at runtime - a card that never moves, a report that
-   * reaches nobody - and finding that out an hour into a run is finding out too
-   * late. Debounced because it crosses to main on every keystroke otherwise.
-   */
-  useEffect(() => {
-    if (!text.trim()) return
-    const t = setTimeout(async () => {
-      const r = await window.bullpen.lintWorkflow(text)
-      setProblems(r.problems)
-      setPreview(r.preview)
-    }, 350)
-    return () => clearTimeout(t)
-  }, [text])
-
-  const edit = (next: string): void => {
-    setText(next)
-    setNote('')
-  }
-
-  /** Unsaved typing, as opposed to "this is a different workflow than is running". */
-  const dirty = text !== loaded
-  /** There is a switch to make: what is in the editor is not what is running. */
-  const changed = text.trim().length > 0 && text !== running
-  const editing = nameOf(text)
-  /**
-   * Something in the editor that is not one of the saved workflows - which is
-   * what `+ new workflow` produces, and the only time having one written for
-   * you is on offer. Offering it while a saved floor is open would be offering
-   * to overwrite it.
-   */
-  const unsaved = Boolean(editing) && !saved.some((p) => p.name === editing)
-
-  const load = (md: string, force = false): void => {
-    if (!force && dirty && !confirm('Discard the changes in the editor?')) return
-    edit(md)
-    setLoaded(md)
-  }
-
-  const keep = async (): Promise<void> => {
-    setBusy(true)
-    const res = await window.bullpen.saveWorkflow(text)
-    setNote(res.error ?? `Saved "${res.name}" — kept, not running.`)
-    if (!res.error) {
-      setLoaded(text)
-      await reload()
-    }
-    setBusy(false)
-  }
-
-  const drop = async (name: string): Promise<void> => {
-    if (!confirm(`Delete the "${name}" workflow? The file is removed.`)) return
-    const res = await window.bullpen.deleteWorkflow(name)
-    if (res.error) return setNote(res.error)
-    await reload()
-  }
-
-  const apply = async (): Promise<void> => {
-    setBusy(true)
-    setNote('')
-    const res = await window.bullpen.setWorkflow(text)
-    if (res.error) setNote(res.error)
-    else if (res.workflow) {
-      onApplied(res.workflow)
-      setRunning(res.markdown ?? text)
-      setLoaded(res.markdown ?? text)
-      // Re-read who is stale: the ones that were running before this apply are
-      // now the ones on the old shape, and that is the list the button offers.
-      const after = await window.bullpen.workflow()
-      setStale(after.stale)
-      setNote(after.stale.length ? '' : 'Running.')
-      reload()
-    }
-    setBusy(false)
-  }
-
-  const moveFloor = async (): Promise<void> => {
-    if (
-      !confirm(
-        `Restart the standing agents on "${workflow?.name}"?\n\nA brief is given once, at spawn, so this is the only way to move them. Their conversations are lost. Hired agents are left alone.`
-      )
-    )
-      return
-    setBusy(true)
-    setNote('')
-    await onRestartFloor()
-    setStale((await window.bullpen.workflow()).stale)
-    setNote('The floor is on the new shape.')
-    setBusy(false)
-  }
-
-  const shut = (): void => {
-    if (dirty && !confirm('Close without applying? The changes are lost.')) return
-    onClose()
-  }
-
   return (
-    <div style={S.wrap} onClick={shut}>
+    <div style={S.wrap} onClick={onClose}>
       <div style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div style={S.head}>
-          <span style={{ ...LABEL, color: 'var(--ink)' }}>workflow</span>
+          <span style={{ ...LABEL, color: 'var(--ink)' }}>settings</span>
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            {unsaved && (
-              <button
-                style={S.tab}
-                title="say what the floor should do and have one written"
-                onClick={(e) => {
-                  unfocus(e)
-                  setDescribing(true)
-                }}
-              >
-                describe one
-              </button>
-            )}
-            <button
-              style={{ ...S.tab, ...(help ? S.tabOn : null) }}
-              title="what the format means"
-              onClick={(e) => {
-                unfocus(e)
-                setHelp(!help)
-              }}
-            >
-              help
-            </button>
-            <button style={S.icon} title="close" aria-label="close" onClick={shut}>
+            <button style={S.icon} title="close" aria-label="close" onClick={onClose}>
               <Glyph name="close" />
             </button>
           </div>
         </div>
 
-        <div style={S.split}>
-          {/* A column rather than a row of chips: it is a list of documents, and
-              a list reads down. It also has room to say which one is running
-              and which one is open without either being a coloured border. */}
-          <div style={S.list}>
-            {saved.map((p) => {
-              const open = p.name === editing
-              return (
-                <div key={p.name} style={{ ...S.item, ...(open ? S.itemOn : null) }}>
-                  <button
-                    style={S.itemName}
-                    title={`${p.description}${p.builtin ? ' · ships with Bullpen' : ''}`}
-                    onClick={(e) => {
-                      unfocus(e)
-                      load(p.markdown, open)
-                    }}
-                  >
-                    <span style={S.itemText}>{p.name}</span>
-                    {p.name === workflow?.name && <span style={S.running} title="running now" />}
-                  </button>
-                  {/* A preset is the only copy of an example of the format. */}
-                  {!p.builtin && (
-                    <button style={S.chipX} title={`delete ${p.name}`} onClick={() => drop(p.name)}>
-                      ×
-                    </button>
-                  )}
-                </div>
-              )
-            })}
-
-            {/* Something in the editor that is not any of the above. Without a
-                row of its own, picking "new" left every entry unhighlighted and
-                nothing at all saying what was on screen. */}
-            {unsaved && (
-              <div style={{ ...S.item, ...S.itemOn }}>
-                <span style={{ ...S.itemName, cursor: 'default' }}>
-                  <span style={S.itemText}>{editing}</span>
-                  <span style={S.unsaved}>new</span>
-                </span>
-              </div>
-            )}
-
-            <button
-              style={S.new}
-              title="a blank floor to fill in"
-              onClick={async () => load(await window.bullpen.workflowStarter())}
-            >
-              + new workflow
-            </button>
+        <div style={{ display: 'flex', minHeight: 0, flex: 1 }}>
+          <div style={S.nav}>
+            {/* Three, not twelve. The twelve are still there - they are the
+                tabs across the top of whichever of these is open - but a column
+                of twelve is a list you read rather than a place you go. */}
+            {GROUPS.map((g) => (
+              <button
+                key={g.key}
+                title={g.hint}
+                style={{ ...S.navItem, ...(group.key === g.key ? S.navOn : null) }}
+                onClick={(e) => {
+                  unfocus(e)
+                  setSection(g.items[0][0])
+                }}
+              >
+                {g.title}
+              </button>
+            ))}
           </div>
 
-          <textarea
-            ref={editorRef}
-            spellCheck={false}
-            value={text}
-            onChange={(e) => edit(e.target.value)}
-            onScroll={() => sync(editorRef.current, readRef.current)}
-            onKeyDown={onTab}
-            style={S.editor}
-          />
+          <div style={S.column}>
+            <div style={S.tabs}>
+              {group.items.map(([key, label]) => (
+                <button
+                  key={key}
+                  style={{ ...S.tab, ...(section === key ? S.tabOn : null) }}
+                  onClick={(e) => {
+                    unfocus(e)
+                    setSection(key)
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
-          {/* Read back out of the same parse the router will do. A preview that
-              agrees with the editor but not with main is worse than none. */}
-          {/* Both readings at once rather than a tab between them: they answer
-              different questions - "does the brief say what I meant" and "what
-              floor is this" - and switching to check the second one loses your
-              place in the first.
-
-              Rendered text next to the source it came from, so the eye moves a
-              short distance to compare them; the structure table is a summary
-              and reads fine from the far end. */}
-          <Markdown
-            text={text}
-            style={S.reader}
-            innerRef={readRef}
-            onScroll={() => sync(readRef.current, editorRef.current)}
-          />
-          <div style={S.side}>
-            {help ? (
-              <Help />
-            ) : (
-              <Preview name={editing} wf={preview} problems={problems} onGoTo={goTo} />
-            )}
+          {section === 'chart' && <OrgChart workflow={workflow} onApplied={patched} />}
+          {section === 'look' && (
+            <LookPane
+              mode={mode}
+              onMode={onMode}
+              notifyOn={notifyOn}
+              onNotify={onNotify}
+              prefs={prefs}
+              onPrefs={onPrefs}
+            />
+          )}
+          {section === 'agents' && (
+            <AgentsPane workflow={workflow} onApplied={patched} onMoveGod={onMoveGod} />
+          )}
+          {section === 'format' && <FormatPane />}
           </div>
         </div>
-
-        {note && <div style={S.note}>{note}</div>}
-
-        {describing && (
-          <Describe
-            onClose={() => setDescribing(false)}
-            onUse={(md) => {
-              if (dirty && !confirm('Discard the changes in the editor?')) return
-              edit(md)
-              setLoaded(md)
-              setDescribing(false)
-              setNote('Written. Read it before you run it.')
-            }}
-          />
-        )}
 
         <div style={S.foot}>
           <span style={{ color: 'var(--faint)', flex: 1 }}>
@@ -411,253 +206,18 @@ export function Settings({
                 </button>
               </>
             ) : (
-              'nobody is running'
+              'each section saves on its own'
             )}
           </span>
-          <button style={S.btn} onClick={shut}>
-            cancel
-          </button>
-          <button
-            style={{ ...S.btn, ...(problems.length || busy || !dirty ? S.btnOff : null) }}
-            disabled={problems.length > 0 || busy || !dirty}
-            title="keep this without running it"
-            onClick={keep}
-          >
-            save
-          </button>
-          <button
-            style={{ ...S.btn, ...(problems.length || busy || !changed ? S.btnOff : S.btnGo) }}
-            disabled={problems.length > 0 || busy || !changed}
-            title={changed ? `run this instead of "${workflow?.name}"` : 'this is already running'}
-            onClick={apply}
-          >
-            {changed && editing !== workflow?.name ? `switch to ${editing}` : 'apply'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/**
- * Say what the floor should do; read what gets written.
- *
- * A dialog of its own rather than a box in the sidebar, for two reasons: it
- * takes a couple of minutes and needs somewhere to say so, and what comes back
- * is a document to read before it goes anywhere near the editor. Nothing is
- * written into the editor until `use it` - a generated floor is a draft, and
- * dropping it silently over whatever was open is how you lose work you meant to
- * keep.
- */
-function Describe({ onClose, onUse }: { onClose: () => void; onUse: (md: string) => void }) {
-  const [want, setWant] = useState('')
-  const [writing, setWriting] = useState(false)
-  const [draft, setDraft] = useState<string | null>(null)
-  const [problems, setProblems] = useState<string[]>([])
-  const [error, setError] = useState('')
-
-  const write = async (): Promise<void> => {
-    if (!want.trim() || writing) return
-    setWriting(true)
-    setError('')
-    const res = await window.bullpen.generateWorkflow(want)
-    if (res.error) setError(res.error)
-    else if (res.markdown) {
-      setDraft(res.markdown)
-      setProblems(res.problems ?? [])
-    }
-    setWriting(false)
-  }
-
-  return (
-    <div style={S.wrap} onClick={onClose}>
-      <div style={S.small} onClick={(e) => e.stopPropagation()}>
-        <div style={S.head}>
-          <span style={{ ...LABEL, color: 'var(--ink)' }}>describe a floor</span>
-          <button style={S.icon} title="close" aria-label="close" onClick={onClose}>
-            <Glyph name="close" />
-          </button>
-        </div>
-
-        <div style={{ color: 'var(--muted)', fontSize: 11, lineHeight: 1.6 }}>
-          Who is on it, who hands work to whom, and who decides a task is finished.
-          Plain sentences — the roles and the briefs get written for you.
-        </div>
-
-        <textarea
-          autoFocus
-          value={want}
-          disabled={writing}
-          placeholder={'a boss, a designer who writes the spec, and two builders who take turns; nobody tests'}
-          onChange={(e) => setWant(e.target.value)}
-          style={S.wantBox}
-        />
-
-        {/* The wait is real - a four-role floor measured over two minutes - so
-            it is said out loud rather than left to look like a hang. */}
-        {writing && <div style={S.note}>Writing it. This takes a couple of minutes.</div>}
-        {error && <div style={S.problems}>{error}</div>}
-
-        {draft && !writing && (
-          <>
-            {problems.length > 0 ? (
-              <div style={S.problems}>
-                {problems.map((p) => (
-                  <div key={p}>· {p}</div>
-                ))}
-                <div style={{ marginTop: 4, color: 'var(--muted)' }}>
-                  Use it anyway and fix these in the editor, or ask again.
-                </div>
-              </div>
-            ) : (
-              <div style={S.ok}>· this floor will run</div>
-            )}
-            <Markdown text={draft} style={S.draftBox} />
-          </>
-        )}
-
-        <div style={S.foot}>
-          <span style={{ flex: 1 }} />
           <button style={S.btn} onClick={onClose}>
-            cancel
+            close
           </button>
-          <button
-            style={{ ...S.btn, ...(writing || !want.trim() ? S.btnOff : null) }}
-            disabled={writing || !want.trim()}
-            onClick={write}
-          >
-            {writing ? 'writing…' : draft ? 'write again' : 'write it'}
-          </button>
-          {draft && (
-            <button
-              style={{ ...S.btn, ...(writing ? S.btnOff : S.btnGo) }}
-              disabled={writing}
-              title="put this in the editor - it does not run anything"
-              onClick={() => onUse(draft)}
-            >
-              use it
-            </button>
-          )}
         </div>
       </div>
     </div>
   )
 }
 
-/**
- * What the text in the editor actually describes.
- *
- * The six structural lines per role are buried in pages of brief, and reading
- * them back out is the only way to see the floor rather than the document.
- */
-function Preview({
-  name,
-  wf,
-  problems,
-  onGoTo
-}: {
-  name: string
-  wf: WorkflowInfo | null
-  problems: string[]
-  /** Put the cursor on the blank this problem is about. */
-  onGoTo: (problem: string) => void
-}) {
-  return (
-    <>
-      {problems.length > 0 ? (
-        <div style={S.problems}>
-          {problems.map((p) => {
-            const place = /«[^»]*»/.test(p)
-            return (
-              <div
-                key={p}
-                role={place ? 'button' : undefined}
-                title={place ? 'go to it' : undefined}
-                style={{ ...S.problem, ...(place ? S.problemGo : null) }}
-                onClick={place ? () => onGoTo(p) : undefined}
-              >
-                · {p}
-              </div>
-            )
-          })}
-        </div>
-      ) : (
-        <div style={S.ok}>· this floor will run</div>
-      )}
-
-      {wf && (
-        <div style={S.previewBody}>
-          <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>{wf.name || name}</div>
-          {wf.description && (
-            <div style={{ color: 'var(--muted)', marginBottom: 8 }}>{wf.description}</div>
-          )}
-          {Object.entries(wf.roles).map(([role, def]) => (
-            <div key={role} style={S.card}>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                <span style={{ color: 'var(--ink)' }}>{role}</span>
-                {def.fixed && (
-                  <span style={{ color: 'var(--faint)' }}>
-                    {def.fixed.id} · {def.fixed.name}
-                  </span>
-                )}
-                {role === wf.dispatch && <span style={S.badge}>dispatch</span>}
-                {role === wf.entry && <span style={S.badge}>entry</span>}
-                {def.hireable && <span style={S.badge}>hireable</span>}
-                {!def.fixed && !def.hireable && <span style={S.warnBadge}>unreachable</span>}
-              </div>
-              <div style={{ color: 'var(--faint)' }}>
-                {def.can.length ? def.can.join(' · ') : 'no capabilities — it can only carry mail'}
-              </div>
-              <div style={{ color: 'var(--muted)' }}>
-                → {(wf.talksTo[role] ?? []).join(', ') || 'nobody'}
-              </div>
-            </div>
-          ))}
-          <div style={{ color: 'var(--faint)', marginTop: 6 }}>
-            reuse below {wf.reuseBelowPct}% · hire above {wf.hireAbovePct}%
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
-/**
- * The format, in the dialog rather than in a document nobody opens.
- *
- * Opens in the same panel as the preview rather than pushing the editor down:
- * a person reads this while typing into the pane beside it.
- */
-function Help() {
-  return (
-    <div style={S.previewBody}>
-      <div style={{ color: 'var(--muted)', lineHeight: 1.7, marginBottom: 10 }}>
-        A workflow is one markdown file. <code style={S.term}>##</code> starts a role. The
-        bullets under it say what that role can do and who it may write to. Everything
-        after the bullets is what that agent is told the moment it starts.
-      </div>
-      {WORKFLOW_SPEC.map(({ title, rows }) => (
-        <div key={title} style={{ marginBottom: 10 }}>
-          <div style={{ ...LABEL, color: 'var(--accent-ink)', marginBottom: 4 }}>{title}</div>
-          {rows.map(([term, what]) => (
-            <div key={term} style={S.helpRow}>
-              <code style={S.term}>{term}</code>
-              <span style={{ color: 'var(--muted)' }}>{what}</span>
-            </div>
-          ))}
-        </div>
-      ))}
-      <div style={{ color: 'var(--faint)', lineHeight: 1.7 }}>
-        The router reads capabilities, not names — a role called{' '}
-        <code style={S.term}>reviewer</code> that checks moves cards exactly like one called{' '}
-        <code style={S.term}>tester</code>. Anything between <code style={S.term}>&lt;!--</code>{' '}
-        and <code style={S.term}>--&gt;</code> is a note to yourself and never reaches an agent.
-      </div>
-    </div>
-  )
-}
-
-/** Inline rather than imported: the icon set lives in App. */
 function Glyph({ name }: { name: 'close' }) {
   const common = {
     width: 13,
@@ -679,6 +239,458 @@ function Glyph({ name }: { name: 'close' }) {
 
 /** Editor line height in pixels: 12px type at the 1.55 the textarea is set to. */
 const LINE_PX = 12 * 1.55
+
+function FormatPane() {
+  const [doc, setDoc] = useState<{ text: string; path: string; custom: boolean } | null>(null)
+  const [rules, setRules] = useState<Rules | null>(null)
+  /**
+   * Every law the file arrived with, and which of them are switched off.
+   *
+   * Kept apart from `rules.laws` because unticking one removes its line - and a
+   * checkbox you cannot tick again is not a checkbox. The row stays on screen;
+   * only what gets written changes.
+   */
+  const [all, setAll] = useState<Rules['laws']>([])
+  const [off, setOff] = useState<Set<string>>(new Set())
+  const [note, setNote] = useState('')
+  const [error, setError] = useState('')
+  /**
+   * How this pane opens: reading.
+   *
+   * It opened as a schema editor - six boxes a field, thirty-odd fields - which
+   * is the right screen for the two or three times somebody changes what a
+   * floor may contain, and the wrong one for every time they came to find out
+   * what it may contain. Reading is the common case; editing is a choice.
+   */
+  const [mode, setMode] = useState<'read' | 'edit' | 'text'>('read')
+  const [text, setText] = useState('')
+
+  const load = (d: { text: string; path: string; custom: boolean }): void => {
+    const read = readRules(d.text)
+    setDoc(d)
+    setRules(read)
+    setAll(read.laws)
+    setOff(new Set())
+    setText(d.text)
+  }
+  useEffect(() => {
+    window.bullpen.workflowFormat().then(load)
+  }, [])
+
+  const write = async (next: string): Promise<void> => {
+    setError('')
+    const res = await window.bullpen.writeWorkflowFormat(next)
+    if (res.error) return setError(res.error)
+    load({ text: res.text ?? '', path: res.path ?? '', custom: res.custom ?? false })
+    setNote(res.custom ? 'Saved. These are the rules now.' : 'Back to the ones Bullpen ships.')
+  }
+
+  if (!doc || !rules) return <div style={S.pane} />
+
+  // What was read against what is on screen - not the text against the text.
+  // Writing the rules back out re-flows them, so comparing the two strings said
+  // "edited" the moment the pane opened.
+  const kept: Rules = { ...rules, laws: all.filter((l) => !off.has(l.id)) }
+  const edited =
+    mode === 'text'
+      ? text !== doc.text
+      : JSON.stringify(kept) !== JSON.stringify({ ...readRules(doc.text), text: rules.text })
+  const setField = (entity: string, at: number, patch: Partial<Field>): void =>
+    setRules({
+      ...rules,
+      entities: rules.entities.map((e) =>
+        e.name === entity ? { ...e, fields: e.fields.map((f, i) => (i === at ? { ...f, ...patch } : f)) } : e
+      )
+    })
+
+  return (
+    <div style={{ ...S.pane, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ color: 'var(--muted)', lineHeight: 1.7, marginBottom: 8 }}>
+        These are the rules every floor is checked against - the same for all of them. You will
+        rarely need to change anything here. To build a floor, go to{' '}
+        <b>this floor</b>; this page is what that one is allowed to say.
+      </div>
+
+      <div style={{ ...S.tabs, marginBottom: 8 }}>
+        {(['read', 'edit', 'text'] as const).map((m) => (
+          <button
+            key={m}
+            style={{ ...S.tab, ...(mode === m ? S.tabOn : null) }}
+            onClick={() => setMode(m)}
+          >
+            {m === 'read' ? 'what the rules say' : m === 'edit' ? 'change them' : 'as text'}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'read' ? (
+        <div style={{ flex: 1, overflow: 'auto', paddingRight: 4 }}>
+          {rules.entities.map((entity) => (
+            <div key={entity.name} style={{ marginBottom: 14 }}>
+              <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>{entity.name}</div>
+              {entity.what && (
+                <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 4px' }}>
+                  {entity.what}
+                </div>
+              )}
+              {entity.fields.map((f, i) => (
+                <div key={i} style={S.helpRow}>
+                  <code style={S.term}>{f.name}</code>
+                  <span style={{ color: 'var(--muted)' }}>
+                    {sayType(f.type)}
+                    {f.required ? ' · must be there' : ''}
+                    {f.unique ? ' · no two the same' : ''}
+                    {f.fallback ? ` · ${f.fallback} unless you say otherwise` : ''}
+                    {f.what ? ` — ${f.what}` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+
+          <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>the checks that run</div>
+          <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+            Untick one and the app stops checking it. It does not stop doing the thing.
+          </div>
+          {all.map((law) => (
+            <label key={law.id} style={{ ...S.helpRow, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={!off.has(law.id)}
+                onChange={(e) => {
+                  const next = new Set(off)
+                  if (e.target.checked) next.delete(law.id)
+                  else next.add(law.id)
+                  setOff(next)
+                }}
+              />
+              <span style={{ color: off.has(law.id) ? 'var(--faint)' : 'var(--muted)' }}>
+                {law.says}
+              </span>
+            </label>
+          ))}
+        </div>
+      ) : mode === 'text' ? (
+        <textarea
+          style={{ ...S.editor, flex: 1, width: '100%', boxSizing: 'border-box' }}
+          value={text}
+          spellCheck={false}
+          onChange={(e) => setText(e.target.value)}
+        />
+      ) : (
+        <div style={{ flex: 1, overflow: 'auto', paddingRight: 4 }}>
+          {rules.entities.map((entity) => (
+            <div key={entity.name} style={{ marginBottom: 16 }}>
+              <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>{entity.name}</div>
+              {entity.what && (
+                <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+                  {entity.what}
+                </div>
+              )}
+              {entity.fields.map((f, i) => (
+                <div key={i} style={S.formRow}>
+                  <input
+                    style={{ ...S.field, width: 150 }}
+                    value={f.name}
+                    spellCheck={false}
+                    onChange={(e) => setField(entity.name, i, { name: e.target.value })}
+                  />
+                  <input
+                    style={{ ...S.field, width: 190 }}
+                    value={sayType(f.type)}
+                    spellCheck={false}
+                    title="text · sentence · prose · percent · colour · path · agent · role · list of X · one of a, b"
+                    onChange={(e) => setField(entity.name, i, { type: readType(e.target.value) })}
+                  />
+                  <label style={S.checkRow} title="a floor must say this">
+                    <input
+                      type="checkbox"
+                      checked={f.required}
+                      onChange={(e) => setField(entity.name, i, { required: e.target.checked })}
+                    />
+                    required
+                  </label>
+                  <label style={S.checkRow} title="no two may share it">
+                    <input
+                      type="checkbox"
+                      checked={f.unique}
+                      onChange={(e) => setField(entity.name, i, { unique: e.target.checked })}
+                    />
+                    unique
+                  </label>
+                  <input
+                    style={{ ...S.field, width: 90 }}
+                    value={f.fallback ?? ''}
+                    placeholder="default"
+                    onChange={(e) => setField(entity.name, i, { fallback: e.target.value || undefined })}
+                  />
+                  <input
+                    style={{ ...S.field, flex: 1, minWidth: 80 }}
+                    value={f.what}
+                    placeholder="what it is, in your words"
+                    onChange={(e) => setField(entity.name, i, { what: e.target.value })}
+                  />
+                </div>
+              ))}
+            </div>
+          ))}
+
+          <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>the checks that run</div>
+          <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+            Untick one and the app stops checking it. It does not stop doing the thing.
+          </div>
+          {all.map((law, i) => (
+            <div key={law.id} style={S.formRow}>
+              <label style={{ ...S.checkRow, width: 200 }}>
+                <input
+                  type="checkbox"
+                  checked={!off.has(law.id)}
+                  onChange={(e) => {
+                    const next = new Set(off)
+                    if (e.target.checked) next.delete(law.id)
+                    else next.add(law.id)
+                    setOff(next)
+                  }}
+                />
+                <code style={{ ...S.term, opacity: off.has(law.id) ? 0.5 : 1 }}>{law.id}</code>
+              </label>
+              <input
+                style={{ ...S.field, flex: 1, opacity: off.has(law.id) ? 0.5 : 1 }}
+                value={law.says}
+                onChange={(e) =>
+                  setAll(all.map((l, at) => (at === i ? { ...l, says: e.target.value } : l)))
+                }
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && <div style={S.problems}>{error}</div>}
+      {note && <div style={S.ok}>· {note}</div>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button
+          style={{ ...S.btn, ...(edited ? S.btnGo : S.btnOff) }}
+          disabled={!edited}
+          onClick={() => write(mode === 'text' ? text : writeRules(kept))}
+        >
+          save the rules
+        </button>
+        {doc.custom && (
+          <button style={S.btn} title="delete your copy" onClick={() => write('')}>
+            use the ones Bullpen ships
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Theme and notifications: the two switches that were only ever icons. */
+function LookPane({
+  mode,
+  onMode,
+  notifyOn,
+  onNotify,
+  prefs,
+  onPrefs
+}: {
+  mode: 'light' | 'dark'
+  onMode: (m: 'light' | 'dark') => void
+  notifyOn: boolean
+  onNotify: (on: boolean) => void
+  prefs: { fontSize: number; floor: string }
+  onPrefs: (next: { fontSize?: number; floor?: string }) => void
+}) {
+  return (
+    <div style={S.pane}>
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>theme</div>
+      <div style={{ display: 'flex', gap: 8, margin: '6px 0 16px' }}>
+        {(['light', 'dark'] as const).map((m) => (
+          <button
+            key={m}
+            style={{ ...S.btn, ...(mode === m ? S.btnGo : null) }}
+            onClick={() => onMode(m)}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.7, marginBottom: 16 }}>
+        Every agent&apos;s own CLI is told the same thing at spawn, so a running agent keeps the
+        theme it started in until it is restarted.
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>terminal</div>
+      <div style={S.formRow}>
+        <input
+          type="range"
+          min={9}
+          max={20}
+          step={0.5}
+          value={prefs.fontSize}
+          style={{
+            width: 220,
+            // The filled part, in the app's accent. Inline because it moves
+            // with the value, and a stylesheet cannot see the value.
+            background: `linear-gradient(to right, var(--accent-ink) 0 ${
+              ((prefs.fontSize - 9) / 11) * 100
+            }%, var(--sunk) ${((prefs.fontSize - 9) / 11) * 100}% 100%)`
+          }}
+          onChange={(e) => onPrefs({ fontSize: Number(e.target.value) })}
+        />
+        {/* Not LABEL: that upper-cases, and "12.5PX" is a size shouted. */}
+        <span style={{ color: 'var(--ink)', font: `12px ${MONO}` }}>{prefs.fontSize}px</span>
+      </div>
+      {/* The size a pty is spawned at is computed from this, so it is not only
+          how the text looks - it is how wide the CLI thinks its window is. */}
+      <div style={{ color: 'var(--faint)', lineHeight: 1.7, margin: '2px 0 16px' }}>
+        Applies to every terminal at once, and to how wide the next agent&apos;s CLI is told its
+        window is.
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>office floor</div>
+      <div style={{ display: 'flex', gap: 8, margin: '6px 0 16px' }}>
+        {FLOORS.map((f) => (
+          <button
+            key={f}
+            style={{ ...S.btn, ...(prefs.floor === f ? S.btnGo : null) }}
+            onClick={() => onPrefs({ floor: f })}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>notifications</div>
+      <label style={{ ...S.formRow, cursor: 'pointer' }}>
+        <input type="checkbox" checked={notifyOn} onChange={(e) => onNotify(e.target.checked)} />
+        <span style={{ color: 'var(--muted)' }}>
+          Tell me when an agent needs an answer, and when work comes back.
+        </span>
+      </label>
+    </div>
+  )
+}
+
+/**
+ * Where the floor works, how full an agent may be before it is left alone, and
+ * the inbound door. Three settings that were in three different places.
+ */
+function AgentsPane({
+  workflow,
+  onApplied,
+  onMoveGod
+}: {
+  workflow: WorkflowInfo | null
+  onApplied: (w: WorkflowInfo, markdown?: string) => void
+  onMoveGod: () => Promise<void>
+}) {
+  const [cwd, setCwd] = useState('')
+  const [reuse, setReuse] = useState(workflow?.reuseBelowPct ?? 50)
+  const [hire, setHire] = useState(workflow?.hireAbovePct ?? 70)
+  const [hook, setHook] = useState<{ enabled: boolean; port: number } | null>(null)
+  const [error, setError] = useState('')
+  const [note, setNote] = useState('')
+
+  useEffect(() => {
+    window.bullpen.godCwd().then(setCwd)
+    window.bullpen.webhook().then((w) => setHook({ enabled: w.enabled, port: w.port }))
+  }, [])
+
+  const saveThresholds = async (): Promise<void> => {
+    setError('')
+    setNote('')
+    const res = await window.bullpen.patchWorkflow({ reuseBelowPct: reuse, hireAbovePct: hire })
+    if (res.error) return setError(res.error)
+    if (res.workflow) {
+      onApplied(res.workflow, res.markdown)
+      setNote('Saved into the workflow.')
+    }
+  }
+
+  const moved = reuse !== workflow?.reuseBelowPct || hire !== workflow?.hireAbovePct
+
+  return (
+    <div style={S.pane}>
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>workspace</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.7, margin: '4px 0 6px' }}>
+        Where the standing agents work, and the only directory they may write in. Moving it is a
+        restart: their conversations do not survive it.
+      </div>
+      <div style={S.formRow}>
+        <code style={{ ...S.path, flex: 1 }}>{cwd || '—'}</code>
+        <button style={S.btn} onClick={onMoveGod}>
+          move
+        </button>
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 16 }}>context</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.7, margin: '4px 0 6px' }}>
+        How full an idle agent may be before it is reused, and the point past which it is treated
+        as unavailable even when it is doing nothing. Part of the workflow, saved into it.
+      </div>
+      <div style={S.formRow}>
+        <span style={{ color: 'var(--muted)', width: 92 }}>reuse below</span>
+        <input
+          type="number"
+          style={{ ...S.field, width: 70 }}
+          value={reuse}
+          onChange={(e) => setReuse(Number(e.target.value))}
+        />
+        <span style={{ color: 'var(--muted)', width: 80 }}>hire above</span>
+        <input
+          type="number"
+          style={{ ...S.field, width: 70 }}
+          value={hire}
+          onChange={(e) => setHire(Number(e.target.value))}
+        />
+        <button
+          style={{ ...S.btn, ...(moved ? S.btnGo : S.btnOff) }}
+          disabled={!moved}
+          onClick={saveThresholds}
+        >
+          save
+        </button>
+      </div>
+
+      <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 16 }}>inbound</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.7, margin: '4px 0 6px' }}>
+        A door on 127.0.0.1 that turns a POST into work for the floor. The token and the call log
+        are in the triggers tab, which is where the calls arrive.
+      </div>
+      {hook && (
+        <div style={S.formRow}>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={hook.enabled}
+              onChange={async (e) => {
+                const next = await window.bullpen.setWebhook(e.target.checked, hook.port)
+                setHook({ enabled: next.enabled, port: next.port })
+              }}
+            />
+            <span style={{ color: 'var(--muted)' }}>listening</span>
+          </label>
+          <span style={{ color: 'var(--muted)' }}>port</span>
+          <input
+            type="number"
+            style={{ ...S.field, width: 90 }}
+            value={hook.port}
+            onChange={(e) => setHook({ ...hook, port: Number(e.target.value) })}
+            onBlur={async () => {
+              const next = await window.bullpen.setWebhook(hook.enabled, hook.port)
+              setHook({ enabled: next.enabled, port: next.port })
+            }}
+          />
+        </div>
+      )}
+
+      {error && <div style={S.problems}>{error}</div>}
+      {note && <div style={S.ok}>· {note}</div>}
+    </div>
+  )
+}
 
 const S: Record<string, React.CSSProperties> = {
   wrap: {
@@ -893,7 +905,78 @@ const S: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
     flex: '0 0 auto'
   },
+  // A home directory is as long as somebody's username makes it, and `term`
+  // refuses to wrap - one path put a horizontal scrollbar under the whole panel.
+  path: {
+    color: 'var(--ink)',
+    background: 'var(--panel)',
+    padding: '0 3px',
+    overflowWrap: 'anywhere' as const
+  },
   note: { fontSize: 11, color: 'var(--warn)', lineHeight: 1.5, flex: '0 0 auto' },
+  column: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 },
+  tabs: { display: 'flex', gap: 4, flexWrap: 'wrap', flex: '0 0 auto' },
+  nav: {
+    width: 132,
+    flex: '0 0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    borderRight: '1px solid var(--line)',
+    paddingRight: 8,
+    marginRight: 10
+  },
+  navItem: {
+    // Block: these sit inside a group now, and a button is inline by default -
+    // which put the whole of "this floor" on one line.
+    display: 'block',
+    width: '100%',
+    textAlign: 'left',
+    padding: '5px 8px',
+    border: 0,
+    background: 'transparent',
+    color: 'var(--muted)',
+    font: 'inherit',
+    cursor: 'pointer',
+    borderRadius: 3
+  },
+  navOn: { background: 'var(--panel)', color: 'var(--ink)' },
+  pane: { flex: 1, minWidth: 0, overflow: 'auto', paddingRight: 4 },
+  formRow: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 },
+  checkRow: { display: 'flex', gap: 4, alignItems: 'center', color: 'var(--muted)', cursor: 'pointer' },
+  roleChip: {
+    padding: '3px 8px',
+    border: '1px solid var(--line)',
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    userSelect: 'none'
+  },
+  roleChipOn: { borderColor: 'var(--accent-ink)', color: 'var(--ink)', background: 'var(--panel)' },
+  step: {
+    display: 'flex',
+    gap: 8,
+    alignItems: 'baseline',
+    padding: '4px 6px',
+    borderLeft: '2px solid var(--line)',
+    marginBottom: 2
+  },
+  stepBad: { borderLeft: '2px solid var(--danger)', background: 'var(--sunk)' },
+  field: {
+    background: 'var(--panel)',
+    border: '1px solid var(--line)',
+    color: 'var(--ink)',
+    font: 'inherit',
+    padding: '4px 6px',
+    borderRadius: 3
+  },
+  colour: {
+    width: 34,
+    height: 26,
+    padding: 0,
+    border: '1px solid var(--line)',
+    background: 'var(--panel)',
+    cursor: 'pointer'
+  },
   foot: { display: 'flex', gap: 8, alignItems: 'center' },
   btn: {
     background: 'transparent',

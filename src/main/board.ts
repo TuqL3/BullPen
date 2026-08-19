@@ -4,13 +4,19 @@ import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
 /**
- * `wait_test` is the column the test loop needed: a developer says it is built,
- * and that is not the same claim as "it works". Cards used to go from doing
- * straight to done on the developer's own word, which is the one report nobody
- * should take at face value.
+ * A column key, which is the workflow's word rather than this file's.
+ *
+ * It was a union of five: `todo | doing | wait_test | blocked | done`. Those
+ * are still what a board written before columns were configurable has in it,
+ * and still the default names - but a floor that calls its columns `briefed`
+ * and `in_review` stores those, and a board that refused to save them would be
+ * a board that silently disagreed with the one on screen.
+ *
+ * `done` is the one word this file still knows: a card in it is finished, which
+ * is what "the card an agent is on" is the absence of. A workflow that renames
+ * that column says so with `(done)`, and main resolves it before it gets here.
  */
-export type TaskStatus = 'todo' | 'doing' | 'wait_test' | 'blocked' | 'done'
-export const TASK_STATUSES: TaskStatus[] = ['todo', 'doing', 'wait_test', 'blocked', 'done']
+export type TaskStatus = string
 
 export type Task = {
   id: string
@@ -78,7 +84,12 @@ export class Board extends EventEmitter {
         // column from it rather than dropping the card into an unknown state.
         tasks: (Array.isArray(parsed.tasks) ? parsed.tasks : []).map((t) => ({
           ...t,
-          status: TASK_STATUSES.includes(t?.status) ? t.status : t?.done ? 'done' : 'todo'
+          status:
+            typeof t?.status === 'string' && t.status.trim()
+              ? t.status
+              : t?.done
+                ? 'done'
+                : 'todo'
         })),
         triggers: Array.isArray(parsed.triggers) ? parsed.triggers : [],
         rules: Array.isArray(parsed.rules) ? parsed.rules : []
@@ -126,8 +137,14 @@ export class Board extends EventEmitter {
 
   setTaskStatus(id: string, status: TaskStatus): void {
     const t = this.data.tasks.find((x) => x.id === id)
-    if (!t || !TASK_STATUSES.includes(status)) return
+    // No vocabulary check here: the columns are the workflow's, and this file
+    // is not given one. Main only ever passes a key it read off the board.
+    if (!t || !status.trim()) return
     t.status = status
+    // Kept for boards written before columns had names, and for nothing else:
+    // whether a card is finished is the workflow's answer now, and main asks it
+    // by key. A floor that calls its last column `published` leaves this false,
+    // which is only ever read by a board old enough to have no status at all.
     t.done = status === 'done'
     this.save()
   }

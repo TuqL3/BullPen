@@ -3,6 +3,7 @@ import { onEnter } from '../keys'
 import { LABEL, MONO } from '../theme'
 import type { ContextRule, WebhookCall, WebhookState } from '../../../preload/index'
 import type { Agent } from '../store'
+import { anyoneChecks, dispatchRole, entryRole, roleName, rolesWith } from '../shape'
 
 type Trigger = {
   id: string
@@ -387,12 +388,13 @@ function WebhookRow({ agent }: { agent: Agent }) {
           127.0.0.1 only. The body can be a plain line of text, a form post, or JSON — including
           somebody else&apos;s webhook payload, which is summarised rather than refused for not
           being our shape. Address it with <code>/task/&lt;agent&gt;</code>, an{' '}
-          <code>x-bullpen-to</code> header or a <code>to</code> field. Leave it out and it goes to
-          the analyst, whose job inbound work is: she assigns it to someone on that project, hires
-          onto the project if nobody there is free, sees it through test, and reports to your clone
-          — who is the one who reports to you, on the monitor. Say which project with{' '}
-          <code>x-bullpen-project</code> or a <code>project</code> field, or let her read it out of
-          the payload. Either way it becomes a card in tasks. The token goes in{' '}
+          <code>x-bullpen-to</code> header or a <code>to</code> field. Leave it out and it goes
+          to {roleName(entryRole())}, whose job inbound work is: someone on that project is put on
+          it, or hired onto it if nobody there is free
+          {anyoneChecks() ? ', it is seen through check' : ''}, and the result is passed on to{' '}
+          {roleName(rolesWith('speaksToHuman')[0] ?? dispatchRole())} — who is the one who reports
+          to you, on the monitor. Say which project with <code>x-bullpen-project</code> or a{' '}
+          <code>project</code> field, or let them read it out of the payload. Either way it becomes a card in tasks. The token goes in{' '}
           <code>x-bullpen-token</code> or <code>Authorization: Bearer</code>. Bodies over 64 KB are
           refused.
         </div>

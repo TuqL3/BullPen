@@ -135,8 +135,14 @@ test('a card moves between columns and done stays in step', () => {
   board.setTaskStatus(t.id, 'done')
   assert.equal(board.tasks()[0].done, true, 'done must track the column, not drift from it')
 
-  board.setTaskStatus(t.id, 'nonsense' as never)
-  assert.equal(board.tasks()[0].status, 'done', 'an unknown column is ignored')
+  // The columns are the workflow's, and this file is never given one - so a
+  // name it has never heard of is a column somebody configured, not a typo to
+  // refuse. Refusing them is what would leave the board disagreeing with the
+  // one on screen.
+  board.setTaskStatus(t.id, 'in_review')
+  assert.equal(board.tasks()[0].status, 'in_review', "a floor's own column name is stored")
+  board.setTaskStatus(t.id, '   ')
+  assert.equal(board.tasks()[0].status, 'in_review', 'an empty column name is still nothing')
   rmSync(root, { recursive: true, force: true })
 })
 

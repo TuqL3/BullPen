@@ -95,9 +95,9 @@ export type Office = {
   ground: Cell[][]
   desks: Desk[]
   /**
-   * The corner office. Michael stands in for the operator and everything routes
-   * through him, so he does not sit in a pod like everyone else - if he did,
-   * finding him on the floor would mean reading name labels.
+   * The corner office. Dispatch stands in for the operator and everything
+   * routes through them, so they do not sit in a pod like everyone else - if
+   * they did, finding them on the floor would mean reading name labels.
    */
   boss: Desk | null
   /** Where agents walk in from, and where they leave. */

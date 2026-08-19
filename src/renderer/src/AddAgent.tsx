@@ -4,6 +4,8 @@ import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './roster'
 import { LABEL, MONO } from './theme'
 import type { WorkflowInfo } from '../../preload/index'
 
+type RoleOf = WorkflowInfo['roles'][string]
+
 export type Draft = {
   /**
    * What this agent is for: a role name from the running workflow. The roles
@@ -41,9 +43,9 @@ const EMPTY: Draft = {
 }
 
 /**
- * Michael is spawned by the app and holds that id, so suggesting him here only
- * ever produced "michael is already on the floor". Suggest the first preset
- * nobody has taken instead, and fall back to no suggestion once they run out.
+ * The standing agents are spawned by the app and hold their ids, so suggesting
+ * one of those names here only ever produced "already on the floor". Suggest
+ * the first preset nobody has taken, and no suggestion once they run out.
  */
 const suggest = (taken: string[]): { name: string; face: string } => {
   const free = PRESETS.find((p) => !taken.includes(slug(p)))
@@ -67,21 +69,36 @@ export function AddAgent({
 }) {
   // Whatever this floor says may be hired into. A workflow with one kind of
   // worker shows one chip rather than a choice that is not one.
+  // The chip's hover text is what the role is for, when the workflow says so:
+  // "a developer" is a label, not an answer to what you are hiring one for.
   const hireable = Object.entries(workflow?.roles ?? {})
     .filter(([, def]) => def.hireable)
-    .map(([role, def]) => [role, def.label] as const)
+    .map(([role, def]) => [role, def.does ?? def.label] as const)
+  /** How a role is named in a sentence: its agent's name, or what it is called. */
+  const nameOf = ([role, def]: [string, RoleOf]): string => def.fixed?.name ?? def.label ?? role
+  const roleEntries = Object.entries(workflow?.roles ?? {}) as [string, RoleOf][]
+  const voice = roleEntries.find(([, def]) => def.can.includes('speaksToHuman'))
+
   const [step, setStep] = useState(0)
-  // Michael already holds the god seat and is spawned on launch, so everyone
-  // hired here is a worker. Nothing to decide.
+  // The roles with a fixed agent are spawned by the app and cannot be hired
+  // into, so everyone made here fills one of the rest. Nothing to decide when
+  // there is only one of those.
   const [d, setD] = useState<Draft>({
     ...EMPTY,
-    // A default of 'dev' is this workflow's default only by coincidence.
+    // A default of 'dev' is one workflow's answer, and only a fallback here.
     role: hireable[0]?.[0] ?? EMPTY.role,
     ...suggest(taken),
     ...prefill
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // Whoever assigns and is allowed to write to the role being hired. Read off
+  // talksTo rather than assumed, because a floor can have two who assign and
+  // only one of them reaches this kind of agent.
+  const reportsTo = roleEntries.find(
+    ([r, def]) => def.can.includes('assigns') && (workflow?.talksTo[r] ?? []).includes(d.role)
+  )
 
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((prev) => ({ ...prev, [k]: v }))
 
@@ -171,10 +188,20 @@ export function AddAgent({
                     </div>
                   ))}
                 </div>
+                {/* Who this one answers to is read out of the workflow: the role
+                    that assigns and is allowed to write to the role being hired.
+                    It was a name in the source, which was right for one floor. */}
                 <div style={S.roleRow}>
                   <span>
-                    Reports to <b>Iris</b>, the analyst — she assigns the work and sees it through
-                    test. Michael only reports to you.
+                    {reportsTo ? (
+                      <>
+                        Reports to <b>{nameOf(reportsTo)}</b> — {reportsTo[1].label} hands out the
+                        work and sees it through.
+                      </>
+                    ) : (
+                      <>Nobody here assigns to this role — it works to the briefing you give it.</>
+                    )}
+                    {voice && ` ${nameOf(voice)} is the one who reports to you.`}
                   </span>
                 </div>
 
@@ -230,7 +257,7 @@ export function AddAgent({
                     browse
                   </button>
                 </div>
-                {d.role !== 'god' && (
+                {!workflow?.roles[d.role]?.fixed && (
                   <>
                     <div style={{ ...LABEL, marginTop: 14 }}>Project</div>
                     <input

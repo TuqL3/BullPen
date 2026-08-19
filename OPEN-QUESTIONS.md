@@ -362,3 +362,439 @@ reports honestly.
 
 **Breaks if wrong:** nothing here - but any earlier session that trusted the
 filtered output was reading a green light that was not connected to anything.
+
+## 6. The UI reads the workflow through module state, not a prop
+
+`src/renderer/src/shape.ts` holds the running workflow in a module variable, set
+once at startup and again when one is applied. Everything from a canvas frame to
+a zustand action reads it without a prop threaded through.
+
+**Breaks if wrong:** a second window, or a component rendered before the startup
+effect resolves, sees an empty shape - no dispatch role, nothing core, no tags.
+The startup effect awaits the workflow before it adopts anyone, so the window
+that exists cannot hit it; a second one would.
+**Fix if it bites:** a context provider around the tree, fed by the same call.
+
+## 7. An agent left over from the previous workflow keeps its old role
+
+Applying a workflow does not re-role anyone already running. `fixed:stop` now
+takes down every id ever stood up this run, so "restart the standing ones"
+clears them - but until that is pressed, a floor can show an agent whose role no
+longer exists in the workflow.
+
+**Breaks if wrong:** that agent has no tag, is not treated as core, and can be
+fired - which is survivable, and is also how it gets cleaned up.
+**Fix if it bites:** mark those rows as belonging to a shape that is gone.
+
+## 8. Opening an old workflow rewrites it into the two-part shape
+
+`parseMarkdown` reads both forms - `## roles` + `## briefs`, and the original
+one-section `## role` - but `toMarkdown` only writes the new one. The editor
+shows what `toMarkdown` returns, so opening an old file and saving it converts
+it, and the `- does:` line it never had stays absent.
+
+**Breaks if wrong:** somebody editing a workflow by hand outside Bullpen sees
+their layout replaced the first time they save from the dialog. Nothing is lost
+- every field survives the round trip, and there is a test for it.
+**Fix if it bites:** remember which form a file was read in and write it back
+the same way.
+
+## 9. A replaced format document is not checked against the parser
+
+`~/.bullpen/workflow-format.md` overrides the shipped reference in the help
+panel and in the brief the workflow writer is given. Nothing lints it: the test
+that every parser field is documented runs against the file in the repo.
+
+**Breaks if wrong:** somebody writes their own reference, leaves out `- does:`
+or invents a capability, and the generator writes workflows that do not lint -
+one wasted model turn per attempt, with a rejection that reads as the model's
+fault.
+**Fix if it bites:** run the same documented-vocabulary check over the override
+when it is read, and say so in the help panel rather than in a test.
+
+## 10. Column kinds are five, and a card is in exactly one
+
+Columns are now the workflow's - own keys, own names, own colours - but each one
+may declare only one of five kinds (`start`, `working`, `waiting`, `stuck`,
+`done`), and those are what the floor reaches for when nobody sent a message.
+
+**Breaks if wrong:** a process with two kinds of waiting - waiting on legal and
+waiting on a client, say - can name both columns but only one can be the column
+work parks in to be checked. The other only moves by a card rule.
+**Fix if it bites:** the automatic moves (turn started, agent exited, card
+opened) become card rules with a sender of `bullpen`, and the kinds go away.
+
+## 11. A workflow can take a tool away, never grant one
+
+`- never: Bash` is refused by the approvals layer. There is deliberately no
+`- may:` - nothing in a workflow can turn off the dangerous-shell checks, the
+credential-path checks, or the sandbox boundary.
+
+**Breaks if wrong:** somebody wanting a role that may write outside its sandbox
+has no way to say so, and will look for one.
+**Fix if it bites:** it stays this way. A file that can widen an agent's reach
+is a file worth attacking, and the whole point of the approvals layer is that
+the agent cannot edit its own leash.
+
+## 12. Renaming the human does not rewrite the briefs
+
+`- human address: boss` changes what the router answers to and what lint asks
+for, but a brief that still says `"to": "you"` keeps saying it - lint catches
+the floor's voice, not every other role's prose.
+
+**Breaks if wrong:** an agent writes to `you` on a floor where the human is
+`boss`, and the message lands in dead letters with a refusal it can act on.
+**Fix if it bites:** lint every brief for the old address, or rewrite them on
+rename - which would edit the operator's own words, so it is refused for now.
+
+## 13. Two ways to reach one switch
+
+The theme and the notification toggle used to be in the title bar and in
+settings; the icons are gone now, and settings is the only way. Two are left:
+the workspace is on the agent's own header as well, and the webhook is in the
+triggers tab as well. Both routes write the same state.
+
+**Breaks if wrong:** nothing functionally - but a switch in two places is two
+places to keep in step if either grows an option the other does not show.
+**Fix if it bites:** the header link and the triggers form become shortcuts that
+open settings at that section, rather than editing in place.
+
+## 14. The board form writes the whole workflow
+
+`workflow:patch` merges into the running workflow, lints it whole, and saves the
+markdown - so saving a colour rewrites the file, including any hand-formatting
+in it. Comments survive (they are stripped at parse), spacing does not.
+
+**Breaks if wrong:** somebody who laid their workflow out by hand finds it
+reformatted after changing a column colour in the form.
+**Fix if it bites:** patch the markdown text rather than the parsed workflow -
+find the `## board` block and replace only those lines.
+
+## 15. The chart does not save where the boxes are
+
+Dragging a box moves it for as long as the dialog is open, and the next open
+lays the floor out again from capability kinds. Nothing reads a position - the
+router reads roles - so storing coordinates would mean a document describing an
+organisation carrying one screen's idea of where the boxes sit.
+
+**Breaks if wrong:** somebody arranges a large floor exactly how they think of
+it, closes the dialog, and it springs back.
+**Fix if it bites:** positions go in `config.json` under the workflow's name -
+this machine's opinion about this floor - and never into the workflow itself.
+
+## 16. What a role is for is inferred, not declared
+
+Capabilities no longer carry a kind. Who talks to the human comes from `talks
+to`; who hands work out is whoever a card rule says opens a card; who closes one
+is whoever a rule says closes it; whoever is left builds. Two header lines -
+`reports to you:` and `hires:` - settle the cases where more than one fits.
+
+**Breaks if wrong:** a floor whose card rules do not yet open anything has no
+assigner, so hiring and the report chain have nobody to route through until the
+first rule is written.
+**Fix if it bites:** lint already refuses a floor with no rule that opens a card,
+so the window is only while somebody is mid-edit in the form.
+
+## 17. The rules decide shape and which checks run - not behaviour
+
+`src/rules.md` declares the entities, their fields and types, and the laws. The
+linter asks it before every check: a law taken out of the file is a check that
+stops running, and a test asserts the other direction - every law written down
+is one the linter asks about.
+
+What it does not decide is behaviour. `opens` means a card is opened because
+`routeCard` says so; the rules choose whether a floor may write `opens`, and
+what a failure is called, and never what opening means.
+
+**Breaks if wrong:** somebody removes a law expecting the app to stop doing the
+thing, rather than to stop checking it.
+**Fix if it bites:** the laws list gets a column saying what each one guards, so
+"stops checking" is on the page rather than in this file.
+
+## 18. One document, and it is the rules
+
+`workflow-format.md` is gone. There was a schema for the code and a description
+for people, kept in step by a test - which is what having two always costs.
+`rules.md` is both: the linter asks it which checks to run, the settings dialog
+draws it as a form, and the model that writes floors is briefed with it.
+
+**Breaks if wrong:** the rules are now a schema first and prose second, so they
+read less like an explanation than the document they replaced. The generator
+gets the shape of the file from a paragraph in `generatorBrief` rather than from
+the rules themselves.
+**Fix if it bites:** the file layout becomes an entity too - `## entity:
+document` - and the paragraph goes.
+
+## 19. Nothing is given to a floor it did not ask for
+
+Capabilities, columns and card rules used to be filled in behind the operator's
+back when a file left them out - four, five and eight of them. They are not any
+more: a floor has exactly what its file declares, and an empty one is empty.
+
+The laws are the same story. `rules.md` ships with none switched on, so nothing
+is refused for being half-finished. The ids are listed there for anybody who
+wants one back, and the settings dialog can tick them on.
+
+**Breaks if wrong:** a floor with no column has nowhere for a card to go and no
+card moves; a floor with no rule that opens one never puts work on the board.
+Both are legal now, and neither says anything at the time - the only sign is a
+board that stays empty.
+**Fix if it bites:** the checks still exist and are one line each in `rules.md`.
+
+## 20. A floor ships with no card rules at all
+
+Every line drawn on a shipped floor used to arrive with a rule already on it -
+what it does to the board, and when. Opening one showed a sentence nobody in
+the room had written. They are gone: `analyst-chain` and the five other presets
+ship with `cardRules: []`, and the starter template shows the syntax in a
+comment instead of writing three rules for you.
+
+**Breaks if wrong:** a fresh floor moves no cards. Work is dispatched, agents
+talk, and the board stays empty until somebody clicks a line and writes
+`opens a card` on it. Nothing says so at the time - the two lint lines that
+would ("Nobody assigns", "No card rule opens a card") are behind laws that ship
+switched off, per §19.
+**Fix if it bites:** the eight rules that used to be built in are in
+`test/floors.ts` as a fixture, and can be pasted into a floor's `## card rules`.
+
+## 21. Both directions of a line share one handle — by design now
+
+`ba → dev` and `dev → ba` are one line with one dot, and the panel it opens has
+a box per direction. They were briefly two dots 16px apart, which was two
+near-identical panels for one relationship.
+
+## 22. The reading pane follows the drawing until it is typed in
+
+`read it` opens the file beside the chart and re-renders it on every change, so
+the markdown is a live view of what has been drawn. The moment somebody types in
+that box it stops following: their text is theirs, and further edits to the
+chart no longer appear there.
+
+**Breaks if wrong:** somebody types one character in the pane, keeps drawing,
+and saves the file - the drawing's later changes are not in it. **Fix if it
+bites:** say so in the pane once it has been typed in, or drop the text on the
+next chart change.
+
+## 23. Dispatch puts a card on the board only if a rule says so
+
+`you → boss: opens a card` is now a real rule: the operator's hand-over runs
+through `routeCard` like any message, with their address matched on the rule's
+`from`. The card the dispatch handler used to open unconditionally is gone.
+
+**Breaks if wrong:** on a floor with no rule about the human - which is every
+shipped floor, per §20 - dispatching leaves nothing on the board. The work still
+happens; the board just does not mention it.
+**Fix if it bites:** one line on the `you → …` arrow.
+
+## 24. The chart pans and zooms, and nothing is clamped
+
+The wheel zooms about the pointer (0.3×–2.5×) and the middle button drags. The
+canvas has no edges, so a box can be dragged or panned out of sight; `fit` puts
+everything back on screen. Boxes cannot go above or left of the origin.
+
+Boxes drag anywhere, including left of and above the origin - the clamp that
+used to stop them is gone, and the whole picture is shifted by its own leftmost
+and topmost box so nothing falls outside the SVG's box and gets clipped away.
+The view is shifted back by the same amount as it happens, so moving one box
+does not move the others on screen. `fit` measures the whole occupied box, negatives
+included, so everything comes back on screen whatever was done to it.
+
+**Breaks if wrong:** somebody pans far away, sees an empty canvas, and thinks
+the floor is gone. **Fix if it bites:** `fit`, which is in the toolbar.
+
+## 25. The file and the drawing write to each other
+
+The pane follows the drawing whenever it is not focused, and the drawing follows
+the pane whenever it is - parsed 400ms after the last keystroke, and left alone
+if it does not parse.
+
+Text that does not parse is kept rather than overwritten on blur, and the reason
+it did not parse is shown under the box - a half-typed file is what somebody
+typing a file has.
+
+**Breaks if wrong:** while the text does not parse the pane stops following the
+drawing, so boxes moved in the meantime are not in it. It catches up as soon as
+the text reads again.
+
+## 26. Whatever is open is what `delete` deletes
+
+Clicking a box or a line opens it and selects it; `delete` (or `backspace`)
+takes that one off the floor, and `escape` closes the panel. The two buttons
+that used to do it are gone, and so are `fit` (double-click the background) and
+`undo`/`save` while there is nothing to undo or save.
+
+On a line, `delete` takes both directions off - the dot is the line between two
+of them, and one of them is not half a line.
+
+**Breaks if wrong:** a key with no confirmation removes a role and everything
+written in its brief. `undo` restores it - and now restores its box too, which
+it did not before - but only until the floor is saved.
+
+**Fix if it bites:** ask before deleting a role that has a brief in it.
+
+## 27. Saving a floor no longer enforces the laws
+
+`saveWorkflow` linted with every law switched on, which was harmless while the
+laws were built in. Since no floor ships with card rules (§20), every one of
+them failed `must-open` and could not be written to disk at all - switching to a
+shipped floor threw where it should have worked. It now refuses only markdown it
+cannot parse; what a floor must have is the caller's business, and the caller
+asks the rulebook.
+
+**Breaks if wrong:** a floor with nothing on it can be saved and switched to.
+That is the intent, and the card at `floors` says `0 rules` on it.
+
+## 28. Agents follow the floor, both ways
+
+Applying a floor now stands down every running agent the new one has no role
+for - `hasPlaceFor` decides, and `solo` over `analyst-chain` retires the analyst
+- and the renderer brings up whoever the new floor names and nobody is doing
+yet. "Still on the shape they started on" is measured against the floor each
+agent was briefed on rather than "is running at all", so it names only the ones
+a restart would actually change.
+
+**Breaks if wrong:** a retired agent is killed mid-task, and whatever it was
+doing is lost - there is no confirmation and no record beyond the activity line.
+A hired agent survives as long as its role name does, which means a floor that
+renames `dev` to `builder` retires every developer on it.
+**Fix if it bites:** ask before retiring an agent that has an open card.
+
+## 29. Handing work to a role, not to a person
+
+A message addressed to a role name - `{"to": "dev"}` - is resolved by the app
+rather than dying: whoever holds that role and is idle under `hireAbovePct`
+takes it, emptiest window first; nobody free means hire one; and the card is
+opened under whoever got it, rule or no rule. Whether the sender is allowed to
+write to that role is checked *before* anybody is hired.
+
+Reports move the card even on a floor with no rules: a subject starting `done:`
+closes it, `fail:`/`blocked:`/`stuck:` parks it. Any rule the operator writes
+runs first and this never sees it. A card in `stuck` or the waiting column is no
+longer dragged back to `doing` by the agent's next turn - which was usually the
+turn that wrote the message saying it was stuck.
+
+**Breaks if wrong:** a floor that names a role nobody can be hired into (no
+`hireable`) silently drops the message, as before. And the auto-hire puts the
+new agent in the sender's project directory - if the sender has no project, that
+is the floor's own name, and the directory may not be where the work is.
+**Fix if it bites:** hire by hand, which still works and takes a `cwd`.
+
+## 30. One agent stands at launch: the one you type at
+
+Every shipped floor now names an agent for `dispatch` only - Iris, Quinn, Ed and
+Rey are gone as standing agents and their roles are `hireable`. Opening the app
+starts Michael and nobody else. Work handed to one of those roles hires somebody
+into it (§29), so nothing is lost by not having them up.
+
+The chart agrees: saving a drawing marks only `dispatch` as fixed. `entry` used
+to be marked too, which is what kept putting the analyst back.
+
+A brief that names a role with nobody in it now renders the role's own name -
+`{{role.ba.id}}` is `"ba"`, an address the app resolves - instead of leaving the
+braces in front of a model.
+
+**Breaks if wrong:** the first hand-off on a cold floor costs a spawn, so the
+first task is slower than it was. And a floor whose `entry` is hireable takes
+inbound work through dispatch until somebody is hired into it.
+
+## 31. `describe one` was writing floors with nothing in them
+
+Three separate reasons, all fixed:
+
+- The generated file was checked with the operator's rulebook, which ships with
+  every law switched off - so a floor whose roles wrote to nobody and whose
+  board never moved passed, and the repair round never ran. It is checked
+  against every law now: a person may leave a floor half-drawn, a model asked
+  for a whole floor may not.
+- The prompt described the schema and never showed a file. It now carries the
+  starter file whole, plus a list of what a floor must have; without it the
+  model copied field names out of the schema and wrote a capability called
+  `name` and two columns called `key`.
+- The parser refused punctuation rather than content: `- dispatch: boss` in the
+  header (every model writes it there), and `·` or `:` where the examples used
+  `—` between a name and what it is for. Both are accepted. Card rules still
+  take `:` only, because `·` already separates what happens from when.
+
+Measured after: `problems: []`, `boss → dev, you, hire`, `dev → boss`, three
+capabilities, four columns, four rules - drawn with its lines on the chart.
+
+**Breaks if wrong:** a model that writes something none of this anticipates
+still lands a floor with pieces missing; the problems are shown and the floor is
+applied anyway, which is deliberate - a drawing with something missing is
+faster to fix than a blank canvas.
+
+## 32. A line is who may write to whom, in both directions
+
+One curve per pair, one dot on it, and an arrowhead at each end that a direction
+actually exists in: `boss ⇄ analyst` has two heads, `you → boss` has one. Drawn
+with a single head, a two-way line read as a one-way street - which is the
+opposite of what a line on this chart means.
+
+**Breaks if wrong:** nothing on the drawing distinguishes "these two write to
+each other" from "these two write to each other about different things" - that
+is what the panel's two boxes are for.
+
+## 33. A box is a role; the dots on it are the sessions in that role
+
+Each running Claude in a role puts a dot on that role's tile - green idle, amber
+working, red blocked - and the tile's tooltip names them with their context
+percentage. An empty tile says nobody is there yet and that somebody is hired
+when there is work for the role. Up to four dots are drawn; a fifth session is
+in the tooltip only.
+
+**Breaks if wrong:** the dots come from the renderer's roster, which is a
+snapshot published after the fact - a session that has just been hired shows a
+beat later than it exists. And the chart in Settings only re-reads it while it
+is open.
+
+## 34. Two sessions talking is two people talking, on the floor
+
+A node on the chart is a role and the dots on it are the live sessions in it
+(§33); on the office floor those sessions are the people, and a message between
+them is one of them walking over. Three things were stopping that from being
+visible:
+
+- Mail to somebody with no chair yet was dropped. Work is handed to a role now
+  and somebody is hired on the spot, so the first message to a new agent always
+  arrived a beat before the roster knew about them - it is held for 8 seconds
+  and started as soon as they sit down.
+- Neighbours never talked. There is no path to where you are already standing,
+  so two agents a tile apart exchanged a flying envelope and nothing else. Being
+  within two tiles now counts as having arrived.
+- The bubbles were under the name labels. The labels are hidden for the pair
+  while they talk, the bubbles sit higher, the conversation lasts 4.2s instead
+  of 2.6s, and the message's subject is drawn between them.
+
+**Breaks if wrong:** the subject is drawn verbatim, clipped at 40 characters -
+a message whose subject is a paragraph is a smear across the floor.
+
+## 35. Removing a floor: deleted if it is yours, hidden if it ships
+
+`remove` used to appear only on saved floors, so the six that ship with Bullpen
+could not be taken off the list at all. It is on every floor now except the one
+running. A saved floor's file is deleted; a shipped one has no file, so its name
+goes in `ui.hidden` and the list stops offering it. The floor being run is never
+hidden, whatever the list says - a list that cannot show what is running is one
+somebody has to guess their way back from.
+
+`show the ones I removed` at the foot of the panel empties that list.
+
+**Breaks if wrong:** hiding is per-machine and not per-floor-file, so a floor
+saved under a preset's name is hidden by the preset's entry too.
+
+## 36. Switching floors reloads the window
+
+Applying a floor changes what every screen is about - the board's columns, who
+is on the roster, what the router allows - and the renderer kept whatever it had
+read when it opened. Every path that swaps the floor (running one from `floors`,
+`describe one`, `a new one`, `save the file`) now reloads the window 200ms after
+main confirms.
+
+Main owns the agents and the terminals, so nothing running is lost; what is lost
+is which tab was open and anything typed and not saved elsewhere. Saving the
+chart with `save the floor` does *not* reload - that is editing the floor you
+are already on, and reloading mid-drawing would be worse than the staleness.
+
+**Breaks if wrong:** an agent still briefed on the old floor is not restarted by
+this - the reload is the window, not the floor. `stale` names them and
+`restart the standing ones` is still the way.

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
@@ -26,27 +26,59 @@ import {
 } from './god.ts'
 import { execFile } from 'node:child_process'
 import { routeCard } from './cards.ts'
-import { DEFAULT_WORKFLOW, PRESETS, STARTER } from './presets.ts'
+import { dryRun } from './dryrun.ts'
+import { DEFAULT_WORKFLOW, NEW_FLOOR, PRESETS, STARTER } from './presets.ts'
 import {
-  can,
-  fixedId,
-  type Capability,
   HIRE_PARTY,
   HUMAN_PARTY,
-  lint,
+  can,
+  columnFor,
   deleteWorkflow,
-  GENERATOR_BRIEF,
+  fixedId,
+  formatDoc,
+  formatPath,
+  hasPlaceFor,
+  lint,
   listWorkflows,
   parseMarkdown,
   parseWorkflow,
-  saveWorkflow,
+  pickForRole,
   refuseMail,
   renderBrief,
   roleOfFixedId,
   rolesWith,
+  saveWorkflow,
   toMarkdown,
-  type Workflow
+  type Candidate,
+  type Capability,
+  type ColumnKind,
+  type Workflow,
+  workCwd
 } from './workflow.ts'
+import { generatorBrief } from '../workflow-spec.ts'
+// The format, as one document rather than a table in a source file. Bundled
+// into main because the model that writes workflows is briefed with it, and
+// read off disk by the tests that check it still describes what the parser does.
+// The rules, bundled. One document: what a floor may contain, what refuses one,
+// and what the model that writes floors is briefed with. There used to be two -
+// a schema for the code and a description for people - and a test to keep them
+// from drifting, which is what having two always costs.
+import RULES_TEXT from '../rules.md?raw'
+import { readRules } from '../rules.ts'
+
+/**
+ * The reference in force: whatever is at `~/.bullpen/workflow-format.md`, else
+ * the one Bullpen ships. Called rather than held, so replacing that file takes
+ * effect on the next generation instead of the next launch.
+ */
+const format = (): { text: string; path: string; custom: boolean } =>
+  formatDoc(BULLPEN_HOME, RULES_TEXT)
+
+/** The rules in force, parsed. Read per call, so an edit lands immediately. */
+const rulebook = (): ReturnType<typeof readRules> => readRules(format().text)
+
+/** What the writer is told: the whole reference, and how to answer. */
+const generatorPrompt = (): string => generatorBrief(format().text, STARTER)
 import { Hive, HIRE, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
@@ -174,6 +206,10 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
   }
   spec = { ...spec, cwd }
   mkdirSync(spec.cwd, { recursive: true })
+  // Which floor this one was briefed on. A CLI is handed its brief once, at
+  // spawn, so this is the shape it is really running - not the shape the app
+  // is on now.
+  bornOn.set(spec.id, wf.name)
   hive.register(spec.id)
   activity.push('spawn', spec.id, `spawned ${spec.id} in ${cwd}`)
   approvals.setSandbox(spec.id, spec.cwd)
@@ -187,15 +223,38 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
   // not keep running a Michael who still believes he hires people himself.
   const role = spec.role ?? roleOf(spec.id)
   roles.set(spec.id, role)
-  const brief = renderBrief(wf, role, {
-    id: spec.id,
-    name: wf.roles[role]?.fixed?.name ?? spec.id,
-    reportTo: spec.reportTo ?? assignerId() ?? dispatchId()
-  })
+  // What this role never does, enforced by the approvals layer rather than
+  // asked for in the brief. A brief is advice; this is the answer to the hook.
+  approvals.setDenied(spec.id, wf.roles[role]?.never ?? [])
+  const brief = [
+    renderBrief(wf, role, {
+      id: spec.id,
+      name: wf.roles[role]?.fixed?.name ?? spec.id,
+      reportTo: spec.reportTo ?? assignerId() ?? dispatchId()
+    }),
+    houseRules(wf, role, spec.id)
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  // The command this role runs. A floor may put a cheaper model on the role
+  // that only reads, or a different CLI entirely on the one that writes.
+  const cli = wf.roles[role]?.cli?.trim()
+  const said = cli ? cli.split(/\s+/) : []
+  const cmd = said[0] ?? spec.cmd
+  const cliArgs = said.slice(1)
 
   const state = ptys.spawn({
     ...spec,
-    args: [...(spec.args ?? []), '--append-system-prompt', brief, '--settings', settingsPath],
+    cmd,
+    args: [
+      ...cliArgs,
+      ...(spec.args ?? []),
+      '--append-system-prompt',
+      brief,
+      '--settings',
+      settingsPath
+    ],
     env: {
       ...spec.env,
       BULLPEN_AGENT_ID: spec.id,
@@ -213,6 +272,32 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
     startedAt: state.startedAt
   })
   return state
+}
+
+/**
+ * The part of the briefing no workflow writes, because it is about Bullpen.
+ *
+ * Every brief used to ask the agent to do the floor's bookkeeping itself: read
+ * the floor file, work out who is idle, compare their context against two
+ * numbers, hire when nobody fits. That is four steps a model performs
+ * unreliably and silently, and the app already knows all four answers - so it
+ * does it, and this says so.
+ */
+function houseRules(w: Workflow, role: string, id: string): string {
+  const down = (w.talksTo[role] ?? []).filter((to) => w.roles[to])
+  if (!down.length) return ''
+  const list = down.map((r) => `"${r}"`).join(', ')
+  return [
+    `Handing work over: address the message to the role, not to a person - ${list}.`,
+    `Bullpen puts it in front of whoever is free, hires somebody when nobody is,`,
+    `and puts the task on the board under their name. You do not have to know who`,
+    `is on the floor or how full their context is.`,
+    ``,
+    `{"from": "${id}", "to": "${down[0]}", "subject": "<the task in a few words>", "body": "<what is needed>"}`,
+    ``,
+    `Start a report with "done: " when a task is finished and "fail: " when it is`,
+    `not. That is what moves the card off the board.`
+  ].join('\n')
 }
 
 /** See PtyManager.submit for why the Enter cannot ride along with the text. */
@@ -481,11 +566,19 @@ async function applyWebhook(): Promise<{ enabled: boolean; port: number; token: 
   }
 }
 
+/**
+ * The columns this floor uses when nothing was sent: where a new card starts,
+ * where work reads as live, where a dead agent's card goes, and what finished
+ * looks like. Read through the workflow, because the words are the operator's.
+ */
+const column = (kind: ColumnKind): string => columnFor(wf, kind)
+
 /** The card an agent is on: its newest that is neither done nor abandoned. */
 function openCard(agentId: string): { id: string; text: string; status: TaskStatus } | undefined {
+  const finished = column('done')
   return board
     .tasks(agentId)
-    .filter((t) => t.status !== 'done')
+    .filter((t) => t.status !== finished)
     .at(-1)
 }
 
@@ -503,7 +596,7 @@ function cardFor(agentId: string, text: string, by = agentId): void {
   // chases it, and a chase is not a new job.
   const open = openCard(agentId)
   if (open && open.text === clean) return
-  board.addTask(agentId, clean, 'todo')
+  board.addTask(agentId, clean, column('start'))
   // Logged against whoever handed it over, not whoever received it: this line
   // is what the assigner's own page is made of.
   activity.push('task', by, `${by === agentId ? agentId : `${by} → ${agentId}`}: ${clean.slice(0, 80)}`)
@@ -520,18 +613,33 @@ function cardFor(agentId: string, text: string, by = agentId): void {
  */
 function testerReported(testerId: string, subject: string): void {
   const failed = /^\s*(fail|bug|broken)\b/i.test(subject)
-  cardTo(testerId, failed ? 'blocked' : 'done')
+  cardTo(testerId, failed ? column('stuck') : column('done'))
   if (failed) return
   const project = projectOf(testerId)
+  const waiting = column('waiting')
   for (const t of board.tasks()) {
-    if (t.status !== 'wait_test') continue
+    if (t.status !== waiting) continue
     // Same project only: two features under test at once must not close each
     // other. With no project on either side this is every waiting card, which
     // is the honest answer on a floor that never said which project it is on.
     if (project && projectOf(t.agentId) !== project) continue
-    board.setTaskStatus(t.id, 'done')
+    board.setTaskStatus(t.id, column('done'))
   }
   pushTasks()
+}
+
+/**
+ * What a report does to the card when no rule says.
+ *
+ * A floor ships with no card rules at all, so on a new one nothing moved: work
+ * was handed over, done, and reported, and the board sat on `todo` forever. The
+ * subject is the only thing every brief on every floor already agrees on -
+ * "done: ..." when it is finished, "fail: ..." when it is not - so that is what
+ * this reads. Any rule the operator writes runs first and this never sees it.
+ */
+function said(from: string, subject: string): void {
+  if (/^\s*(done|pass|finished|shipped|ok)\b/i.test(subject)) cardTo(from, column('done'))
+  else if (/^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(subject)) cardTo(from, column('stuck'))
 }
 
 /** Move an agent's open card, if it has one. */
@@ -607,7 +715,33 @@ function reportFinished(id: string): void {
   setTimeout(retry, 1200).unref?.()
 }
 
-/** Where Michael lives: whatever the operator chose, else the default. */
+/**
+ * Every id spawned as a standing agent this run.
+ *
+ * The workflow that spawned one is not always the workflow running now: apply a
+ * different shape and the old floor's analyst is still up, briefed for a chain
+ * nobody is running any more. `fixed:stop` asks the current workflow who stands
+ * here, so she was not on its list and stayed - visible, working, and answering
+ * to a floor that no longer exists.
+ */
+const standing = new Set<string>()
+
+/** The floor each running agent was briefed on, by name. */
+const bornOn = new Map<string, string>()
+
+/**
+ * Where a role's fixed agent works: its own directory if the workflow gave it
+ * one, else wherever dispatch works.
+ *
+ * One function, because the two callers were two answers: the spawn honoured
+ * `- cwd:` and the "is it already in the right place" check compared against
+ * dispatch's directory regardless - so a role with a directory of its own was
+ * killed and restarted on every launch, having done nothing wrong.
+ */
+const roleHome = (role: string): string =>
+  resolve(workCwd(wf, role, app.getPath('home'), currentGodCwd()))
+
+/** Where the dispatch agent lives: whatever the operator chose, else default. */
 const currentGodCwd = (): string =>
   readConfig(BULLPEN_HOME).godCwd ?? godCwd(BULLPEN_HOME, dispatchId())
 
@@ -617,6 +751,7 @@ function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType
   writeBriefing(cwd, floorPath(BULLPEN_HOME), wf)
   const id = dispatchId()
   approvals.setSandbox(id, cwd)
+  standing.add(id)
   return spawnAgent({ id, cwd, cmd: 'claude', args: [], role: wf.dispatch, ...size })
 }
 
@@ -629,6 +764,37 @@ function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType
  * whichever agent exits first, which is how killing two in a row turned into
  * a five second wait and then a spawn into a still-running pty.
  */
+/**
+ * Take off anybody the new floor has no place for.
+ *
+ * Switching floors used to leave the last one's standing agents running: apply
+ * `solo` over `analyst-chain` and the analyst is still there, on the roster,
+ * mailable, working to a brief for a role that no longer exists. The agents are
+ * the floor's, so the floor decides who is on it.
+ *
+ * Only whoever can be judged: an agent whose role this app never recorded is
+ * somebody else's business and is left alone. A hired builder keeps its place
+ * as long as its role does - what goes is the role that is gone, and the fixed
+ * agent that a floor has replaced with a different one.
+ */
+async function retire(next: Workflow): Promise<string[]> {
+  const gone: string[] = []
+  for (const a of ptys.list()) {
+    if (a.status !== 'running') continue
+    const role = roles.get(a.id) ?? roleOfFixedId(wf, a.id)
+    if (!role) continue
+    if (hasPlaceFor(next, { id: a.id, role, standing: standing.has(a.id) })) continue
+    await stop(a.id)
+    roles.delete(a.id)
+    standing.delete(a.id)
+    gone.push(a.id)
+  }
+  if (gone.length) {
+    activity.push('spawn', 'bullpen', `stood down, not on "${next.name}": ${gone.join(', ')}`)
+  }
+  return gone
+}
+
 async function stop(id: string, ms = 5000): Promise<void> {
   if (!ptys.isRunning(id)) return
   await new Promise<void>((done) => {
@@ -659,9 +825,10 @@ function startFixed(
   role: string,
   size: { cols: number; rows: number }
 ): ReturnType<PtyManager['spawn']> {
-  const cwd = currentGodCwd()
+  const cwd = roleHome(role)
   mkdirSync(cwd, { recursive: true })
   approvals.setSandbox(id, cwd)
+  standing.add(id)
   return spawnAgent({ id, cwd, cmd: 'claude', args: [], role, ...size })
 }
 
@@ -834,7 +1001,7 @@ function wire(): void {
     // Whatever it was on is not being worked on by anyone now. Left in `doing`
     // it reads as live work, which is the board lying about the floor - the one
     // thing it must not do if it is what the operator watches.
-    if (openCard(id)) cardTo(id, 'blocked')
+    if (openCard(id)) cardTo(id, column('stuck'))
     activity.push('exit', id, `${id} exited (code ${code})`)
     send('agent:exit', id, code)
   })
@@ -875,10 +1042,11 @@ function wire(): void {
     // saying "done" are not the same claim.
     // One place decides what a message does to the board, and it is testable:
     // see cards.ts for why every branch in it exists.
-    const move = routeCard(wf, { ...msg, to }, roleOf, HUMAN)
+    const move = routeCard(wf, { ...msg, to }, roleOf, wf.human)
     if (move?.kind === 'open') cardFor(move.agent, move.text, move.by)
     else if (move?.kind === 'move') cardTo(move.agent, move.status)
     else if (move?.kind === 'checked') testerReported(move.agent, move.subject)
+    else said(msg.from, msg.subject)
 
     send('hive:deliver', { to, msg })
   })
@@ -891,17 +1059,88 @@ function wire(): void {
    * the human because she had the answer. Each one skips whoever was supposed
    * to see it first, and the floor stops meaning anything.
    */
+  /**
+   * A message addressed to a role, put in front of somebody.
+   *
+   * The floor says who work goes to; who is actually free to take it is a fact
+   * about right now, and every brief that asked an agent to work it out - read
+   * the floor file, check who is idle, check how full they are, hire if nobody
+   * fits - was asking a model to do bookkeeping it does badly and silently. So
+   * the app does it: reuse whoever is free under the threshold, hire when
+   * nobody is, and open the card either way.
+   */
+  const assignTo = (role: string, from: string, msg: Message): string | null => {
+    if (!wf.roles[role] || role === roleOf(from)) return null
+    // Asked before anybody is chosen or hired: the chain refuses this message
+    // a moment later anyway, and hiring somebody for work that will not be
+    // delivered leaves an agent standing on the floor with nothing to do.
+    if (from !== 'bullpen' && from !== wf.human && from !== 'webhook') {
+      if (refuseMail(wf, roleOf(from), role)) return null
+    }
+    const staff: Candidate[] = ptys
+      .list()
+      .filter((a) => a.status === 'running' && !isShell(a.id) && a.id !== from)
+      .map((a) => ({
+        id: a.id,
+        role: roleOf(a.id),
+        idle: !working.has(a.id),
+        ctxPct: currentCtx(a.id)?.pct
+      }))
+
+    // What the work is, for the board. Written here rather than left to a card
+    // rule: a floor with no rules still has work being handed over, and a board
+    // that shows none of it is the app lying about what the floor is doing.
+    const what = [msg.subject, msg.body].filter(Boolean).join(' — ')
+
+    const free = pickForRole(wf, role, staff)
+    if (free) {
+      cardFor(free, what, from)
+      return free
+    }
+    if (wf.roles[role].hireable !== true) return null
+
+    // Nobody free, so somebody new. The project is whoever asked for the work -
+    // a hire onto a project nobody is on has no directory to work in.
+    const project = projectOf(from) || slug(wf.name)
+    const cwd = projectCwd(project) ?? ptys.list().find((a) => a.id === from)?.cwd
+    if (!cwd) return null
+    const name = nextHireName(project)
+    try {
+      const state = spawnAgent({
+        id: slugId(name),
+        cwd,
+        cmd: 'claude',
+        args: [],
+        cols: 100,
+        rows: 30,
+        role,
+        reportTo: from
+      })
+      hires.set(state.id, { name, project })
+      reportDue = true
+      activity.push('spawn', from, `${from} needed a ${role} and none was free - hired ${name}`)
+      send('agent:hired', { ...state, name, project, role, brief: what })
+      cardFor(state.id, what, from)
+      return state.id
+    } catch (err) {
+      console.error(`[bullpen] could not hire a ${role}:`, err)
+      return null
+    }
+  }
+
+  hive.staff = (to: string, from: string, msg: Message): string | null => assignTo(to, from, msg)
+
   hive.gate = (from: string, to: string): string | null => {
     // Bullpen's own replies, the human's answers and inbound work are not part
     // of the chain; refusing them would strand the thing they answer.
-    if (from === 'bullpen' || from === HUMAN || from === 'webhook') return null
+    if (from === 'bullpen' || from === wf.human || from === 'webhook') return null
     if (to === 'bullpen') return null
     // A fixed agent is a process like any other and can be killed. With the
     // one who assigns gone, the floor falls back to dispatch assigning directly
     // and these rules would only leave the work with nowhere to go.
     const helper = assistId()
     if (helper && !ptys.isRunning(helper)) return null
-    const party = to === HUMAN ? HUMAN_PARTY : to === HIRE ? HIRE_PARTY : roleOf(to)
+    const party = to === wf.human ? HUMAN_PARTY : to === wf.hire ? HIRE_PARTY : roleOf(to)
     return refuseMail(wf, roleOf(from), party)
   }
 
@@ -1126,8 +1365,10 @@ function wire(): void {
       // waiting on a tester gets woken by all sorts of things - a broadcast, a
       // question, the tester's own reply - and every one of them used to drag
       // the card out of wait_test, so the pass at the end of the loop found
-      // nothing to close.
-      if (openCard(id)?.status !== 'wait_test') cardTo(id, 'doing')
+      // nothing to close. Same for a card somebody has just said they are stuck
+      // on: the next turn is usually them writing the message that said so.
+      const held = [column('waiting'), column('stuck')]
+      if (!held.includes(openCard(id)?.status ?? '')) cardTo(id, column('working'))
     }
     // A turn just ended, so the transcript now holds its token counts.
     if (status === 'idle') {
@@ -1146,14 +1387,14 @@ function wire(): void {
   approvals.on('waiting', (id: string, asked: string) => {
     if (waiting.get(id) === asked) return
     waiting.set(id, asked)
-    cardTo(id, 'blocked')
+    cardTo(id, column('stuck'))
     activity.push('question', id, `${id} is waiting on you: ${asked}`)
     notify('ask', `${id} is waiting on you`, asked, { tab: 'ask me', id })
     send('agent:waiting', id, asked)
   })
   approvals.on('answered', (id: string) => {
     if (!waiting.delete(id)) return
-    cardTo(id, 'doing')
+    cardTo(id, column('working'))
     send('agent:waiting', id, null)
   })
 
@@ -1213,9 +1454,9 @@ function wire(): void {
   ipcMain.handle('fixed:ensure', async (_e, size: { cols: number; rows: number }) => {
     // A workflow may have none at all - `solo` is one boss and hired
     // developers. The renderer asks anyway; an empty list is the honest answer.
-    const want = resolve(currentGodCwd())
     const out: unknown[] = []
     for (const { role, id, name } of assistRoles()) {
+      const want = roleHome(role)
       const running = ptys.list().find((a) => a.id === id && a.status === 'running')
       if (running && resolve(running.cwd) === want) {
         out.push({ ...running, name, role, alreadyUp: true })
@@ -1271,10 +1512,14 @@ function wire(): void {
 
       writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), godCwd: target })
 
-      // They work where he works, so they move with him. Stopped here rather
-      // than left for `fixed:ensure` to notice, so the floor is never briefly a
-      // boss in the new directory and an analyst in the old one.
-      for (const { id } of assistRoles()) await stop(id)
+      // Only the ones who work where dispatch works: they move with it, and
+      // stopping them here rather than leaving it to `fixed:ensure` means the
+      // floor is never briefly a boss in the new directory and an analyst in
+      // the old one. A role with a `- cwd:` of its own is not moving anywhere,
+      // and restarting it would cost a conversation for nothing.
+      for (const { role, id } of assistRoles()) {
+        if (!wf.roles[role]?.cwd?.trim()) await stop(id)
+      }
       await stop(dispatchId())
       try {
         return { ...startGod(target, size), name: wf.roles[wf.dispatch]?.fixed?.name ?? dispatchId() }
@@ -1409,11 +1654,19 @@ function wire(): void {
     workflow: wf,
     /** The same thing, as the text the editor puts in front of a person. */
     markdown: toMarkdown(wf),
-    problems: lint(wf),
-    /** Who is running under the old shape and would have to be restarted. */
+    problems: lint(wf, rulebook()),
+    /**
+     * Who is running under the old shape and would have to be restarted.
+     *
+     * By the floor they were briefed on, not by "is running at all": since
+     * switching floors stands down whoever has no role and brings up whoever
+     * the new one names, most of the roster is on the current shape already,
+     * and saying otherwise asked people to restart agents for nothing.
+     */
     stale: ptys
       .list()
       .filter((a) => a.status === 'running' && !isShell(a.id))
+      .filter((a) => (bornOn.get(a.id) ?? wf.name) !== wf.name)
       .map((a) => a.id)
   }))
 
@@ -1423,7 +1676,21 @@ function wire(): void {
    * - they are starting points, and losing them would be losing the only
    * examples of the format.
    */
-  ipcMain.handle('workflow:list', () => [
+  /** Put every shipped floor back on the list. The only way out of §35. */
+  ipcMain.handle('workflow:unhide', () => {
+    const cfg = readConfig(BULLPEN_HOME)
+    writeConfig(BULLPEN_HOME, { ...cfg, ui: { ...cfg.ui, hidden: [] } })
+    return true
+  })
+
+  ipcMain.handle('workflow:list', () => {
+    const hidden = new Set(readConfig(BULLPEN_HOME).ui?.hidden ?? [])
+    // Never the one being run: a list that cannot show what is running is a
+    // list somebody has to guess their way back to.
+    return LIST().filter((w) => w.name === wf.name || !hidden.has(w.name))
+  })
+
+  const LIST = (): { name: string; description: string; markdown: string; builtin: boolean }[] => [
     ...PRESETS.map((w) => ({
       name: w.name,
       description: w.description,
@@ -1435,7 +1702,7 @@ function wire(): void {
       // rather than sitting beside it under the same label.
       .filter((s) => !PRESETS.some((p) => p.name === s.name))
       .map((s) => ({ ...s, builtin: false }))
-  ])
+  ]
 
   /**
    * Take the standing agents down so they can come back on the new shape.
@@ -1450,13 +1717,104 @@ function wire(): void {
    * is not the place to decide that work is finished.
    */
   ipcMain.handle('fixed:stop', async () => {
-    const ids = [dispatchId(), ...assistRoles().map((a) => a.id)]
-    for (const id of ids) await stop(id)
-    return ids.filter((id) => !ptys.isRunning(id))
+    // Whoever stands here now, and whoever was ever stood up this run: after a
+    // switch those are different sets, and the difference is exactly the agents
+    // left running on a shape that no longer exists.
+    const ids = [...new Set([dispatchId(), ...assistRoles().map((a) => a.id), ...standing])]
+    const was = ids.filter((id) => ptys.isRunning(id))
+    for (const id of was) await stop(id)
+    return was.filter((id) => !ptys.isRunning(id))
   })
 
   /** The annotated empty floor, for somebody writing their first one. */
   ipcMain.handle('workflow:starter', () => STARTER)
+  /** The two-party floor a new chart is drawn on top of. */
+  ipcMain.handle('workflow:blank', () => NEW_FLOOR)
+
+  /**
+   * The format reference, and where to put your own.
+   *
+   * Through main rather than bundled into the renderer as well: the document in
+   * force is whichever file main just read, and a second copy compiled into the
+   * dialog would go on showing the shipped one after it was replaced.
+   */
+  /**
+   * Walk a task through a floor without running it.
+   *
+   * Takes the markdown rather than reading the running workflow, so the editor
+   * can try what is on screen - which is the whole point: you check a floor
+   * before you switch to it, not after the agents are up.
+   */
+  ipcMain.handle('workflow:dryRun', (_e, markdown: string, task: string) => {
+    const parsed = parseMarkdown(markdown)
+    if ('error' in parsed) return { error: parsed.error }
+    return dryRun(parsed.workflow, task)
+  })
+
+  ipcMain.handle('workflow:format', () => format())
+
+  /**
+   * Replace the format document, or drop back to the one Bullpen ships.
+   *
+   * Written where `formatDoc` looks for it, so what the dialog just saved is
+   * what the next generation is briefed with - no reload, no restart.
+   */
+  ipcMain.handle('workflow:writeFormat', (_e, text: string) => {
+    const path = formatPath(BULLPEN_HOME)
+    try {
+      if (text.trim()) writeFileSync(path, text, 'utf8')
+      // Emptying the box is how you go back: the shipped document is what a
+      // missing file means, and leaving a blank one behind would read as an
+      // override that says nothing.
+      else if (existsSync(path)) rmSync(path)
+      return format()
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  /**
+   * Change part of the running workflow, without retyping the file.
+   *
+   * The board's colours and the two context thresholds are settings people
+   * reach for one at a time, and markdown is the wrong surface for "make that
+   * column blue". The floor is still one document - this edits it and hands
+   * back the text, so what the editor shows next is what is running.
+   */
+  /**
+   * The floor as a file, without saving it.
+   *
+   * Drawing is not reading: somebody moves four boxes and two lines and cannot
+   * tell what they have written until it is running. This renders the drawing
+   * in front of them - the same text `workflow:patch` would write - so the file
+   * can be read before it is the floor.
+   */
+  ipcMain.handle('workflow:preview', (_e, patch: Partial<Workflow>) => {
+    const next: Workflow = { ...wf, ...patch }
+    return { markdown: toMarkdown(next), problems: lint(next, rulebook()) }
+  })
+
+  ipcMain.handle('workflow:patch', async (_e, patch: Partial<Workflow>) => {
+    const next: Workflow = { ...wf, ...patch }
+    // Before `wf` moves, while the old floor can still say who was who.
+    const retired = await retire(next)
+    // Noted, not refused. A floor half-drawn is a floor mid-thought: somebody
+    // adds a role before the line that reaches it, or a line before the rule
+    // that uses it, and refusing to save until every check passes means the
+    // work in front of them cannot be put down. The problems come back with the
+    // save so they can be shown, and the floor is what they drew.
+    const problems = lint(next, rulebook())
+    wf = next
+    const markdown = toMarkdown(wf)
+    writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), workflow: wf })
+    try {
+      saveWorkflow(BULLPEN_HOME, markdown)
+    } catch (err) {
+      console.error('[bullpen] could not save the patched workflow:', err)
+    }
+    hive.reserved = { human: wf.human, hire: wf.hire }
+    return { workflow: wf, markdown, problems, retired }
+  })
 
   /**
    * Write a workflow from a sentence about how the floor should work.
@@ -1472,6 +1830,11 @@ function wire(): void {
   /** What is wrong with a candidate, as the generator will be told it. */
   const check = (md: string): string[] => {
     const parsed = parseMarkdown(md)
+    // Every law, not the operator's rulebook. The laws are switched off because
+    // a person drawing a floor is allowed to leave it half-finished; a model
+    // asked for a whole floor is not, and with the rulebook here it was handing
+    // back floors whose roles never wrote to each other and whose board never
+    // moved - which passed, because nothing was switched on to catch it.
     return 'error' in parsed ? [parsed.error] : lint(parsed.workflow)
   }
 
@@ -1503,12 +1866,13 @@ function wire(): void {
         .trim()
 
     try {
-      let md = clean(await ask(`${GENERATOR_BRIEF}\n\nWrite the workflow for this floor:\n\n${want}`))
+      const brief = generatorPrompt()
+      let md = clean(await ask(`${brief}\n\nWrite the workflow for this floor:\n\n${want}`))
       let problems = check(md)
       if (problems.length) {
         md = clean(
           await ask(
-            `${GENERATOR_BRIEF}\n\nWrite the workflow for this floor:\n\n${want}\n\n` +
+            `${brief}\n\nWrite the workflow for this floor:\n\n${want}\n\n` +
               `You wrote this, and it was rejected:\n\n${md}\n\n` +
               `Fix exactly these and answer with the whole file again:\n${problems.map((p) => `- ${p}`).join('\n')}`
           )
@@ -1534,6 +1898,13 @@ function wire(): void {
   ipcMain.handle('workflow:delete', (_e, name: string) => {
     try {
       deleteWorkflow(BULLPEN_HOME, name)
+      // A shipped floor has no file to remove, so taking it off the list is a
+      // note in the config rather than a deletion. Written for saved ones too:
+      // a saved floor that took a preset's name would otherwise reappear as the
+      // preset the moment its file went.
+      const cfg = readConfig(BULLPEN_HOME)
+      const hidden = [...new Set([...(cfg.ui?.hidden ?? []), name])]
+      writeConfig(BULLPEN_HOME, { ...cfg, ui: { ...cfg.ui, hidden } })
       return { ok: true }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
@@ -1551,19 +1922,21 @@ function wire(): void {
   ipcMain.handle('workflow:lint', (_e, text: string) => {
     const parsed = parseMarkdown(text)
     if ('error' in parsed) return { problems: [parsed.error], preview: null }
-    return { problems: lint(parsed.workflow), preview: parsed.workflow }
+    return { problems: lint(parsed.workflow, rulebook()), preview: parsed.workflow }
   })
 
-  ipcMain.handle('workflow:set', (_e, text: string) => {
+  ipcMain.handle('workflow:set', async (_e, text: string) => {
     const parsed = parseMarkdown(text)
     if ('error' in parsed) return { error: parsed.error }
-    const problems = lint(parsed.workflow)
+    const problems = lint(parsed.workflow, rulebook())
     // Refused rather than warned about: every one of these fails silently at
     // runtime - a card that never moves, a report that never reaches anyone -
     // and a floor that looks busy and finishes nothing is the worst outcome
     // this whole file exists to avoid.
     if (problems.length) return { error: problems.join('\n') }
+    const retired = await retire(parsed.workflow)
     wf = parsed.workflow
+    hive.reserved = { human: wf.human, hire: wf.hire }
     writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), workflow: wf })
     // Applied is also saved: switching away and back should not mean retyping
     // the floor you were just running.
@@ -1576,7 +1949,7 @@ function wire(): void {
     // Roles learned under the old workflow name things this one may not have.
     for (const [id, role] of [...roles]) if (!wf.roles[role]) roles.delete(id)
     activity.push('spawn', 'bullpen', `workflow set to "${wf.name}"`)
-    return { workflow: wf, markdown: toMarkdown(wf) }
+    return { workflow: wf, markdown: toMarkdown(wf), retired }
   })
 
   ipcMain.handle('layout:get', () => readConfig(BULLPEN_HOME).layout ?? null)
@@ -1660,7 +2033,10 @@ function wire(): void {
     questions.delete(qid)
     // The reply travels back through the hive, so the agent receives it exactly
     // as it receives any other message - no second delivery mechanism.
-    hive.send({ from: HUMAN, to: q.from, subject: `re: ${q.subject}`, body: answer })
+    // Under whatever this floor calls the human: the gate and the card rules
+    // both match on it, and an answer that arrived from an address nothing
+    // recognises is an answer the router treats as another agent's.
+    hive.send({ from: wf.human, to: q.from, subject: `re: ${q.subject}`, body: answer })
     activity.push('answer', HUMAN, `you answered ${q.from}: ${q.subject}`)
     send('ask:pending', [...questions.values()])
     return true
@@ -1698,10 +2074,13 @@ function wire(): void {
     const who = owner && owner !== 'decide' ? ` I suggest ${owner} takes it.` : ''
     const brief = `Dispatch: ${task} —${where}${who} ${rules}`
     submitPrompt(target, brief)
-    // The operator's own request is work too. It was the one assignment the
-    // board never recorded - so a floor could be busy on something the human
-    // asked for with nothing on the board saying it had been asked.
-    cardFor(target, task, HUMAN)
+    // The operator's own request is work too, and what it does to the board is
+    // a rule like any other: `you → boss: opens a card`. It used to be written
+    // here instead, which made the one hand-off nobody could change the one the
+    // operator makes most.
+    const handed = routeCard(wf, { from: HUMAN, to: target, subject: '', body: task }, roleOf, wf.human)
+    if (handed?.kind === 'open') cardFor(handed.agent, handed.text, handed.by)
+    else if (handed?.kind === 'move') cardTo(handed.agent, handed.status)
     reportDue = true
     lastDispatch = { text, owner, project, ts: Date.now() }
     send('dispatch:new', lastDispatch)
@@ -1779,6 +2158,42 @@ function wire(): void {
     shell.openExternal(url)
     return true
   })
+  /**
+   * How the app is drawn on this machine: terminal size, floor colours.
+   *
+   * Clamped rather than trusted - a font size of 0 is a terminal nobody can
+   * read and no way back to this dialog to fix it.
+   */
+  ipcMain.handle('ui:prefs', () => ({
+    fontSize: readConfig(BULLPEN_HOME).ui?.fontSize ?? 12.5,
+    floor: readConfig(BULLPEN_HOME).ui?.floor ?? 'green',
+    chart: readConfig(BULLPEN_HOME).ui?.chart ?? {},
+    view: readConfig(BULLPEN_HOME).ui?.view ?? {}
+  }))
+  ipcMain.handle(
+    'ui:setPrefs',
+    (
+      _e,
+      next: {
+        fontSize?: number
+        floor?: string
+        chart?: Record<string, Record<string, { x: number; y: number }>>
+        view?: Record<string, { k: number; tx: number; ty: number }>
+      }
+    ) => {
+      const cfg = readConfig(BULLPEN_HOME)
+      const ui = {
+        fontSize: Math.min(24, Math.max(9, Number(next.fontSize ?? cfg.ui?.fontSize ?? 12.5))),
+        floor: (next.floor ?? cfg.ui?.floor ?? 'green').trim() || 'green',
+        // Merged per floor, so saving one chart does not wipe the others.
+        chart: { ...(cfg.ui?.chart ?? {}), ...(next.chart ?? {}) },
+        view: { ...(cfg.ui?.view ?? {}), ...(next.view ?? {}) }
+      }
+      writeConfig(BULLPEN_HOME, { ...cfg, ui })
+      return ui
+    }
+  )
+
   ipcMain.handle('ui:notify', () => readConfig(BULLPEN_HOME).notify !== false)
   ipcMain.handle('ui:setNotify', (_e, on: boolean) => {
     writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), notify: on === true })
@@ -1881,7 +2296,7 @@ app.whenReady().then(async () => {
     if ('error' in parsed) {
       console.error(`[bullpen] saved workflow ignored: ${parsed.error}`)
     } else {
-      const problems = lint(parsed.workflow)
+      const problems = lint(parsed.workflow, rulebook())
       if (problems.length) {
         console.error(`[bullpen] saved workflow ignored:\n${problems.join('\n')}`)
       } else {
@@ -1890,6 +2305,10 @@ app.whenReady().then(async () => {
     }
   }
   godId = fixedId(wf, wf.dispatch)
+  // What the human and hiring are called here. Routed on, so a floor that
+  // addresses its operator as "boss" has mail to "boss" reach the ask-me queue
+  // rather than the dead letters.
+  hive.reserved = { human: wf.human, hire: wf.hire }
 
   approvals.setTheme(readConfig(BULLPEN_HOME).mode ?? 'light')
   await approvals.start()

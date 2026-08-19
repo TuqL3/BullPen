@@ -100,6 +100,86 @@ export const PALETTES: Record<'light' | 'dark', Palette> = {
   }
 }
 
+/**
+ * What the office is painted in, beyond light and dark.
+ *
+ * Only the surfaces a room reads as - ground, rug, walls, glass, wood - are
+ * overridden; the screens, plants and metal stay put, because they are objects
+ * rather than décor and repainting them made every variant look like a bug.
+ *
+ * Built once at load, so the object identity is stable: the floor rebuilds its
+ * tile atlas whenever the palette it is handed is not the one it cached, and a
+ * fresh object per frame would rebuild it sixty times a second.
+ */
+export const FLOORS = ['green', 'sand', 'slate'] as const
+export type FloorTheme = (typeof FLOORS)[number]
+
+const paint = (base: Palette, over: Partial<Palette>): Palette => ({ ...base, ...over })
+
+const THEMED: Record<FloorTheme, Record<'light' | 'dark', Palette>> = {
+  green: PALETTES,
+  sand: {
+    light: paint(PALETTES.light, {
+      floor: '#eadfc6',
+      floorLine: '#ded1b4',
+      floorDot: '#d2c3a0',
+      rug: '#d9c7a8',
+      rugLine: '#c8b492',
+      wallTop: '#faf6ec',
+      wallFace: '#e8dfcb',
+      wallEdge: '#cbbfa4',
+      glass: '#cfe0dd',
+      glassFrame: '#a3b0ac'
+    }),
+    dark: paint(PALETTES.dark, {
+      floor: '#332c22',
+      floorLine: '#3b3328',
+      floorDot: '#463c2e',
+      rug: '#3d332538',
+      rugLine: '#4a3e2c',
+      wallTop: '#3b352c',
+      wallFace: '#2c2721',
+      wallEdge: '#1b1813',
+      glass: '#43473f',
+      glassFrame: '#5c6055'
+    })
+  },
+  slate: {
+    light: paint(PALETTES.light, {
+      floor: '#d7dde3',
+      floorLine: '#c8d0d8',
+      floorDot: '#b8c2cc',
+      rug: '#c3ccd6',
+      rugLine: '#adb8c4',
+      wallTop: '#f4f6f8',
+      wallFace: '#dfe4e9',
+      wallEdge: '#bfc6ce',
+      deskTop: '#c9d2d8',
+      deskEdge: '#a6b1ba',
+      table: '#c9d2d8',
+      tableEdge: '#a6b1ba'
+    }),
+    dark: paint(PALETTES.dark, {
+      floor: '#232830',
+      floorLine: '#282e37',
+      floorDot: '#303742',
+      rug: '#2b303a',
+      rugLine: '#343b46',
+      wallTop: '#2e333d',
+      wallFace: '#22262e',
+      wallEdge: '#14171c',
+      deskTop: '#3a424d',
+      deskEdge: '#2a3038',
+      table: '#3a424d',
+      tableEdge: '#2a3038'
+    })
+  }
+}
+
+/** The palette for a theme and a mode. An unknown theme is the default one. */
+export const paletteOf = (theme: string, mode: 'light' | 'dark'): Palette =>
+  (THEMED as Record<string, Record<'light' | 'dark', Palette>>)[theme]?.[mode] ?? PALETTES[mode]
+
 const px = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, fill: string) => {
   ctx.fillStyle = fill
   ctx.fillRect(x, y, w, h)

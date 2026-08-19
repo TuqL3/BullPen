@@ -60,12 +60,37 @@ export type WorkflowInfo = {
     {
       can: string[]
       label: string
+      /** One sentence on what this role is for, when the workflow says. */
+      does?: string
+      /** The command this role runs, when it is not the default. */
+      cli?: string
+      /** Where this role's fixed agent works, when it has a directory of its own. */
+      cwd?: string
+      /** Tools this role never uses. Refused by the approvals layer. */
+      never?: string[]
+      /** This floor's own words for this role, substituted into its brief. */
+      attrs?: Record<string, string>
       fixed?: { id: string; name: string }
       hireable?: boolean
       brief: string
     }
   >
   talksTo: Record<string, string[]>
+  /** The role that reports to you, when `talks to` allows more than one. */
+  voice?: string
+  /** What a hire is when nothing said which kind. */
+  hires?: string
+  /** What this floor calls the things a role can do, and what each behaves like. */
+  capabilities: { name: string; what: string }[]
+  /** The board's columns, under this floor's names for them. */
+  columns: { key: string; label: string; bar: string; kind?: string }[]
+  /** What a message between two roles does to a card. First match wins. */
+  cardRules: { from: string; to: string; status: string; whose?: string; when?: string }[]
+  /** Placeholders this floor adds to every brief, and what they stand for. */
+  words: Record<string, string>
+  /** What the human is addressed as here, and what asking for an agent is called. */
+  human: string
+  hire: string
 }
 
 export type Dispatch = { text: string; owner: string; project: string; ts: number }
@@ -269,11 +294,77 @@ const api = {
     ipcRenderer.invoke('workflow:generate', description),
   /** An annotated empty floor, for a first workflow. */
   workflowStarter: (): Promise<string> => ipcRenderer.invoke('workflow:starter'),
+  /** A new chart: you, whoever takes what you dispatch, and the two rules between. */
+  workflowBlank: (): Promise<string> => ipcRenderer.invoke('workflow:blank'),
+  /**
+   * The format reference: the document Bullpen ships, or the one at `path` if
+   * the operator wrote their own there. `custom` says which is being read.
+   */
+  /**
+   * Walk a task through a floor without running it: who writes to whom, what it
+   * does to the board, and where it stops. Costs nothing - no model, no agents.
+   */
+  dryRunWorkflow: (
+    markdown: string,
+    task: string
+  ): Promise<{
+    steps?: {
+      from: string
+      to: string
+      /** The same two as a person would say them: an agent's name, or a label. */
+      fromName: string
+      toName: string
+      says: string
+      card: string
+      refused?: string
+    }[]
+    ends?: string
+    error?: string
+  }> => ipcRenderer.invoke('workflow:dryRun', markdown, task),
+  /**
+   * The rules in force: what a floor may contain, and which checks run. `custom`
+   * says whether they are yours or the ones Bullpen ships.
+   */
+  workflowFormat: (): Promise<{ text: string; path: string; custom: boolean }> =>
+    ipcRenderer.invoke('workflow:format'),
+  /**
+   * Replace the format document with your own, or hand it back: an empty string
+   * deletes the override and the shipped one is in force again.
+   */
+  writeWorkflowFormat: (
+    text: string
+  ): Promise<{ text?: string; path?: string; custom?: boolean; error?: string }> =>
+    ipcRenderer.invoke('workflow:writeFormat', text),
+  /** What the floor being drawn reads as, without saving it. */
+  previewWorkflow: (
+    patch: Partial<WorkflowInfo>
+  ): Promise<{ markdown: string; problems: string[] }> =>
+    ipcRenderer.invoke('workflow:preview', patch),
+
+  /**
+   * Change part of the running workflow - the board's columns, the context
+   * thresholds - without retyping the file. Returns the workflow and the
+   * markdown it now reads as, or why it was refused.
+   */
+  patchWorkflow: (
+    patch: Partial<WorkflowInfo>
+  ): Promise<{
+    workflow?: WorkflowInfo
+    markdown?: string
+    /** What is still unfinished about the floor. Saved anyway. */
+    problems?: string[]
+    /** Agents stood down because the new floor has no role for them. */
+    retired?: string[]
+    error?: string
+  }> =>
+    ipcRenderer.invoke('workflow:patch', patch),
   /** Keep one without running it. */
   saveWorkflow: (markdown: string): Promise<{ name?: string; error?: string }> =>
     ipcRenderer.invoke('workflow:save', markdown),
   deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('workflow:delete', name),
+  /** Put back every floor that was taken off the list. */
+  unhideWorkflows: (): Promise<boolean> => ipcRenderer.invoke('workflow:unhide'),
   /**
    * Read the editor's text without applying it: what is wrong with it, and the
    * floor it describes, for the preview beside it.
@@ -285,7 +376,13 @@ const api = {
   /** Apply one. Refused whole if it would not work, with the reasons. */
   setWorkflow: (
     markdown: string
-  ): Promise<{ workflow?: WorkflowInfo; markdown?: string; error?: string }> =>
+  ): Promise<{
+    workflow?: WorkflowInfo
+    markdown?: string
+    /** Agents stood down because the new floor has no role for them. */
+    retired?: string[]
+    error?: string
+  }> =>
     ipcRenderer.invoke('workflow:set', markdown),
   /** Bring Michael up, or hand back the one already running. */
   ensureGod: (size: {
@@ -437,6 +534,21 @@ const api = {
   /** Open an http(s) link in the real browser. Anything else is refused. */
   openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('ui:open', url),
   /** Desktop notifications: on unless turned off. */
+  /** How the app is drawn on this machine: terminal font size, floor colours. */
+  uiPrefs: (): Promise<{
+    fontSize: number
+    floor: string
+    /** Where the boxes sit, per floor: this machine's view of that document. */
+    chart: Record<string, Record<string, { x: number; y: number }>>
+    /** Zoom and corner, per floor. */
+    view: Record<string, { k: number; tx: number; ty: number }>
+  }> => ipcRenderer.invoke('ui:prefs'),
+  setUiPrefs: (next: {
+    fontSize?: number
+    floor?: string
+    chart?: Record<string, Record<string, { x: number; y: number }>>
+    view?: Record<string, { k: number; tx: number; ty: number }>
+  }): Promise<{ fontSize: number; floor: string }> => ipcRenderer.invoke('ui:setPrefs', next),
   notify: (): Promise<boolean> => ipcRenderer.invoke('ui:notify'),
   setNotify: (on: boolean): Promise<boolean> => ipcRenderer.invoke('ui:setNotify', on),
   /** A notification was clicked: show this tab, and this agent if it names one. */

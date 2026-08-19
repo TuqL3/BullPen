@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { useStore } from '../store'
+import { useStore, type MailEvent } from '../store'
+import { dispatchAgent } from '../shape'
+import { getPrefs } from '../prefs'
 import { LABEL } from '../theme'
 import {
   assignDesks,
@@ -16,7 +18,7 @@ import {
   type Office,
   type Point
 } from './layout'
-import { ATLAS_INDEX, buildAtlas, drawChair, PALETTES, type Palette } from './tiles'
+import { ATLAS_INDEX, buildAtlas, drawChair, paletteOf, type Palette } from './tiles'
 import { drawBubble, drawEnvelope, drawLabel, drawPerson, type Facing } from './sprite'
 
 
@@ -45,7 +47,9 @@ const ENVELOPE_MS = 1600
  * that an agent handed three things in a row is not away from its desk for a
  * minute. The walk there and back is on top of it.
  */
-const TALK_MS = 2600
+// Long enough to catch by looking up, not so long that a busy floor is all
+// standing conversations.
+const TALK_MS = 4200
 
 type Body = {
   pos: Point
@@ -64,7 +68,7 @@ type Body = {
    * Held on the sender: the message is theirs, and the agent being spoken to
    * stays where it is - it is being interrupted, not summoned.
    */
-  errand: { to: string; until: number } | null
+  errand: { to: string; until: number; said: string } | null
 }
 
 type Envelope = { from: Point; to: Point; born: number }
@@ -92,6 +96,15 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
   const bodies = useRef(new Map<string, Body>())
   const envelopes = useRef<Envelope[]>([])
   const seenMail = useRef(0)
+  /**
+   * Mail whose recipient has no chair yet.
+   *
+   * Work is handed to a role now, and if nobody holds it somebody is hired on
+   * the spot - so the first message to a new agent arrives a beat before the
+   * roster says that agent exists. Dropped, which is what happened, the one
+   * conversation that mattered most was the one the floor never showed.
+   */
+  const waiting = useRef<{ m: MailEvent; born: number }[]>([])
   const atlas = useRef<{ canvas: HTMLCanvasElement; palette: Palette } | null>(null)
   /**
    * The room itself, painted once.
@@ -168,7 +181,10 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const dt = Math.min(0.1, (now - last) / 1000)
       last = now
 
-      const palette = PALETTES[mode]
+      // The floor's colours are a setting, and `paletteOf` hands back the same
+      // object for the same theme - the atlas check below is an identity
+      // comparison, and a fresh object would rebuild every tile every frame.
+      const palette = paletteOf(getPrefs().floor, mode)
       if (!atlas.current || atlas.current.palette !== palette) {
         atlas.current = { canvas: buildAtlas(palette), palette }
       }
@@ -177,7 +193,7 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const seats = assignDesks(
         agents.map((a) => a.id),
         office.current,
-        agents.find((a) => a.role === 'god')?.id
+        dispatchAgent(agents)?.id
       )
 
       // New mail is someone getting up and walking over. Only entries appended
@@ -187,23 +203,40 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       // The envelope is what is left for mail with nobody to send it: the
       // human, the webhook, Bullpen's own notices. Those have no body on the
       // floor, and a message from the door is better than no message at all.
-      for (let i = seenMail.current; i < mail.length; i++) {
-        const m = mail[i]
+      const start = (m: MailEvent): boolean => {
         const from = seats.get(m.from)?.seat ?? office.current.door
         const to = seats.get(m.to)?.seat
-        if (!to) continue
+        if (!to) return false
         const walker = m.from === m.to ? undefined : bodies.current.get(m.from)
         const spot = walker ? standingSpot(office.current.grid, to, walker.pos) : null
         const path = walker && spot ? findPath(office.current.grid, walker.pos, spot) : null
-        if (walker && path) {
-          walker.path = path
+        // Already within earshot: two agents whose desks are a tile apart have
+        // nowhere to walk to, and there is no path to where you are standing -
+        // so every message between neighbours became a flying envelope and no
+        // conversation at all.
+        const close =
+          walker && Math.abs(walker.pos.x - to.x) + Math.abs(walker.pos.y - to.y) <= 2
+        if (walker && (path || close)) {
+          walker.path = path ?? []
           walker.wandering = false
-          walker.errand = { to: m.to, until: 0 }
-          continue
+          walker.errand = { to: m.to, until: 0, said: m.subject }
+          return true
         }
         envelopes.current.push({ from, to, born: now })
+        return true
+      }
+
+      for (let i = seenMail.current; i < mail.length; i++) {
+        const m = mail[i]
+        if (!start(m)) waiting.current.push({ m, born: now })
       }
       seenMail.current = mail.length
+      // Whoever has sat down since. A few seconds is long enough for a hire to
+      // reach the roster and short enough that a message to somebody who never
+      // arrives does not turn up minutes later.
+      waiting.current = waiting.current.filter(
+        (w) => now - w.born < 8000 && !start(w.m)
+      )
       envelopes.current = envelopes.current.filter((e) => now - e.born < ENVELOPE_MS)
 
       for (const agent of agents) {
@@ -365,7 +398,7 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
       const seats = assignDesks(
         agents.map((a) => a.id),
         office.current,
-        agents.find((a) => a.role === 'god')?.id
+        dispatchAgent(agents)?.id
       )
 
       // Chairs belong to the room: they move only when someone takes a desk.
@@ -425,6 +458,14 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
           typing ? (Math.floor(body.frame) % 2 === 0 ? 0 : 1) : 0
         )
 
+        // Not while they are talking: two labels a tile apart overlap each
+        // other and cover the bubbles, which is the one thing on this floor
+        // worth looking at when it happens.
+        const talking =
+          Boolean(body.errand?.until) ||
+          [...bodies.current.values()].some((b) => b.errand?.until && b.errand.to === agent.id)
+        if (talking) continue
+
         const status = agent.status === 'exited' ? 'gone' : blocked ? 'needs you' : agent.activity
         drawLabel(
           ctx,
@@ -447,8 +488,21 @@ export function Floor({ mode, onSelect }: { mode: 'light' | 'dark'; onSelect: (i
         if (!spoke || !heard) continue
         const left = TALK_MS - (body.errand.until - now)
         const dots = Math.floor((left / TALK_MS) * 3) + 1
-        drawBubble(ctx, spoke.px - 2, spoke.py - 26, dots)
-        drawBubble(ctx, heard.px - 2, heard.py - 26, dots - 1)
+        drawBubble(ctx, spoke.px - 2, spoke.py - 34, dots)
+        drawBubble(ctx, heard.px - 2, heard.py - 34, dots - 1)
+        // What it is about, between the two of them. The bubbles say a
+        // conversation is happening; this says which one - and on a floor where
+        // two agents sit a tile apart, the walk is too short to read as one.
+        if (body.errand.said) {
+          drawLabel(
+            ctx,
+            body.errand.said.slice(0, 40),
+            Math.round((spoke.px + heard.px) / 2) - 20,
+            Math.min(spoke.py, heard.py) - 46,
+            mode === 'light' ? '#3b3b46' : '#d9dce2',
+            mode === 'light' ? '#ffffffe8' : '#161822e8'
+          )
+        }
       }
 
       for (const e of envelopes.current) {

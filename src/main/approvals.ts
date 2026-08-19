@@ -112,6 +112,14 @@ export class Approvals extends EventEmitter {
   private pending = new Map<string, { p: Pending; resolve: (v: 'allow' | 'deny') => void }>()
   /** agentId -> absolute sandbox dir the agent may touch freely */
   private sandboxes = new Map<string, string>()
+  /**
+   * agentId -> tools its role never uses.
+   *
+   * Set from the workflow at spawn. Denial only: a workflow can take a tool
+   * away from a role, and nothing in one can hand back a tool the dangerous-
+   * shell or credential checks below would have stopped.
+   */
+  private denied = new Map<string, string[]>()
   /** agentId -> steer notes waiting to ride out on the next hook reply */
   private steers = new Map<string, string[]>()
   /** agentId -> the transcript the CLI reported in its last hook payload */
@@ -140,6 +148,12 @@ export class Approvals extends EventEmitter {
 
   setSandbox(agentId: string, dir: string): void {
     this.sandboxes.set(agentId, resolve(dir))
+  }
+
+  /** What this agent's role never does. Replaces whatever was set before. */
+  setDenied(agentId: string, tools: string[]): void {
+    if (tools.length) this.denied.set(agentId, tools)
+    else this.denied.delete(agentId)
   }
 
   listPending(): Pending[] {
@@ -224,6 +238,14 @@ export class Approvals extends EventEmitter {
   classify(agentId: string, payload: HookPayload): { verdict: Verdict; reason: string } {
     const tool = payload.tool_name ?? ''
     const input = payload.tool_input ?? {}
+
+    // A tool this agent's role never uses. Denial only, and checked before
+    // anything else it might be allowed to do - the workflow says a role does
+    // not do this, and a brief saying the same thing is only a request.
+    const forbidden = this.denied.get(agentId)
+    if (forbidden?.some((t) => t.toLowerCase() === tool.toLowerCase())) {
+      return { verdict: 'deny', reason: `${tool} is not something this role does on this floor` }
+    }
 
     // Self-protection: nothing may touch Bullpen's own control plane.
     const touched = this.touchedPaths(input)

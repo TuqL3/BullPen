@@ -280,3 +280,34 @@ test('halting an agent drops what was queued for it', async () => {
   assert.equal(cleared.length, 1)
   rmSync(root, { recursive: true, force: true })
 })
+
+/**
+ * A role that never runs shell commands is a floor rule, not a request.
+ *
+ * Saying it in the brief asks the model to agree with it, which it mostly will
+ * and occasionally will not. This is the answer the hook gets, and denial is
+ * the only direction a workflow can move: nothing in one hands back a tool the
+ * checks above would have stopped.
+ */
+test('a tool a role never uses is refused, and nothing else changes', () => {
+  const { a, root } = fresh()
+  a.setDenied('dwight', ['Bash'])
+  const refused = a.classify('dwight', bash('ls -la'))
+  assert.equal(refused.verdict, 'deny')
+  assert.match(refused.reason, /not something this role does/)
+  // Case is how somebody typed it in a workflow, not a way round the rule.
+  a.setDenied('dwight', ['bash'])
+  assert.equal(a.classify('dwight', bash('ls -la')).verdict, 'deny')
+
+  // Only that tool, and only that agent.
+  assert.equal(a.classify('dwight', { tool_name: 'Read', tool_input: {} }).verdict, 'allow')
+  assert.equal(a.classify('pam', bash('ls -la')).verdict, 'allow')
+
+  // Taking the list away puts it back where it was.
+  a.setDenied('dwight', [])
+  assert.equal(a.classify('dwight', bash('ls -la')).verdict, 'allow')
+  // And a denial cannot be used to permit: the dangerous ones still escalate.
+  assert.equal(a.classify('dwight', bash('rm -rf /home/lukas/projects')).verdict, 'ask')
+  rmSync(root, { recursive: true, force: true })
+})
+

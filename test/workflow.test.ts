@@ -3,24 +3,31 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { PRESETS, DEFAULT_WORKFLOW, STARTER } from '../src/main/presets.ts'
+import { PRESETS, DEFAULT_WORKFLOW } from './floors.ts'
+import { PRESETS as SHIPPED } from '../src/main/presets.ts'
+import { STARTER } from '../src/main/presets.ts'
 import {
   can,
+  columnFor,
   coreRoles,
+  deleteWorkflow,
   fixedId,
+  formatDoc,
+  hasPlaceFor,
   lint,
+  listWorkflows,
+  parseMarkdown,
   parseWorkflow,
+  pickForRole,
   refuseMail,
   renderBrief,
-  rolesWith,
   roleOfFixedId,
-  parseMarkdown,
-  toMarkdown,
-  listWorkflows,
+  rolesWith,
   saveWorkflow,
-  deleteWorkflow,
-  workflowFile,
-  type Workflow
+  toMarkdown,
+  type Workflow,
+  workCwd,
+  workflowFile
 } from '../src/main/workflow.ts'
 
 /**
@@ -28,18 +35,28 @@ import {
  * `review` checks by reading instead of running - if either needs a special
  * case in the code, the workflow is not really data.
  */
-test('every shipped preset lints clean', () => {
-  for (const w of PRESETS) {
-    assert.deepEqual(lint(w), [], `preset "${w.name}" must not ship with problems`)
+test('a shipped floor arrives with no rules of its own, and nothing else missing', () => {
+  // The floors ship as drawings: roles, who writes to whom, and a board. What
+  // an arrow does to a card is written by whoever runs the floor, so every
+  // preset fails the two laws about card rules and no others.
+  const aboutRules = (p: string): boolean => /card|assigns/i.test(p)
+  for (const w of SHIPPED) {
+    assert.deepEqual(w.cardRules, [], `preset "${w.name}" ships with rules on it`)
+    const left = lint(w).filter((p) => !aboutRules(p))
+    assert.deepEqual(left, [], `preset "${w.name}" is missing something other than its rules`)
   }
 })
 
 test('the default is the chain Bullpen has always run', () => {
   assert.equal(DEFAULT_WORKFLOW.name, 'analyst-chain')
   assert.equal(fixedId(DEFAULT_WORKFLOW, 'god'), 'michael')
-  assert.equal(fixedId(DEFAULT_WORKFLOW, 'ba'), 'ba')
-  assert.deepEqual(coreRoles(DEFAULT_WORKFLOW).sort(), ['ba', 'god'])
   assert.equal(roleOfFixedId(DEFAULT_WORKFLOW, 'michael'), 'god')
+  // One agent at launch, and everybody else hired when there is work for them.
+  // A floor that stands four agents up on startup is four context windows being
+  // paid for before anybody has asked for anything.
+  assert.deepEqual(coreRoles(DEFAULT_WORKFLOW), ['god'])
+  assert.equal(fixedId(DEFAULT_WORKFLOW, 'ba'), null)
+  assert.equal(DEFAULT_WORKFLOW.roles.ba.hireable, true)
 })
 
 test('a floor with nobody to check work is still a legal floor', () => {
@@ -61,7 +78,10 @@ test('the router refuses a shortcut and says where to send it instead', () => {
 test('a brief is filled from the workflow, not from hard-coded names', () => {
   const brief = renderBrief(DEFAULT_WORKFLOW, 'god', { id: 'michael', name: 'Michael' })
   assert.ok(brief.includes('"ba"'), 'the boss is told the analyst id from the workflow')
-  assert.ok(brief.includes('Iris'))
+  // Nobody stands in that role at launch, so what the brief can name is the
+  // role itself - which is an address: mail to it is put in front of whoever
+  // holds it, or somebody is hired.
+  assert.ok(brief.includes('the analyst'))
   assert.ok(!brief.includes('{{'), 'no placeholder may survive into a real brief')
 
   const dev = renderBrief(DEFAULT_WORKFLOW, 'dev', { id: 'dave', reportTo: 'ba' })
@@ -112,7 +132,17 @@ test('lint catches the failures that would otherwise be silent', () => {
 test('bad json comes back as a sentence, not a crash', () => {
   assert.ok('error' in parseWorkflow(null))
   assert.ok('error' in parseWorkflow({ name: 'x' }))
-  assert.ok('error' in parseWorkflow({ name: 'x', roles: { dev: { brief: 'hi', can: ['flies'] } } }))
+  // A capability nobody declared is not a parse error any more: which words
+  // exist is the floor's own `## capabilities`, and `lint` is what checks a
+  // role against them. The parser only refuses shapes it cannot read.
+  const flies = parseWorkflow({ name: 'x', roles: { dev: { brief: 'hi', can: ['flies'] } } })
+  assert.ok('workflow' in flies)
+  if ('workflow' in flies) {
+    assert.ok(
+      lint(flies.workflow).some((p) => p.includes('flies')),
+      'and lint is where it is refused'
+    )
+  }
   assert.ok('error' in parseWorkflow({ name: 'x', roles: { dev: { can: [] } } }))
 
   const ok = parseWorkflow(JSON.parse(JSON.stringify(DEFAULT_WORKFLOW)))
@@ -141,6 +171,20 @@ test('every preset survives a round trip through markdown', () => {
 test('a workflow can be written by hand without reading the schema', () => {
   const md = `# tiny
 One boss, one builder.
+
+## capabilities
+- speaksToHuman — writes to you
+- assigns — hands work out
+- builds — does the work
+
+## board
+- todo: todo #7fc7e8 (start)
+- done: done #7fd8a0 (done)
+
+## card rules
+- assigns → staff: opens a card
+- builds → assigns: done
+- speaksToHuman → you: done
 
 ## boss · the boss
 - agent: chief · Chief
@@ -237,7 +281,9 @@ test('one unreadable file does not empty the whole list', () => {
 test('a workflow that would not run is refused before it reaches the disk', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bp-wf-'))
   try {
-    assert.throws(() => saveWorkflow(dir, '# broken\n\n## a\n- can: builds\n\nbrief'), /dispatch/)
+    // Unreadable is refused; unfinished is not - what a floor must have is a
+    // matter of the laws that are switched on, and the caller checks those.
+    assert.throws(() => saveWorkflow(dir, 'not a workflow at all'), /#/)
     assert.deepEqual(listWorkflows(dir), [], 'nothing half-written is left behind')
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -272,7 +318,9 @@ test('the starter parses, and every blank in it is named', () => {
   assert.deepEqual(w.roles.builder.can, ['builds'])
   assert.equal(w.roles.builder.hireable, true)
 
-  const problems = lint(w)
+  // The rules are blank on purpose - the starter shows the syntax in a comment
+  // and writes none of them - so those two complaints are the template working.
+  const problems = lint(w).filter((p) => !/card|assigns/i.test(p))
   assert.ok(problems.length > 0, 'an unfilled template must not be applyable')
   // Structure is not what is missing - only the words are.
   assert.ok(
@@ -281,7 +329,7 @@ test('the starter parses, and every blank in it is named', () => {
   )
   // One line per place to fill in, not per distinct wording: the same blank in
   // two roles is two things to write, and collapsing them would hide one.
-  assert.equal(problems.length, 5, `expected one line per blank, got: ${problems.join(' | ')}`)
+  assert.equal(problems.length, 7, `expected one line per blank, got: ${problems.join(' | ')}`)
   assert.ok(
     problems.some((p) => p.includes('boss')) && problems.some((p) => p.includes('builder')),
     'both roles have something left in them'
@@ -291,7 +339,9 @@ test('the starter parses, and every blank in it is named', () => {
   const filled = STARTER.replace(/«[^»]*»/g, 'something real')
   const done = parseMarkdown(filled)
   assert.ok('workflow' in done)
-  if ('workflow' in done) assert.deepEqual(lint(done.workflow), [])
+  if ('workflow' in done) {
+    assert.deepEqual(lint(done.workflow).filter((p) => !/card|assigns/i.test(p)), [])
+  }
 })
 
 /**
@@ -308,7 +358,7 @@ test('a placeholder meant for the agent is not mistaken for an unfilled blank', 
   assert.ok('workflow' in parsed)
   if ('workflow' in parsed) {
     assert.match(parsed.workflow.roles.builder.brief, /<the task>/, 'the agent keeps its own')
-    assert.deepEqual(lint(parsed.workflow), [])
+    assert.deepEqual(lint(parsed.workflow).filter((p) => !/card|assigns/i.test(p)), [])
   }
 })
 
@@ -338,28 +388,37 @@ brief here`
  * a third standing agent silently never started it.
  */
 test('a workflow may name any number of standing agents', () => {
-  const qa = PRESETS.find((w) => w.name === 'qa-lead') as Workflow
-  assert.ok(qa, 'the preset that proves it must exist')
-  assert.deepEqual(lint(qa), [])
+  // The shipped floors stand one agent up - the one the operator types at - and
+  // hire the rest. An operator who wants three standing can still write three,
+  // and main must start all of them: the old code could start exactly one
+  // beside the boss, and silently never started the third.
+  const chain = DEFAULT_WORKFLOW
+  const three: Workflow = {
+    ...chain,
+    roles: {
+      ...chain.roles,
+      ba: { ...chain.roles.ba, hireable: undefined, fixed: { id: 'iris', name: 'Iris' } },
+      tester: { ...chain.roles.tester, hireable: undefined, fixed: { id: 'tess', name: 'Tess' } }
+    }
+  }
+  const fixed = Object.keys(three.roles).filter((r) => three.roles[r].fixed)
+  assert.deepEqual(fixed.sort(), ['ba', 'god', 'tester'])
 
-  const fixed = Object.keys(qa.roles).filter((r) => qa.roles[r].fixed)
-  assert.deepEqual(fixed.sort(), ['ba', 'god', 'qa'])
-
-  // Whoever is not dispatch has to be started by the floor; anything that
-  // treats "the second one" as special leaves the third standing agent down.
-  const besides = fixed.filter((r) => r !== qa.dispatch)
+  const besides = fixed.filter((r) => r !== three.dispatch)
   assert.equal(besides.length, 2, 'more than one agent stands beside the boss here')
   assert.ok(
-    besides.every((r) => qa.roles[r].fixed?.id),
+    besides.every((r) => three.roles[r].fixed?.id),
     'each one needs its own id to be spawned under'
   )
 
-  // And the far end still works: a floor with none but the boss.
-  const solo = PRESETS.find((w) => w.name === 'solo') as Workflow
-  assert.deepEqual(
-    Object.keys(solo.roles).filter((r) => solo.roles[r].fixed && r !== solo.dispatch),
-    []
-  )
+  // And the far end, which is what ships: nobody but the boss.
+  for (const w of PRESETS) {
+    assert.deepEqual(
+      Object.keys(w.roles).filter((r) => w.roles[r].fixed && r !== w.dispatch),
+      [],
+      `"${w.name}" stands somebody up besides the boss`
+    )
+  }
 })
 
 
@@ -442,3 +501,634 @@ Report to "you" when done.`
     assert.equal(parsed.workflow.roles.a.brief, 'Report to "you" when done.')
   }
 })
+
+/**
+ * The cast, then the prose.
+ *
+ * A workflow used to be four role definitions each buried under its own four
+ * pages of brief: to find out who was on the floor you had to read everything
+ * any of them had been told. The definitions come first now, in one section, so
+ * the first screen of the file answers "who is here and what are they for".
+ */
+test('roles are defined first, briefs after, and both halves are read', () => {
+  const md = `# two-part
+One boss, one builder.
+
+- reuse below: 40
+- hire above: 80
+
+## capabilities
+- speaksToHuman — writes to you
+- assigns — hands work out
+- builds — does the work
+
+## board
+- todo: todo #7fc7e8 (start)
+- done: done #7fd8a0 (done)
+
+## card rules
+- assigns → staff: opens a card
+- builds → assigns: done
+- speaksToHuman → you: done
+
+## roles
+
+### boss · the boss
+- agent: chief · Chief
+- can: speaksToHuman, assigns
+- does: hands the work out and is the only one who reports to you
+- talks to: builder, you, hire
+- dispatch
+- entry
+
+### builder · a builder
+- can: builds
+- does: writes the code and reports when it is done
+- talks to: boss
+- hireable
+
+## briefs
+
+### boss
+
+You are {{self.name}}. Report to the human every time: {"to": "you"}
+
+### builder
+
+You are "{{self.id}}". Report to {{reportTo}} when it is done.
+
+### not-a-role
+
+This heading names nobody, so it stays inside the builder's brief.
+`
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  const w = parsed.workflow
+
+  assert.equal(w.dispatch, 'boss')
+  assert.equal(w.entry, 'boss')
+  assert.equal(w.reuseBelowPct, 40)
+  assert.equal(w.roles.boss.fixed?.id, 'chief')
+  assert.equal(w.roles.boss.does, 'hands the work out and is the only one who reports to you')
+  assert.equal(w.roles.builder.does, 'writes the code and reports when it is done')
+  assert.deepEqual(w.talksTo.builder, ['boss'])
+  // The brief was written in the other half of the document and still arrived.
+  assert.match(w.roles.boss.brief, /Report to the human/)
+  // A heading inside a brief that names no role is prose, not a new section:
+  // briefs are written by people, and people write headings.
+  assert.match(w.roles.builder.brief, /stays inside the builder's brief/)
+  assert.deepEqual(lint(w), [])
+})
+
+test('what a role is for is written back out, above what the router does with it', () => {
+  const md = toMarkdown(DEFAULT_WORKFLOW)
+  assert.ok(md.indexOf('## roles') < md.indexOf('## briefs'), 'the cast comes before the prose')
+  assert.ok(md.indexOf('## roles') < md.indexOf('You are {{self.name}}'), 'no brief above the cast')
+  for (const [role, def] of Object.entries(DEFAULT_WORKFLOW.roles)) {
+    assert.ok(md.includes(`### ${role}`), `"${role}" is missing from the cast`)
+    assert.ok(md.includes(`- does: ${def.does}`), `"${role}" lost what it is for`)
+  }
+  // An old one-section workflow opens, and comes back in the new shape.
+  const old = parseMarkdown(`# old\n\n## a · the boss\n- agent: a · A\n- can: speaksToHuman, assigns\n- talks to: b, you, hire\n- dispatch\n\nYou report to "you".\n\n## b · a builder\n- can: builds\n- talks to: a\n- hireable\n\nYou build.`)
+  assert.ok('workflow' in old, JSON.stringify(old))
+  if (!('workflow' in old)) return
+  assert.equal(old.workflow.roles.a.brief, 'You report to "you".')
+  assert.ok(toMarkdown(old.workflow).includes('## roles'), 'it is rewritten into the readable shape')
+})
+
+/**
+ * The reference is a document, and a document somebody may disagree with.
+ *
+ * The one Bullpen ships is bundled; a file at `~/.bullpen/workflow-format.md`
+ * takes over. Worth a test because the failure is silent both ways: an override
+ * that is never read looks like an edit that did nothing, and a shipped
+ * document dropped for an empty file would brief the workflow writer on a blank
+ * page and reject everything it wrote.
+ */
+test('your own rules replace the shipped ones, and a blank file does not', () => {
+  const home = mkdtempSync(join(tmpdir(), 'bp-fmt-'))
+  try {
+    const shipped = '# shipped\n\nthe format as it comes'
+
+    const none = formatDoc(home, shipped)
+    assert.equal(none.text, shipped)
+    assert.equal(none.custom, false)
+    assert.equal(none.path, join(home, 'rules.md'))
+
+    writeFileSync(none.path, '# mine\n\nthe format as I want it', 'utf8')
+    const mine = formatDoc(home, shipped)
+    assert.equal(mine.custom, true)
+    assert.match(mine.text, /as I want it/)
+
+    // A truncated save is not a decision to describe the format as nothing.
+    writeFileSync(none.path, '   \n', 'utf8')
+    const blank = formatDoc(home, shipped)
+    assert.equal(blank.text, shipped)
+    assert.equal(blank.custom, false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A floor that is not a software team, written by hand.
+ *
+ * Every word in this file is the operator's: the columns, what the human is
+ * called, the capabilities, the placeholders, and what each role is allowed to
+ * run. None of it is a name the code knows - which is the whole claim being
+ * tested, because until this the answer to "can I use my own words" was no.
+ */
+test('a floor can be described entirely in its own words', () => {
+  const md = `# lab
+Principal → researcher ⇄ reviewer.
+
+- reuse below: 40
+- hire above: 80
+- human address: pi
+- hire address: recruit
+
+## capabilities
+- reports (speaksToHuman) — the only one who writes to the PI
+- plans (assigns) — decides what gets investigated
+- collects (builds) — runs the experiment
+- replicates (checks) — repeats it before anything is written up
+- cites — used by the rules, and by nothing else
+
+## words
+- {{lab}} — the Kavli group
+- {{style}} — cite everything, claim nothing twice
+
+## board
+- queued: Queued #7fc7e8 (start)
+- running: Running #e8cf6a (working)
+- replicating: Replicating #c9a2e8 (waiting)
+- halted: Halted #e8917f (stuck)
+- written_up: Written up #7fd8a0 (done)
+
+## card rules
+- plans → staff: opens a card
+- collects → plans: Replicating
+- replicates → collects: Running (their card)
+- replicates → plans: closes it
+- plans → reports: Written up
+- reports → pi: Written up
+
+## roles
+
+### chief · the principal
+- agent: pi · Ada
+- can: reports
+- does: takes what you ask and hands it to the planner
+- talks to: planner, pi
+- dispatch
+- entry
+- cli: claude --model sonnet
+- never: Bash
+
+### planner · the planner
+- can: plans
+- does: turns a question into experiments and puts people on them
+- talks to: chief, hand, checker, recruit
+- hireable
+
+### hand · a researcher
+- can: collects, cites
+- does: runs what it is given and writes down what happened
+- talks to: planner, checker
+- hireable
+
+### checker · a reviewer
+- can: replicates
+- does: repeats the work before any of it is written up
+- talks to: planner, hand
+- hireable
+
+## briefs
+
+### chief
+You are {{self.name}} of {{lab}}. Everything goes to the planner, and you are the
+only one who writes to "pi". {{style}}.
+
+### planner
+You plan. Put somebody on it, "recruit" one if nobody is free, and report to the
+principal when the reviewer passes it.
+
+### hand
+You run it. Report to {{reportTo}} when it is done or stuck.
+
+### checker
+You repeat it. Send problems to the researcher, and pass it to {{reportTo}}.
+`
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  const w = parsed.workflow
+
+  assert.deepEqual(lint(w), [], 'a floor in its own words must be a legal floor')
+  assert.equal(w.human, 'pi')
+  assert.equal(w.hire, 'recruit')
+  assert.equal(w.roles.chief.cli, 'claude --model sonnet')
+  assert.deepEqual(w.roles.chief.never, ['Bash'])
+  // Capabilities are a name and a sentence. Which of them the app treats as
+  // building or checking is read off the card rules, not off a label here.
+  assert.deepEqual(
+    w.capabilities.map((c) => c.name),
+    ['reports', 'plans', 'collects', 'replicates', 'cites']
+  )
+  assert.deepEqual(rolesWith(w, 'assigns'), ['planner'], 'whoever a rule says opens a card')
+  assert.deepEqual(rolesWith(w, 'checks'), ['checker'], 'whoever a rule says closes one')
+  assert.deepEqual(rolesWith(w, 'speaksToHuman'), ['chief'], 'whoever talks-to allows')
+  // Columns keep their own keys, and their kinds are what the floor reaches for.
+  assert.deepEqual(
+    w.columns.map((c) => c.key),
+    ['queued', 'running', 'replicating', 'halted', 'written_up']
+  )
+  assert.equal(columnFor(w, 'working'), 'running')
+  assert.equal(columnFor(w, 'done'), 'written_up')
+  // A rule written with the column's display name resolves to its key.
+  assert.deepEqual(w.cardRules[1], { from: 'collects', to: 'plans', status: 'replicating' })
+  assert.deepEqual(w.cardRules[2], {
+    from: 'replicates',
+    to: 'collects',
+    status: 'running',
+    whose: 'to'
+  })
+
+  // The floor's own words reach the brief; the built-in ones still win.
+  const brief = renderBrief(w, 'chief', { id: 'pi', name: 'Ada' })
+  assert.match(brief, /You are Ada of the Kavli group/)
+  assert.match(brief, /cite everything, claim nothing twice/)
+  assert.ok(!brief.includes('{{'), 'nothing may reach an agent unfilled')
+
+  // And it survives being written back out.
+  const back = parseMarkdown(toMarkdown(w))
+  assert.ok('workflow' in back)
+  if ('workflow' in back) assert.deepEqual(back.workflow, w)
+})
+
+/**
+ * Renaming the human is a rename, not a hole: the router has to route on the
+ * new word, and the linter has to stop asking for the old one.
+ */
+test('the address the human answers to is the floor\'s, and lint follows it', () => {
+  const base = parseMarkdown(toMarkdown(DEFAULT_WORKFLOW))
+  assert.ok('workflow' in base)
+  if (!('workflow' in base)) return
+  // Renaming the human without moving `talks to` strands the old address, and
+  // that is now the only thing deciding who the floor's voice is - so lint says
+  // nobody can reach the human at all rather than quibbling about wording.
+  const w = { ...base.workflow, human: 'boss' }
+  assert.ok(
+    lint(w).some((p) => p.includes('Nobody can write to the human')),
+    `renaming the human must strand the old address, got: ${lint(w).join(' | ')}`
+  )
+  // Move it and the floor is legal again - with the voice still owing a brief
+  // that tells it to write there.
+  const moved = { ...w, talksTo: { ...w.talksTo, god: ['ba', 'boss'] } }
+  assert.ok(
+    lint(moved).some((p) => p.includes('"boss"')),
+    `the voice still has to be told to write to "boss", got: ${lint(moved).join(' | ')}`
+  )
+  // Both reserved addresses cannot be one word, and neither may be a role.
+  assert.ok(lint({ ...w, human: 'hire', hire: 'hire' }).some((p) => p.includes('cannot share')))
+  assert.ok(
+    lint({ ...base.workflow, hire: 'dev' }).some((p) => p.includes('both a role and a reserved'))
+  )
+})
+
+/**
+ * A role that works somewhere of its own is not a role in the wrong place.
+ *
+ * The spawn honoured `- cwd:` and the "is the running one where it should be"
+ * check compared against dispatch's directory regardless, so an agent standing
+ * exactly where it was told to was killed and restarted on every launch - which
+ * costs its conversation, and says nothing on screen about why.
+ */
+test('where a role works is one answer, not two', () => {
+  const base = parseMarkdown(toMarkdown(DEFAULT_WORKFLOW))
+  assert.ok('workflow' in base)
+  if (!('workflow' in base)) return
+  const w: Workflow = {
+    ...base.workflow,
+    roles: { ...base.workflow.roles, ba: { ...base.workflow.roles.ba, cwd: '~/notes' } }
+  }
+
+  assert.equal(workCwd(w, 'ba', '/home/me', '/floor'), '/home/me/notes', '~ is the home directory')
+  assert.equal(workCwd(w, 'god', '/home/me', '/floor'), '/floor', 'no cwd means where dispatch is')
+  // An absolute path is taken as written, home or no home.
+  const abs: Workflow = {
+    ...w,
+    roles: { ...w.roles, ba: { ...w.roles.ba, cwd: '/srv/notes' } }
+  }
+  assert.equal(workCwd(abs, 'ba', '/home/me', '/floor'), '/srv/notes')
+})
+
+/**
+ * A board is what "the card an agent is on" is read off, and that question is
+ * "its newest card that is not finished". A board with nothing marked finished
+ * answers it wrong forever: every card reads as live, so the agent never gets
+ * another one.
+ */
+test('a board has to have somewhere finished, and no two columns share a key', () => {
+  const base = parseMarkdown(toMarkdown(DEFAULT_WORKFLOW))
+  assert.ok('workflow' in base)
+  if (!('workflow' in base)) return
+  const w = base.workflow
+
+  const noDone = { ...w, columns: w.columns.filter((c) => c.kind !== 'done') }
+  assert.ok(
+    lint(noDone).some((p) => p.includes('(done)')),
+    `a board with nowhere finished must be refused, got: ${lint(noDone).join(' | ')}`
+  )
+
+  const twice = { ...w, columns: [...w.columns, { ...w.columns[0] }] }
+  assert.ok(lint(twice).some((p) => p.includes('share the key')))
+
+  // And the shipped floors all have somewhere to finish.
+  for (const p of PRESETS) assert.deepEqual(lint(p), [], p.name)
+})
+
+/**
+ * A floor has to be able to say things Bullpen has no word for.
+ *
+ * "Write in this tone", "escalate to this person", "never over 800 words" -
+ * none of that is the app's business, and without somewhere to put it the only
+ * way was writing the same sentence into four briefs by hand and remembering to
+ * change all four.
+ */
+test('a role carries words of its own, and the narrower one wins', () => {
+  const md = `# tone
+One boss, one writer.
+
+- reuse below: 50
+- hire above: 70
+
+## words
+- {{tone}} — the house tone: plain and short
+- {{deadline}} — Friday
+
+## capabilities
+- speaksToHuman — writes to you
+- assigns — hands work out
+- builds — does the work
+
+## board
+- todo: todo #7fc7e8 (start)
+- done: done #7fd8a0 (done)
+
+## card rules
+- assigns → staff: opens a card
+- builds → assigns: done
+- speaksToHuman → you: done
+
+## roles
+
+### boss · the boss
+- agent: chief · Chief
+- can: speaksToHuman, assigns
+- talks to: writer, you, hire
+- dispatch
+- entry
+
+### writer · a writer
+- can: builds
+- talks to: boss
+- hireable
+- tone: warm, and never more than 800 words
+- escalate to: legal
+
+## briefs
+
+### boss
+You report to "you" every time.
+
+### writer
+Write in this tone: {{tone}}. Anything legal goes to {{escalate to}}. Due {{deadline}}.
+`
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  const w = parsed.workflow
+
+  assert.deepEqual(w.roles.writer.attrs, {
+    tone: 'warm, and never more than 800 words',
+    'escalate to': 'legal'
+  })
+  // The lines the parser already knows are not swept in with them.
+  const own: Record<string, string> = w.roles.writer.attrs ?? {}
+  assert.equal(own.can, undefined)
+  assert.equal(own['talks to'], undefined)
+
+  const brief = renderBrief(w, 'writer', { id: 'wanda', name: 'Wanda' })
+  // The role's own tone beats the floor's; the floor's deadline still arrives.
+  assert.match(brief, /Write in this tone: warm, and never more than 800 words\./)
+  assert.match(brief, /goes to legal/)
+  assert.match(brief, /Due Friday/)
+  assert.ok(!brief.includes('{{'), 'nothing may reach an agent unfilled')
+
+  // And they survive being written back out.
+  const back = parseMarkdown(toMarkdown(w))
+  assert.ok('back' in { back } && 'workflow' in back)
+  if ('workflow' in back) assert.deepEqual(back.workflow, w)
+  assert.deepEqual(lint(w), [])
+})
+
+/**
+ * A rule that says what it is for.
+ *
+ * `builds → assigns: wait to test` is a true sentence nobody can act on: it
+ * does not say when a builder writes to whoever assigns, which is the thing the
+ * person drawing the floor had in mind and the thing they lose first.
+ */
+test('a card rule carries the words it was written for', () => {
+  const md = toMarkdown({
+    ...DEFAULT_WORKFLOW,
+    cardRules: DEFAULT_WORKFLOW.cardRules.map((r) =>
+      r.from === 'builds' && r.to === 'assigns' ? { ...r, when: 'they say the work is built' } : r
+    )
+  })
+  assert.match(md, /- builds → assigns: wait to test · when they say the work is built/)
+
+  const back = parseMarkdown(md)
+  assert.ok('workflow' in back, JSON.stringify(back))
+  if (!('workflow' in back)) return
+  const rule = back.workflow.cardRules.find((r) => r.from === 'builds' && r.to === 'assigns')
+  assert.equal(rule?.when, 'they say the work is built')
+  assert.equal(rule?.status, 'wait_test', 'and the column it names is still read')
+
+  // Both halves at once: whose card, and why.
+  const both = parseMarkdown(
+    md.replace(
+      '- checks → builds: doing (their card)',
+      '- checks → builds: doing (their card) · when they send a problem back'
+    )
+  )
+  assert.ok('workflow' in both)
+  if ('workflow' in both) {
+    const r = both.workflow.cardRules.find((x) => x.from === 'checks' && x.to === 'builds')
+    assert.equal(r?.whose, 'to')
+    assert.equal(r?.when, 'they send a problem back')
+  }
+})
+
+/**
+ * Agents belong to a floor, so switching floors stands down whoever the new one
+ * has no role for. `analyst-chain` over `solo` used to leave Iris running: on
+ * the roster, mailable, working to a brief for a role that had gone.
+ */
+test('a floor keeps the agents it has a role for, and no others', () => {
+  const solo = PRESETS.find((w) => w.name === 'solo') as Workflow
+  const chain = DEFAULT_WORKFLOW
+
+  // The analyst has no role on `solo` at all.
+  assert.equal(hasPlaceFor(solo, { id: 'ba', role: 'ba', standing: true }), false)
+  // The boss is the same role with the same agent named for it.
+  assert.equal(hasPlaceFor(solo, { id: 'michael', role: 'god', standing: true }), true)
+  // A hired builder is doing a job `solo` still has.
+  assert.equal(hasPlaceFor(solo, { id: 'dev-2', role: 'dev', standing: false }), true)
+
+  // A floor that names somebody else for a standing role replaces whoever is
+  // in it; a hired agent doing the same job is not in that spot and stays.
+  const renamed = {
+    ...chain,
+    roles: { ...chain.roles, ba: { ...chain.roles.ba, fixed: { id: 'nadia', name: 'Nadia' } } }
+  }
+  assert.equal(hasPlaceFor(renamed, { id: 'ba', role: 'ba', standing: true }), false)
+  assert.equal(hasPlaceFor(renamed, { id: 'ba-helper', role: 'ba', standing: false }), true)
+})
+
+/**
+ * Who takes work handed to a role. Every brief used to ask the agent to work
+ * this out from the floor file - four steps a model does badly and silently.
+ */
+test('work handed to a role goes to whoever is free, emptiest window first', () => {
+  const w = DEFAULT_WORKFLOW // hire above 70, reuse below 50
+
+  const busy = { id: 'a', role: 'dev', idle: false, ctxPct: 10 }
+  const full = { id: 'b', role: 'dev', idle: true, ctxPct: 71 }
+  const some = { id: 'c', role: 'dev', idle: true, ctxPct: 60 }
+  const fresh = { id: 'd', role: 'dev', idle: true, ctxPct: 5 }
+  const other = { id: 'e', role: 'tester', idle: true, ctxPct: 0 }
+
+  // Emptiest of the free ones, and never somebody in another role.
+  assert.equal(pickForRole(w, 'dev', [busy, full, some, fresh, other]), 'd')
+  assert.equal(pickForRole(w, 'dev', [busy, full, some]), 'c')
+  // Nobody eligible is not an error: it means hire, which is the caller's job.
+  assert.equal(pickForRole(w, 'dev', [busy, full]), null)
+  assert.equal(pickForRole(w, 'dev', []), null)
+  // A fresh hire has no reading yet. That is empty, not full.
+  assert.equal(pickForRole(w, 'dev', [{ id: 'new', role: 'dev', idle: true }]), 'new')
+  // At the threshold, not under it.
+  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 70 }]), null)
+})
+
+/**
+ * Where a fact is written is not what it says. Every model asked to write one
+ * of these puts `- dispatch: boss` in the header, and the file was refused for
+ * it - which read as "the generator is broken" rather than "same thing, other
+ * line".
+ */
+test('dispatch and entry may be said in the header instead of on the role', () => {
+  const md = [
+    '# two desks',
+    'a boss and a builder.',
+    '',
+    '- dispatch: boss',
+    '- entry: dev',
+    '',
+    '## roles',
+    '',
+    '### boss · the boss',
+    '- agent: chief · Chief',
+    '- can: speaksToHuman',
+    '- talks to: dev, you',
+    '',
+    '### dev · a builder',
+    '- can: builds',
+    '- talks to: boss',
+    '- hireable',
+    '',
+    '## briefs',
+    '',
+    '### boss',
+    'You are the boss.',
+    '',
+    '### dev',
+    'You build.'
+  ].join('\n')
+
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  assert.equal(parsed.workflow.dispatch, 'boss')
+  assert.equal(parsed.workflow.entry, 'dev')
+
+  // The bullet on the role still wins where both are written.
+  const both = parseMarkdown(md.replace('- talks to: dev, you', '- talks to: dev, you\n- dispatch'))
+  assert.ok('workflow' in both)
+  if ('workflow' in both) assert.equal(both.workflow.dispatch, 'boss')
+
+  // A header naming a role that is not there is not a dispatch.
+  const wrong = parseMarkdown(md.replace('- dispatch: boss', '- dispatch: nobody'))
+  assert.ok('error' in wrong)
+})
+
+/**
+ * Punctuation is not meaning. The examples use `—` between a name and what it
+ * is for; people and models write `·` or `:` and the line was dropped in
+ * silence, which read as "the parser ignored half my file".
+ */
+test('a capability, a column and a rule may be written with any separator', () => {
+  const head = ['# punctuation', 'one line.', '']
+  const tail = [
+    '## roles',
+    '',
+    '### boss · the boss',
+    '- agent: chief · Chief',
+    '- can: speaks',
+    '- talks to: dev, you',
+    '- dispatch',
+    '',
+    '### dev · a builder',
+    '- can: builds',
+    '- talks to: boss',
+    '- hireable',
+    '',
+    '## briefs',
+    '',
+    '### boss',
+    'You are the boss.',
+    '',
+    '### dev',
+    'You build.'
+  ]
+  const md = [
+    ...head,
+    '## capabilities',
+    '- speaks · the one who answers you',
+    '- builds: does the work',
+    '',
+    '## board',
+    '- todo · to do #7fc7e8 (start)',
+    '- done: done #7fd8a0 (done)',
+    '',
+    '## card rules',
+    '- speaks → dev: opens a card',
+    '- dev → speaks: done',
+    '',
+    ...tail
+  ].join('\n')
+
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  const w = parsed.workflow
+  assert.deepEqual(w.capabilities.map((c) => c.name).sort(), ['builds', 'speaks'])
+  assert.equal(w.capabilities.find((c) => c.name === 'speaks')?.what, 'the one who answers you')
+  assert.deepEqual(w.columns.map((c) => c.key), ['todo', 'done'])
+  assert.equal(w.columns[0].label, 'to do')
+  assert.equal(w.cardRules.length, 2)
+  assert.equal(w.cardRules[0].status, 'open')
+})
+

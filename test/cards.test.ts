@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { routeCard, type CardMove } from '../src/main/cards.ts'
-import { DEFAULT_WORKFLOW, PRESETS } from '../src/main/presets.ts'
+import { DEFAULT_WORKFLOW, PRESETS } from './floors.ts'
 import type { Workflow } from '../src/main/workflow.ts'
 
 const HUMAN = 'you'
@@ -138,3 +138,101 @@ test('a reviewer moves cards exactly like a tester', () => {
     { kind: 'checked', agent: 'robin', subject: 'pass: x' }
   )
 })
+
+/**
+ * A floor that is not a software team.
+ *
+ * Nothing in `content-floor` is called a developer or a tester: the capabilities
+ * are `drafts` and `proofs`, the columns are a content calendar's. The router
+ * has to move its cards exactly the same way, because it reads what each
+ * capability behaves like and never the word - and if it did read the word, a
+ * marketing floor would be a floor whose board never moved.
+ */
+test('a floor with its own words for the work moves cards the same way', () => {
+  const content = PRESETS.find((w) => w.name === 'content-floor') as Workflow
+  assert.ok(content, 'the preset that proves it must exist')
+  const who = (id: string): string =>
+    ({ chief: 'chief', editor: 'editor', wanda: 'writer', pat: 'proofreader' })[id] ?? 'writer'
+  const step = (from: string, to: string, subject = 's'): CardMove =>
+    routeCard(content, { from, to, subject, body: 'b' }, who, HUMAN)
+
+  // Commissioned: a card for whoever it lands on.
+  assert.deepEqual(step('editor', 'wanda', 'launch post'), {
+    kind: 'open',
+    agent: 'wanda',
+    text: 'launch post — b',
+    by: 'editor'
+  })
+  // A finished draft goes to this floor's own column, under its own key - not
+  // to a `wait_test` that only a software team would have called it.
+  assert.deepEqual(step('wanda', 'editor'), { kind: 'move', agent: 'wanda', status: 'in_review' })
+  assert.equal(content.columns.find((c) => c.kind === 'waiting')?.key, 'in_review')
+
+  // Corrections go straight back to the writer, and it is the writer's card
+  // that reopens - the rule says so with "(their card)".
+  assert.deepEqual(step('pat', 'wanda'), { kind: 'move', agent: 'wanda', status: 'drafting' })
+  // Fixed, look again.
+  assert.deepEqual(step('wanda', 'pat'), { kind: 'move', agent: 'wanda', status: 'in_review' })
+  // The proofreader closes it, and the work it was reading with it.
+  assert.deepEqual(step('pat', 'editor', 'passed: launch post'), {
+    kind: 'checked',
+    agent: 'pat',
+    subject: 'passed: launch post'
+  })
+  // And the chief telling the human is the end of it.
+  assert.deepEqual(step('chief', HUMAN), { kind: 'move', agent: 'chief', status: 'published' })
+})
+
+/**
+ * The rules are the operator's, so a floor can be given a different one and the
+ * board has to obey it rather than the one Bullpen ships.
+ */
+test('a card rule the operator wrote is the rule that runs', () => {
+  const w: Workflow = {
+    ...SOLO,
+    // Same floor, one line changed: a builder reporting in goes to blocked
+    // instead of done, because on this floor nothing is finished until read.
+    cardRules: SOLO.cardRules.map((r) =>
+      r.from === 'builds' && r.to === 'assigns' ? { ...r, status: 'blocked' } : r
+    )
+  }
+  assert.deepEqual(routeCard(w, { from: 'dave', to: 'michael', subject: 's', body: 'b' }, roleOf, HUMAN), {
+    kind: 'move',
+    agent: 'dave',
+    status: 'blocked'
+  })
+  // Unchanged, the same message is done: nobody checks on the solo floor.
+  assert.deepEqual(routeCard(SOLO, { from: 'dave', to: 'michael', subject: 's', body: 'b' }, roleOf, HUMAN), {
+    kind: 'move',
+    agent: 'dave',
+    status: 'done'
+  })
+})
+
+/**
+ * The operator is a party to the floor without being an agent on it. What their
+ * hand-over does to the board used to be written into the dispatch handler; it
+ * is a rule now, and a floor that does not write it gets no card.
+ */
+test('a rule can be written about the person running the floor', () => {
+  const w = {
+    ...CHAIN,
+    cardRules: [{ from: CHAIN.human, to: 'god', status: 'open' }]
+  } as Workflow
+  const roleOf = (id: string): string => (id === 'michael' ? 'god' : '')
+
+  const handed = routeCard(w, { from: w.human, to: 'michael', subject: '', body: 'ship it' }, roleOf, w.human)
+  assert.deepEqual(handed, { kind: 'open', agent: 'michael', text: 'ship it', by: w.human })
+
+  // And an agent's message does not fire it: the rule names the human.
+  const agentSent = routeCard(w, { from: 'iris', to: 'michael', subject: 'x', body: 'y' }, () => 'ba', w.human)
+  assert.equal(agentSent, null)
+
+  // Nor does a rule about agents fire on what the human sent.
+  const other = { ...w, cardRules: [{ from: 'assigns', to: 'builds', status: 'open' }] } as Workflow
+  assert.equal(
+    routeCard(other, { from: w.human, to: 'dev1', subject: '', body: 'z' }, () => 'dev', w.human),
+    null
+  )
+})
+

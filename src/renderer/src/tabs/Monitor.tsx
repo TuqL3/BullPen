@@ -6,6 +6,15 @@ import { LABEL, MONO } from '../theme'
 import { ago, isQuiet, summarise } from '../fleet'
 import type { Dispatch, Report } from '../../../preload/index'
 import type { Agent } from '../store'
+import {
+  anyoneChecks,
+  assignerAgent,
+  dispatchAgent,
+  isCore,
+  roleLabel,
+  rolesWith,
+  roleTag
+} from '../shape'
 
 /** Kept exported: the workers tab formats uptime the same way. */
 export const since = (ts: number): string => ago(ts, Date.now())
@@ -65,17 +74,16 @@ export function Monitor({
     return () => clearInterval(t)
   }, [])
 
-  const god = agents.find((a) => a.role === 'god')
-  // Who the work actually lands on. Michael carries it in; she decides who does
-  // it, so a dropdown offering "Michael decides" was naming the wrong person.
-  const ba = agents.find((a) => a.role === 'ba')
+  // Where a dispatched task is typed, and who it is handed to from there.
+  // Both are the workflow's answer: a floor whose boss assigns directly has
+  // nobody in the second seat, and `assignerAgent` says so with undefined.
+  const god = dispatchAgent(agents)
+  const ba = assignerAgent(agents)
 
   const send = async (): Promise<void> => {
     if (!brief.trim()) return
     const err = await window.bullpen.dispatch(brief.trim(), owner, project)
-    setSent(
-      err ?? `handed to ${god?.name}${ba ? ` — he passes it to ${ba.name}` : ''}`
-    )
+    setSent(err ?? `handed to ${god?.name}${ba ? ` — passed on to ${ba.name}` : ''}`)
     if (!err) setBrief('')
   }
 
@@ -95,7 +103,7 @@ export function Monitor({
   const projects = [
     ...new Set(
       agents
-        .filter((a) => a.role !== 'god' && a.role !== 'ba')
+        .filter((a) => !isCore(a.role))
         .map((a) => a.project)
         .filter(Boolean)
     )
@@ -173,9 +181,14 @@ export function Monitor({
               <div style={S.who}>
                 <div style={{ ...LABEL, color: 'var(--ink)' }}>
                   {a.name}
-                  {a.role === 'god' && <span style={{ color: 'var(--accent-ink)' }}> (boss)</span>}
-                  {a.role === 'ba' && <span style={{ color: 'var(--accent-ink)' }}> (analyst)</span>}
-                  {a.role === 'tester' && <span style={{ color: 'var(--muted)' }}> (tester)</span>}
+                  {roleTag(a.role) && (
+                    <span
+                      style={{ color: isCore(a.role) ? 'var(--accent-ink)' : 'var(--muted)' }}
+                    >
+                      {' '}
+                      ({roleTag(a.role)})
+                    </span>
+                  )}
                 </div>
                 <div style={{ color: 'var(--faint)' }} title={a.cwd}>
                   {a.project || a.cwd.split('/').filter(Boolean).pop() || a.cwd}
@@ -301,13 +314,13 @@ export function Monitor({
           <span style={{ ...LABEL, color: 'var(--faint)' }}>suggested owner</span>
           <select style={S.select} value={owner} onChange={(e) => setOwner(e.target.value)}>
             {/* What the empty choice means, said as what happens: the box is
-                addressed to the boss, so "Iris decides" next to it read as if
-                the task were going to her instead of to him. */}
+                addressed to whoever takes dispatch, so naming the one who
+                assigns read as if the task went there instead. */}
             <option value="decide">
               {ba ? `no suggestion — ${ba.name} picks` : god ? `no suggestion — ${god.name} picks` : 'no suggestion'}
             </option>
             {agents
-              .filter((a) => a.role !== 'god' && a.role !== 'ba')
+              .filter((a) => !isCore(a.role))
               .map((a) => (
                 <option key={a.id} value={a.name}>
                   {a.name}
@@ -321,7 +334,7 @@ export function Monitor({
           value={brief}
           placeholder={
             god
-              ? `Describe the task — ${god.name} hands it to ${ba?.name ?? 'the analyst'}, who assigns it`
+              ? `Describe the task — ${god.name} ${ba ? `hands it to ${ba.name}, who assigns it` : 'assigns it'}`
               : 'Create a clone of yourself first: tick "This one is me" in the add-agent wizard.'
           }
           onChange={(e) => setBrief(e.target.value)}
@@ -345,11 +358,17 @@ export function Monitor({
           </button>
           {sent && <span style={{ ...LABEL, color: 'var(--muted)' }}>{sent}</span>}
         </div>
+        {/* What happens next is the workflow's, not this panel's: it is read
+            back out of the running one so a floor with no analyst, or no
+            tester, is not described as having them. */}
         <p style={{ ...S.note, marginTop: 8 }}>
-          Dispatch types the brief into your clone&apos;s own prompt. He hands it to the analyst,
-          who decides the breakdown, puts people on it and sends the result to a tester before she
-          calls it done. When the floor next falls quiet she is asked where things stand, and it
-          reaches you through him, above - ask me is for questions that are waiting on an answer.
+          Dispatch types the brief into {god?.name ?? 'the floor'}&apos;s own prompt.{' '}
+          {ba
+            ? `${ba.name} decides the breakdown and puts people on it`
+            : `${god?.name ?? 'They'} puts people on it`}
+          {anyoneChecks() ? `, and ${roleLabel(rolesWith('checks')[0])} decides when it is done` : ''}.
+          When the floor next falls quiet, whoever it comes back through is asked where things
+          stand, and it reaches you above — ask me is for questions that are waiting on an answer.
         </p>
       </div>
     </div>

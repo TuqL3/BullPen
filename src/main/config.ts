@@ -45,6 +45,38 @@ export type Config = {
    */
   notify?: boolean
   /**
+   * How the app itself is drawn: the size text is set at in an agent's
+   * terminal, and which colours the office floor is painted in.
+   *
+   * Kept here rather than in the workflow because it is about this machine and
+   * this pair of eyes - the same floor on a different screen wants a different
+   * font size, and the workflow is the thing you would hand to somebody else.
+   */
+  ui?: {
+    fontSize?: number
+    floor?: string
+    /**
+     * Where the boxes sit on the chart, per floor: `chart[floorName][role]`.
+     *
+     * Here rather than in the workflow because a position means nothing to the
+     * router - it reads roles, never coordinates - and a document describing an
+     * organisation should not carry one screen's idea of where the boxes are.
+     * This machine's opinion about this floor lives on this machine.
+     */
+    chart?: Record<string, Record<string, { x: number; y: number }>>
+    /** How the chart is being looked at, per floor: zoom, and the corner. */
+    view?: Record<string, { k: number; tx: number; ty: number }>
+    /**
+     * Shipped floors the operator has taken off the list.
+     *
+     * A preset has no file to delete - it is in the source - so "remove" on one
+     * is a note here saying not to offer it. Kept rather than actually deleted
+     * because the presets are the only worked examples of the format, and a
+     * fresh install should still have them.
+     */
+    hidden?: string[]
+  }
+  /**
    * The floor's shape: roles, who writes to whom, and what each is told.
    *
    * Stored opaquely, the same way `layout` is - main parses and repairs what it
@@ -90,6 +122,33 @@ export function readConfig(home: string): Config {
     const win = readWindow(raw.window)
     if (win) out.window = win
     if (typeof raw.notify === 'boolean') out.notify = raw.notify
+    // Opaque, the same way `layout` is: main parses and repairs it, and a
+    // second copy of those rules here is a second place to keep in step.
+    //
+    // This line was missing, which is not a small thing: the applied workflow
+    // was written to this file and then dropped on the way back in, so a floor
+    // survived a reload and not a restart - it came back as the default chain
+    // with no error anywhere, looking like the apply had never happened.
+    if (raw.workflow !== undefined) out.workflow = raw.workflow
+    const ui = raw.ui
+    if (ui && typeof ui === 'object') {
+      const size = typeof ui.fontSize === 'number' && Number.isFinite(ui.fontSize) ? ui.fontSize : undefined
+      const floor = typeof ui.floor === 'string' && ui.floor.trim() ? ui.floor : undefined
+      const chart = ui.chart && typeof ui.chart === 'object' ? ui.chart : undefined
+      const view = ui.view && typeof ui.view === 'object' ? ui.view : undefined
+      const hidden = Array.isArray(ui.hidden)
+        ? ui.hidden.filter((n): n is string => typeof n === 'string' && n.trim() !== '')
+        : undefined
+      if (size !== undefined || floor || chart || view || hidden) {
+        out.ui = {
+          ...(size !== undefined ? { fontSize: size } : {}),
+          ...(floor ? { floor } : {}),
+          ...(chart ? { chart } : {}),
+          ...(view ? { view } : {}),
+          ...(hidden ? { hidden } : {})
+        }
+      }
+    }
     const hook = raw.webhook
     if (
       hook &&

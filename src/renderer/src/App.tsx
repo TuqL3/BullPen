@@ -16,7 +16,14 @@ import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './roster'
 import type { Dispatch, Question, Report, WorkflowInfo } from '../../preload/index'
-import { paneSize, setTerminalTheme, TerminalDeck, writeToTerminal } from './Terminal'
+import {
+  paneSize,
+  setTerminalFontSize,
+  setTerminalTheme,
+  TerminalDeck,
+  writeToTerminal
+} from './Terminal'
+import { getPrefs, setPrefs, type Prefs } from './prefs'
 import { FilePanel, Review, WorkTree } from './Code'
 // Not in `Code`: a module that exports anything but components loses React Fast
 // Refresh, and every edit to a panel there would remount the whole tree.
@@ -37,7 +44,16 @@ import {
   type PanelId
 } from './layout'
 import { LABEL, MONO, VARS, type Mode } from './theme'
-import { isCore, setCoreRoles, useStore, type Agent, type Approval } from './store'
+import { useStore, type Agent, type Approval } from './store'
+import {
+  buildRole,
+  dispatchRole,
+  isCore,
+  roleName,
+  roleTag,
+  setShape,
+  shape
+} from './shape'
 
 const TABS = [
   'terminal',
@@ -69,19 +85,6 @@ function byProject(agents: Agent[]): { label: string; rows: Agent[] }[] {
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([label, rows]) => ({ label, rows }))
-}
-
-/**
- * What to call a role in the roster, from the workflow's own label.
- *
- * The label is written to be read mid-sentence ("the boss does not write to a
- * tester"), so the article comes off before it goes on a row. Whoever builds is
- * the unremarkable case and gets no tag at all - tagging every row tags none.
- */
-const roleTag = (wf: WorkflowInfo | null, role: string): string | null => {
-  const def = wf?.roles[role]
-  if (!def || def.can.includes('builds')) return null
-  return def.label.replace(/^(the|a|an) /i, '')
 }
 
 const DOT: Record<string, string> = {
@@ -153,12 +156,22 @@ export default function App() {
   const [dispatched, setDispatched] = useState<Dispatch | null>(null)
   /** Desktop notifications, mirrored here so the title bar can show which it is. */
   const [notifyOn, setNotifyOn] = useState(true)
+  /**
+   * How the app is drawn on this machine. Held here as well as in `prefs.ts`
+   * because the dialog is React and the terminal and the canvas are not.
+   */
+  const [prefs, setPrefsState] = useState<Prefs>(getPrefs())
 
   useEffect(() => {
     window.bullpen.askList().then(setQuestions)
     window.bullpen.lastReport().then(setReport)
     window.bullpen.lastDispatch().then(setDispatched)
     window.bullpen.notify().then(setNotifyOn)
+    window.bullpen.uiPrefs().then((p) => {
+      setPrefs(p)
+      setPrefsState(p)
+      setTerminalFontSize(p.fontSize)
+    })
     const offAsk = window.bullpen.onAsk(setQuestions)
     const offReport = window.bullpen.onReport(setReport)
     const offDispatch = window.bullpen.onDispatch(setDispatched)
@@ -225,7 +238,7 @@ export default function App() {
       window.bullpen.onHired((a) =>
         store().upsertAgent({
           id: a.id,
-          role: a.role === 'tester' ? 'tester' : 'dev',
+          role: a.role ?? buildRole(),
           project: a.project,
           name: a.name,
           face: a.id,
@@ -274,7 +287,7 @@ export default function App() {
       cols: number
       rows: number
     } | null,
-    role = 'god'
+    role = dispatchRole()
   ): void => {
     // A workflow may have no second fixed agent - `solo` is one boss and hired
     // developers - and main says so with null rather than inventing one.
@@ -295,22 +308,30 @@ export default function App() {
       exitCode: undefined,
       activity: 'idle'
     })
-    if (role === 'god') select(g.id)
+    if (role === dispatchRole()) select(g.id)
   }
 
-  /** Michael, and the analyst he hands everything to. */
-  const adoptGod = (g: Parameters<typeof adopt>[0]): void => adopt(g, 'god')
+  /** Whoever a task typed at the floor is handed to. */
+  const adoptGod = (g: Parameters<typeof adopt>[0]): void => adopt(g, dispatchRole())
 
-  // Michael is the floor's starting state, not a hire. Bringing him up here
-  // rather than in the wizard is what makes "open the app and he is there"
-  // true; main hands back the running one if this fires twice.
+  // The standing agents are the floor's starting state, not hires. Bringing
+  // them up here rather than in the wizard is what makes "open the app and they
+  // are there" true; main hands back the running ones if this fires twice.
   //
-  // On the very first run there is no answer yet to where he should work, and
+  // On the very first run there is no answer yet to where they should work, and
   // picking one silently is how an agent ends up writing somewhere the operator
   // never looked - so that run asks first and starts nothing until it is told.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      // The shape first. Every line under this asks the workflow who dispatch
+      // is, and a floor brought up before the answer arrived adopted its boss
+      // under an empty role - unfireable, unselected, in nobody's column.
+      const { workflow } = await window.bullpen.workflow()
+      if (cancelled) return
+      setShape(workflow)
+      setWf(workflow)
+
       const setup = await window.bullpen.godSetup()
       if (cancelled) return
       if (!setup.chosen) return setSetupCwd(setup.cwd)
@@ -325,9 +346,10 @@ export default function App() {
           if (!cancelled) adopt(a, a.role)
         }
       } catch (err) {
-        // A floor with no Michael still works - dispatch is what stops working,
-        // and it already says so - but silence would look like he never existed.
-        console.error('[bullpen] could not start Michael:', err)
+        // A floor whose boss did not come up still works - dispatch is what
+        // stops working, and it says so - but silence would look like nothing
+        // was ever meant to be there.
+        console.error('[bullpen] could not start the standing agents:', err)
       }
     })()
     return () => {
@@ -335,15 +357,15 @@ export default function App() {
     }
   }, [])
 
-  // Michael reads the floor from a file, so it has to be rewritten whenever the
+  // Agents read the floor from a file, so it has to be rewritten whenever the
   // roster or anyone's status changes. Main skips the write when nothing moved.
   useEffect(() => {
     window.bullpen.publishFloor(
       agents.map((a) => ({
         id: a.id,
         name: a.name,
-        project: a.role === 'god' || a.role === 'ba' ? '' : a.project || projectOf(a.cwd),
-        role: a.role === 'worker' ? 'dev' : a.role,
+        project: isCore(a.role) ? '' : a.project || projectOf(a.cwd),
+        role: a.role === 'worker' ? buildRole() : a.role,
         cwd: a.cwd,
         status: a.status,
         activity: a.activity,
@@ -357,15 +379,6 @@ export default function App() {
 
   useEffect(() => {
     window.bullpen.layout().then((raw) => setLayout(normalise(raw)))
-  }, [])
-
-  useEffect(() => {
-    window.bullpen.workflow().then(({ workflow }) => {
-      setWf(workflow)
-      // A row's × is hidden by this, and `removeAgent` refuses on it. Set as
-      // soon as it is known, so a fixed agent is never briefly fireable.
-      setCoreRoles(Object.keys(workflow.roles).filter((r) => workflow.roles[r].fixed))
-    })
   }, [])
 
   /** Every layout change is persisted; there is no separate save action. */
@@ -399,7 +412,7 @@ export default function App() {
       store().upsertAgent({
         id,
         role: d.role,
-        project: d.role === 'god' ? '' : d.project.trim() || projectOf(d.cwd.trim()),
+        project: isCore(d.role) ? '' : d.project.trim() || projectOf(d.cwd.trim()),
         name: d.name.trim(),
         face: d.face,
         color: d.color,
@@ -415,7 +428,6 @@ export default function App() {
         // optimistic 'working' - it would stay wrong until its first real turn.
         activity: 'idle'
       })
-      if (d.role === 'god') window.bullpen.setGod(id)
       // Cards move by role - a tester's "done" closes the developer's card, a
       // developer's does not - so main has to be told what this one is.
       window.bullpen.setRole(id, d.role)
@@ -442,7 +454,7 @@ export default function App() {
   const busy = current?.status === 'running' && current.activity === 'working'
 
   /**
-   * Michael's workspace is a setting, not a fixture. The CLI reads its working
+   * The floor's workspace is a setting, not a fixture. The CLI reads its working
    * directory once at startup, so moving him is a restart - the conversation in
    * his terminal does not survive it, and that is worth saying out loud before
    * it happens rather than after.
@@ -450,16 +462,27 @@ export default function App() {
   const moveGod = async (): Promise<void> => {
     const dir = await window.bullpen.pickDir()
     if (!dir) return
-    // Both of them: she works in his directory, so moving him restarts her too,
-    // and finding that out afterwards is finding out you lost a conversation
-    // nobody mentioned.
-    if (!confirm(`Restart Michael in ${dir}?\n\nIris works in his directory, so she moves with him. Both conversations are lost.`)) return
+    // Everyone standing, not only the one whose header this is: they work in
+    // the same directory, so moving it restarts all of them, and finding that
+    // out afterwards is finding out you lost a conversation nobody mentioned.
+    const boss = roleName(dispatchRole())
+    const alsoMoving = agents.filter((a) => isCore(a.role) && a.role !== dispatchRole())
+    const others = alsoMoving.map((a) => a.name).join(', ')
+    if (
+      !confirm(
+        `Restart ${boss} in ${dir}?\n\n` +
+          (others
+            ? `${others} work in the same directory and restart too. Every conversation is lost.`
+            : 'The conversation is lost.')
+      )
+    )
+      return
     setMoveError('')
     const { cols, rows } = paneSize(document.querySelector('section'))
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return setMoveError(res.error)
     adoptGod(res)
-    // They work in his directory, so main stopped them when he moved.
+    // They work in the same directory, so main stopped them when it moved.
     for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
   }
 
@@ -494,7 +517,7 @@ export default function App() {
     if (!res.error) setSavedTick((n) => n + 1)
   }
 
-  /** First run: accept a workspace for Michael and bring him up in it. */
+  /** First run: accept a workspace for the floor and bring it up in there. */
   const chooseGodHome = async (dir: string): Promise<string | null> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
     const res = await window.bullpen.moveGod(dir, { cols, rows })
@@ -553,9 +576,9 @@ export default function App() {
    * has already exited has nothing left to lose, so that row just goes.
    */
   const fire = async (a: Agent): Promise<void> => {
-    // Michael and the analyst are the floor, not staff on it: dispatch routes
-    // through him and every hire below is hers. Firing either leaves a floor
-    // that cannot hand out work, and nothing in the UI brings them back.
+    // A role with a fixed agent is the floor, not staff on it: dispatch routes
+    // through one of them and the hires below answer to another. Firing one
+    // leaves a floor that cannot hand out work, and nothing here brings it back.
     if (isCore(a.role)) return
     if (a.status === 'running') {
       const queued = store().steers[a.id]?.length ?? 0
@@ -571,9 +594,9 @@ export default function App() {
    * id. Same id on purpose: the terminal keeps its scrollback, so what the last
    * run said is still there to read above the new prompt.
    *
-   * Main resolves the role from the id it already holds, so a restarted Michael
-   * comes back as Michael; `setRole` re-states it for a worker whose role only
-   * the roster knows.
+   * Main resolves the role from the id it already holds, so a restarted fixed
+   * agent comes back as itself; `setRole` re-states it for a worker whose role
+   * only the roster knows.
    */
   const restart = async (a: Agent): Promise<void> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
@@ -629,7 +652,7 @@ export default function App() {
                 onSelect={() => select(a.id)}
                 onFire={() => fire(a)}
                 onRestart={() => restart(a)}
-                tag={roleTag(wf, a.role)}
+                tag={roleTag(a.role)}
               />
             ))}
 
@@ -658,7 +681,7 @@ export default function App() {
                     onSelect={() => select(a.id)}
                     onFire={() => fire(a)}
                     onRestart={() => restart(a)}
-                    tag={roleTag(wf, a.role)}
+                    tag={roleTag(a.role)}
                   />
                 ))}
               </div>
@@ -682,7 +705,7 @@ export default function App() {
               </div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>
                 {current ? `${current.activity} · pid ${current.pid} · ${current.cwd}` : 'no agent selected'}
-                {current?.role === 'god' && (
+                {current !== null && current.role === dispatchRole() && (
                   <button style={S.linkBtn} onClick={moveGod}>
                     move
                   </button>
@@ -797,7 +820,7 @@ export default function App() {
               />
             )}
             {tab === 'tasks' && (
-              <Tasks agents={agents} agent={current} dispatch={wf?.dispatch ?? 'god'} />
+              <Tasks agents={agents} agent={current} dispatch={dispatchRole()} />
             )}
             {tab === 'ask me' && (
               <AskMe
@@ -869,18 +892,10 @@ export default function App() {
     // light grey down the side of every scrolling panel.
     <div style={{ ...(VARS[mode] as React.CSSProperties), colorScheme: mode, ...S.app }}>
       <TitleBar
-        mode={mode}
-        onToggle={() => {
-          const next = mode === 'light' ? 'dark' : 'light'
-          setMode(next)
-          window.bullpen.setMode(next)
-        }}
         layout={layout}
         onTogglePanel={(id) => applyLayout(togglePanel(layout, id))}
         reviewing={reviewing}
         diffStat={diffStat}
-        notifyOn={notifyOn}
-        onToggleNotify={async () => setNotifyOn(await window.bullpen.setNotify(!notifyOn))}
         onToggleReview={() => setReviewing(!reviewing)}
         onSettings={() => setSettings(true)}
       />
@@ -939,10 +954,35 @@ export default function App() {
         <Settings
           workflow={wf}
           onRestartFloor={restartFloor}
+          // The same two switches the title bar has, in the place somebody
+          // looks for a switch. One state, two ways to reach it.
+          mode={mode}
+          onMode={(next) => {
+            setMode(next)
+            window.bullpen.setMode(next)
+          }}
+          notifyOn={notifyOn}
+          onNotify={async (on) => setNotifyOn(await window.bullpen.setNotify(on))}
+          prefs={prefs}
+          onPrefs={async (next) => {
+            const saved = await window.bullpen.setUiPrefs(next)
+            setPrefs(saved)
+            setPrefsState(saved)
+            // The canvas repaints itself every frame and picks the palette up
+            // on its own; the terminals have to be told.
+            if (next.fontSize !== undefined) setTerminalFontSize(saved.fontSize)
+          }}
+          onMoveGod={moveGod}
           onClose={() => setSettings(false)}
-          onApplied={(next) => {
+          onApplied={async (next) => {
             setWf(next)
-            setCoreRoles(Object.keys(next.roles).filter((r) => next.roles[r].fixed))
+            setShape(next)
+            // Agents follow the floor both ways: main stands down whoever the
+            // new one has no role for, and this brings up whoever it names and
+            // nobody is doing yet. Without it a floor could be switched to and
+            // have nobody standing in half its roles until the app restarted.
+            const { cols, rows } = paneSize(document.querySelector('section'))
+            for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
           }}
         />
       )}
@@ -991,8 +1031,6 @@ function Icon({
 }: {
   name:
     | 'floor'
-    | 'sun'
-    | 'moon'
     | 'min'
     | 'full'
     | 'restart'
@@ -1001,8 +1039,6 @@ function Icon({
     | 'roster'
     | 'tree'
     | 'review'
-    | 'bell'
-    | 'bellOff'
   size?: number
 }) {
   const common = {
@@ -1021,19 +1057,6 @@ function Icon({
       <svg {...common} aria-hidden>
         <rect x="1.5" y="2.5" width="13" height="11" />
         <path d="M1.5 7h13M6.5 7v6.5M10.5 2.5v4.5" />
-      </svg>
-    )
-  if (name === 'moon')
-    return (
-      <svg {...common} aria-hidden>
-        <path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z" />
-      </svg>
-    )
-  if (name === 'sun')
-    return (
-      <svg {...common} aria-hidden>
-        <circle cx="8" cy="8" r="3" />
-        <path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2 3.1 3.1" />
       </svg>
     )
   if (name === 'roster')
@@ -1058,14 +1081,6 @@ function Icon({
         <rect x="7.5" y="1.5" width="6" height="3" />
         <rect x="7.5" y="5" width="6" height="3" />
         <rect x="7.5" y="10.5" width="6" height="3" />
-      </svg>
-    )
-  if (name === 'bell' || name === 'bellOff')
-    return (
-      <svg {...common} aria-hidden>
-        <path d="M4 6.5a4 4 0 0 1 8 0c0 3 1 4 1.5 4.5h-11C3 10.5 4 9.5 4 6.5Z" />
-        <path d="M6.6 13.5a1.6 1.6 0 0 0 2.8 0" />
-        {name === 'bellOff' && <path d="M2.5 2.5l11 11" />}
       </svg>
     )
   if (name === 'min')
@@ -1106,11 +1121,15 @@ function Icon({
 }
 
 /**
- * First run, and the only thing it asks: where Michael works.
+ * First run, and the only thing it asks: where the floor works.
  *
  * Not skippable. A default would be one machine's home directory imposed on
  * every other, and an agent writing somewhere the operator never looked is a
  * worse outcome than one more click on the first launch.
+ *
+ * Who it names is the workflow's dispatch agent - the one a task typed at the
+ * floor goes to - rather than a name written in here, which was only ever this
+ * one workflow's boss.
  */
 function FirstRun({
   suggested,
@@ -1119,12 +1138,17 @@ function FirstRun({
   suggested: string
   onChoose: (dir: string) => Promise<string | null>
 }) {
+  const boss = roleName(dispatchRole())
+  const others = Object.entries(shape()?.roles ?? {})
+    .filter(([role, def]) => def.fixed && role !== dispatchRole())
+    .map(([, def]) => def.fixed?.name ?? '')
+    .filter(Boolean)
   const [dir, setDir] = useState(suggested)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const go = async (): Promise<void> => {
-    if (!dir.trim()) return setError('Michael needs a directory to work in.')
+    if (!dir.trim()) return setError(`${boss} needs a directory to work in.`)
     setBusy(true)
     setError((await onChoose(dir.trim())) ?? '')
     setBusy(false)
@@ -1134,12 +1158,14 @@ function FirstRun({
     <div style={S.modalWrap}>
       <div style={{ ...S.modal, width: 520 }}>
         <div style={{ ...LABEL, color: 'var(--ink)', fontSize: 12, fontWeight: 700 }}>
-          Where should Michael work?
+          Where should {boss} work?
         </div>
         <p style={S.firstRunBlurb}>
-          Michael stands in for you: you dispatch through him, he hands the work to Iris the
-          analyst, and he is the one who reports back to you. They share this directory — they
-          may write freely inside it, and nowhere else. You can move them later from his header.
+          {boss} stands in for you: you dispatch through {boss}, and what comes back reaches you
+          the way the <b>{shape()?.name ?? 'workflow'}</b> workflow says it does.{' '}
+          {others.length > 0 && `${others.join(', ')} ${others.length === 1 ? 'works' : 'work'} in this same directory. `}
+          Whoever stands here may write freely inside it, and nowhere else — you can move them
+          later from the header.
         </p>
         <div style={{ display: 'flex', gap: 8, margin: '4px 0 8px' }}>
           <input
@@ -1162,7 +1188,7 @@ function FirstRun({
         </div>
         {error && <div style={{ color: 'var(--danger)', fontSize: 11, marginBottom: 8 }}>{error}</div>}
         <button style={{ ...S.btn, ...S.btnPrimary }} disabled={busy} onClick={go}>
-          {busy ? 'starting…' : 'start Michael here'}
+          {busy ? 'starting…' : `start ${boss} here`}
         </button>
       </div>
     </div>
@@ -1434,27 +1460,18 @@ function PanelToggle({
 }
 
 function TitleBar({
-  mode,
-  onToggle,
   layout,
   onTogglePanel,
   reviewing,
   diffStat,
-  notifyOn,
-  onToggleNotify,
   onToggleReview,
   onSettings
 }: {
-  mode: Mode
-  onToggle: () => void
   layout: Layout
   onTogglePanel: (id: PanelId) => void
   reviewing: boolean
   /** Lines added and removed in the selected agent's workspace, or null. */
   diffStat: { adds: number; dels: number } | null
-  /** Whether the desktop is told when the floor needs you. */
-  notifyOn: boolean
-  onToggleNotify: () => void
   onToggleReview: () => void
   /** Open the floor's shape - roles, routing, briefs. Set once, not per task. */
   onSettings: () => void
@@ -1499,35 +1516,16 @@ function TitleBar({
           <span style={{ color: 'var(--faint)' }}>0</span>
         )}
       </button>
+      {/* The bell and the theme glyph used to live here. Both are settings -
+          one switch, one place - and a title bar of glyphs you have to have
+          learned is worse than a dialog that says what each one does. */}
       <button
-        title={notifyOn ? 'notifications on - click to mute' : 'notifications muted'}
-        aria-label="toggle notifications"
-        style={
-          {
-            ...S.panelToggle,
-            WebkitAppRegion: 'no-drag',
-            color: notifyOn ? 'var(--accent-ink)' : 'var(--faint)'
-          } as React.CSSProperties
-        }
-        onClick={onToggleNotify}
-      >
-        <Icon name={notifyOn ? 'bell' : 'bellOff'} />
-      </button>
-      <button
-        title="workflow"
-        aria-label="workflow settings"
+        title="settings"
+        aria-label="settings"
         style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         onClick={onSettings}
       >
         <Icon name="gear" />
-      </button>
-      <button
-        title={mode === 'light' ? 'switch to dark' : 'switch to light'}
-        aria-label="toggle theme"
-        style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        onClick={onToggle}
-      >
-        <Icon name={mode === 'light' ? 'moon' : 'sun'} />
       </button>
       {/* On macOS the native traffic lights already do all three, and drawing
           a second set beside them is the wrong thing everywhere. */}
@@ -1601,8 +1599,8 @@ function RosterRow({
           title={agent.cwd}
           style={{ fontSize: 10, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         >
-          {/* Michael and the analyst share a workspace, so the directory alone
-              tells the two of them apart not at all. */}
+          {/* The standing agents share a workspace, so the directory alone
+              tells them apart not at all. */}
           {tag ? <span style={{ color: 'var(--accent-ink)' }}>{tag} · </span> : null}
           {agent.cwd.split('/').pop() || agent.cwd}
         </div>

@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal as Xterm, type ITheme } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import type { Mode } from './theme'
+import { getPrefs } from './prefs'
 
 /**
  * One xterm instance per agent, kept alive across tab switches: re-creating it
@@ -87,6 +88,28 @@ function get(id: string): { term: Xterm; fit: FitAddon } {
   return entry
 }
 
+/**
+ * Resize the text in every live terminal, and tell each pty what it now fits.
+ *
+ * The cell measurement is thrown away with it: it is what a spawn size is
+ * computed from, and a 12.5px cell would have the next agent's CLI drawing its
+ * welcome box at the wrong width.
+ */
+export function setTerminalFontSize(px: number): void {
+  FONT_SIZE = px
+  cell = null
+  for (const [id, { term, fit }] of terms) {
+    term.options.fontSize = px
+    try {
+      fit.fit()
+      window.bullpen.resize(id, term.cols, term.rows)
+    } catch {
+      // A terminal whose element is not on screen cannot be fitted; the deck
+      // fits it again when its tab comes back.
+    }
+  }
+}
+
 /** Recolour every live terminal, including ones whose tab is hidden. */
 export function setTerminalTheme(next: Mode): void {
   mode = next
@@ -94,7 +117,16 @@ export function setTerminalTheme(next: Mode): void {
 }
 
 const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
-const FONT_SIZE = 12.5
+
+/**
+ * The size text is set at, in every terminal at once.
+ *
+ * A module variable rather than a prop: terminals are kept alive outside the
+ * React tree so a tab switch does not lose scrollback, and the cell measurement
+ * below - which decides what size a pty is spawned at - has no component to
+ * read a prop from.
+ */
+let FONT_SIZE = getPrefs().fontSize
 
 /**
  * Cell size for the terminal font, measured once from a real glyph.

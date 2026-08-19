@@ -1,22 +1,29 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import {
-  CAPABILITIES,
   generatorBrief,
   HEADER_FIELDS,
   HIRE_PARTY,
   HUMAN_PARTY,
   PLACEHOLDERS,
   ROLE_FIELDS,
-  ROLE_FLAGS,
-  WORKFLOW_RULES,
-  WORKFLOW_SPEC
+  ROLE_FLAGS
 } from '../src/workflow-spec.ts'
 import { lint, parseMarkdown, renderBrief } from '../src/main/workflow.ts'
-import { DEFAULT_WORKFLOW, PRESETS } from '../src/main/presets.ts'
+import { DEFAULT_WORKFLOW } from './floors.ts'
+import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 
-const REFERENCE = WORKFLOW_SPEC.flatMap((s) => s.rows.map(([term, what]) => `${term} ${what}`)).join('\n')
-const BRIEF = generatorBrief()
+/**
+ * The rules, read the way nothing else reads them.
+ *
+ * Main bundles `rules.md` with `?raw`, which a node test cannot do - so this
+ * reads the same file off disk. One document: the linter enforces it, the
+ * dialog draws it, and the model that writes floors is briefed with it.
+ */
+const REFERENCE = readFileSync(join(import.meta.dirname, '..', 'src', 'rules.md'), 'utf8')
+const BRIEF = generatorBrief(REFERENCE)
 
 /**
  * The reference and the generator's brief were two hand-written copies of one
@@ -26,11 +33,12 @@ const BRIEF = generatorBrief()
  * it makes up looks like a feature nobody wrote down.
  */
 test('the writer is briefed on exactly what the reference documents', () => {
-  for (const { title, rows } of WORKFLOW_SPEC) {
-    assert.ok(BRIEF.includes(title.toUpperCase()), `the brief is missing the "${title}" section`)
-    for (const [term] of rows) {
-      assert.ok(BRIEF.includes(term), `the brief never mentions "${term}"`)
-    }
+  assert.ok(BRIEF.includes(REFERENCE), 'the writer must be handed the rules, not a summary of them')
+  assert.match(BRIEF, /markdown file and nothing else/, 'and told what shape the answer takes')
+  // Every section heading in the document reaches the writer, which is the
+  // property that used to need checking term by term against a second copy.
+  for (const heading of REFERENCE.matchAll(/^##\s+(.+)$/gm)) {
+    assert.ok(BRIEF.includes(heading[1]), `the brief is missing the "${heading[1]}" section`)
   }
 })
 
@@ -49,9 +57,6 @@ test('every line the parser reads is in the reference', () => {
   for (const field of HEADER_FIELDS) {
     assert.ok(REFERENCE.includes(`- ${field}`), `header field "${field}" is undocumented`)
   }
-  for (const cap of CAPABILITIES) {
-    assert.ok(REFERENCE.includes(cap), `capability "${cap}" is undocumented`)
-  }
   for (const party of [HUMAN_PARTY, HIRE_PARTY]) {
     assert.ok(REFERENCE.includes(party), `address "${party}" is undocumented`)
   }
@@ -65,7 +70,7 @@ test('every line the parser reads is in the reference', () => {
 test('every placeholder the reference names is one that gets filled', () => {
   const w = DEFAULT_WORKFLOW
   for (const ph of PLACEHOLDERS) {
-    assert.ok(REFERENCE.includes(ph.replace('.<name>', '.<name>')) || REFERENCE.includes(ph.split('.<name>')[0]), `placeholder ${ph} is undocumented`)
+    assert.ok(REFERENCE.includes(ph), `placeholder ${ph} is undocumented`)
     // Substitute a real role name for the wildcard before rendering.
     const real = ph.replace('<name>', 'ba')
     const out = renderBrief({ ...w, roles: { ...w.roles, god: { ...w.roles.god, brief: real } } }, 'god', {
@@ -82,7 +87,9 @@ test('every placeholder the reference names is one that gets filled', () => {
  * a rule nothing checks is advice, and advice in a spec reads as a guarantee.
  */
 test('the rules the writer is given are rules the linter enforces', () => {
-  assert.ok(WORKFLOW_RULES.length > 0)
+  // None are switched on, but the ids on offer have to be real ones.
+  const offered = [...REFERENCE.slice(REFERENCE.indexOf('## law')).matchAll(/`([\w-]+)`/g)]
+  assert.ok(offered.length > 0, 'the document must name the checks it can run')
 
   // Each of these breaks one stated rule, and each must be caught.
   const w = DEFAULT_WORKFLOW
@@ -111,5 +118,11 @@ test('the rules the writer is given are rules the linter enforces', () => {
 })
 
 test('the shipped floors satisfy the spec they are shipped beside', () => {
-  for (const w of PRESETS) assert.deepEqual(lint(w), [], `"${w.name}" contradicts its own reference`)
+  // Bar the rules, which are nobody's business but the operator's: a shipped
+  // floor draws the organisation and leaves what its arrows do to the board
+  // blank on purpose.
+  for (const w of SHIPPED) {
+    const left = lint(w).filter((p) => !/card|assigns/i.test(p))
+    assert.deepEqual(left, [], `"${w.name}" contradicts its own reference`)
+  }
 })

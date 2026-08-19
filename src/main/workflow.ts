@@ -8,12 +8,13 @@ import {
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
+import { lawOn, type Rules } from '../rules.ts'
 import {
-  CAPABILITIES,
-  generatorBrief,
+  CAPABILITY_KINDS,
   HIRE_PARTY,
   HUMAN_PARTY,
-  type Capability
+  type Capability,
+  type CapabilityKind
 } from '../workflow-spec.ts'
 
 /**
@@ -40,7 +41,135 @@ import {
  * Defined with the rest of the format in `workflow-spec.ts`, and re-exported
  * here so callers have one import for the whole of a workflow.
  */
-export { CAPABILITIES, HIRE_PARTY, HUMAN_PARTY, type Capability }
+export {
+  CAPABILITY_KINDS,
+  HIRE_PARTY,
+  HUMAN_PARTY,
+  type Capability,
+  type CapabilityKind
+}
+
+/**
+ * A capability this floor has, in this floor's own words.
+ *
+ * `drafts`, `edits`, `collects`, `cites` - whatever the work is actually
+ * called. `kind` is what the floor does with it: a capability of kind `checks`
+ * closes a card whether it is called `tests`, `reviews` or `proofreads`.
+ */
+export type CapabilityDef = {
+  name: string
+  what: string
+}
+
+/**
+ * What one message does to the board, as a line the operator can change.
+ *
+ * `from` and `to` name a capability, a kind, a role, or one of `anyone`,
+ * `staff` (anyone who is not the floor's voice) and `you` (the human). `status`
+ * is a column key, or `open` to start a card and `closes` to finish one along
+ * with the work it was checking. First matching line wins.
+ */
+export type CardRule = {
+  from: string
+  to: string
+  /**
+   * When this happens, in the operator's own words: "hands the work over",
+   * "says it is built", "sends a problem back".
+   *
+   * The router does not read it - a message from one of these to one of those
+   * is a message, and nothing inspects what it says. It is what the line is
+   * labelled with on the chart, and what somebody reads to know why the rule
+   * is there, which a table of froms and tos never said.
+   */
+  when?: string
+  status: string
+  /**
+   * Whose card moves. The sender's, unless the line says otherwise: "checks →
+   * builds: doing (their card)" is a bug going back, and the card that goes
+   * back to doing belongs to the developer being written to, not the checker.
+   */
+  whose?: 'from' | 'to'
+}
+
+/**
+ * What a column is for, as opposed to what it is called.
+ *
+ * A card lands in one of these without anybody sending a message: work starts
+ * when an agent takes a turn, stops when it exits, and closes when the floor
+ * says so. Those moments have to know which column they mean on a board whose
+ * columns are the operator's, and five kinds is what the code outside the card
+ * rules actually asks about.
+ */
+export const COLUMN_KINDS = ['start', 'working', 'waiting', 'stuck', 'done'] as const
+export type ColumnKind = (typeof COLUMN_KINDS)[number]
+
+/** One column: its id on the board, its name here, its colour, and its job. */
+export type Column = { key: string; label: string; bar: string; kind?: ColumnKind }
+
+/**
+ * The board as Bullpen has always drawn it.
+ *
+ * These keys are what every `board.json` written before the columns were the
+ * operator's has in it, which is why they stay the default names rather than
+ * being renamed to their kinds.
+ */
+/**
+ * The five column names Bullpen used to ship, kept only so a board that writes
+ * `- doing: drafting` still gets a column that means "work has started". They
+ * are not given to a floor that does not ask.
+ */
+export const KNOWN_COLUMNS: Column[] = [
+  { key: 'todo', label: 'todo', bar: '#7fc7e8', kind: 'start' },
+  { key: 'doing', label: 'doing', bar: '#e8cf6a', kind: 'working' },
+  { key: 'wait_test', label: 'wait to test', bar: '#c9a2e8', kind: 'waiting' },
+  { key: 'blocked', label: 'blocked', bar: '#e8917f', kind: 'stuck' },
+  { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' }
+]
+
+/**
+ * The column that means `kind` on this floor, by key.
+ *
+ * Falls back to the default name for that kind, then to the first column: a
+ * board with nowhere marked `stuck` still has to put an agent that died
+ * somewhere, and losing the card is worse than putting it in the wrong place.
+ */
+export function columnFor(w: Workflow, kind: ColumnKind): string {
+  const said = w.columns.find((c) => c.kind === kind)
+  if (said) return said.key
+  // No column marked for this, and none invented: a floor that has not said
+  // where finished work goes has nowhere to put it, and quietly choosing one
+  // is how the board came to disagree with the file.
+  return w.columns[0]?.key ?? ''
+}
+
+/**
+ * Where a role's fixed agent works.
+ *
+ * `~` is the operator's home, because that is how a person writes it, and a
+ * role that says nothing works where dispatch works. Here rather than in main
+ * because two places ask it - the spawn, and the check that decides whether the
+ * one already running is in the right place - and they were not the same
+ * question in code, which is what let an agent be killed and restarted on every
+ * launch for standing exactly where it was told to.
+ */
+export function workCwd(w: Workflow, role: string, home: string, fallback: string): string {
+  const said = w.roles[role]?.cwd?.trim()
+  if (!said) return fallback
+  return said.startsWith('~') ? join(home, said.slice(1)) : said
+}
+
+/** Whether this floor has a column for `kind` at all. */
+export const hasColumn = (w: Workflow, kind: ColumnKind): boolean =>
+  w.columns.some((c) => c.kind === kind)
+
+/** The four kinds as capabilities, for a floor that declares none of its own. */
+export const DEFAULT_CAPABILITIES: CapabilityDef[] = [
+  { name: 'speaksToHuman', what: 'may write to "you"' },
+  { name: 'assigns', what: 'hands work out and may hire' },
+  { name: 'builds', what: 'does the work and reports when done' },
+  { name: 'checks', what: 'decides whether it passes' }
+]
+
 
 export type RoleDef = {
   /** What this role does. Empty is legal but inert - it can only carry mail. */
@@ -51,6 +180,14 @@ export type RoleDef = {
    */
   label: string
   /**
+   * What this role is for, in one sentence a person can read.
+   *
+   * Capabilities say what the router does with it; this says what the job is.
+   * The two are not the same thing, and `assigns` on its own has never told
+   * anybody what an analyst actually does with a request.
+   */
+  does?: string
+  /**
    * A role with a fixed agent is part of the floor rather than staff on it: it
    * is spawned at launch under this exact id, and it cannot be fired. Roles
    * without one are hired into.
@@ -58,6 +195,38 @@ export type RoleDef = {
   fixed?: { id: string; name: string }
   /** Whether the wizard and the `hire` address may create one of these. */
   hireable?: boolean
+  /**
+   * The command this role runs, when it is not the default `claude`.
+   *
+   * Written as it would be typed - `claude --model sonnet`, `codex` - and split
+   * on spaces. A floor is not obliged to be one model: the role that only reads
+   * and reports can run something cheaper than the role that writes the code.
+   */
+  cli?: string
+  /**
+   * Where this role's fixed agent works, when it is not where dispatch works.
+   * `~` is expanded. Ignored for a hired role - those go where their project is.
+   */
+  cwd?: string
+  /**
+   * Tools this role never uses. Refused by the approvals layer, with the reason
+   * naming the role - a proofreader that cannot run shell commands is a floor
+   * rule, and saying it in the brief only asks the model to agree.
+   *
+   * Denial only. Nothing here can grant a tool, and none of the dangerous-shell
+   * or credential-path checks can be turned off by a workflow.
+   */
+  never?: string[]
+  /**
+   * Anything else this floor wants to say about the role, as words of its own.
+   *
+   * `tone`, `max length`, `style guide`, `escalate to` - the app has no opinion
+   * about any of them and never reads one. They are substituted into the brief
+   * as `{{tone}}`, which is the whole point: a floor needs to tell its writers
+   * things Bullpen has no business knowing, and the alternative was writing the
+   * same sentence into four briefs by hand.
+   */
+  attrs?: Record<string, string>
   /**
    * What an agent of this role is told at spawn, appended to whatever its
    * CLAUDE.md says. `{{...}}` placeholders are filled by `renderBrief`.
@@ -87,6 +256,31 @@ export type Workflow = {
   reuseBelowPct: number
   /** Over this much, treat an idle agent as unavailable. */
   hireAbovePct: number
+  /** The capabilities this floor has words for. */
+  capabilities: CapabilityDef[]
+  /** What each column on the board is called here. */
+  columns: Column[]
+  /** What a message between two roles does to a card. First match wins. */
+  cardRules: CardRule[]
+  /**
+   * Placeholders this floor adds, and what they stand for.
+   *
+   * `{{self.id}}` and the rest are Bullpen's, and they are about the floor. A
+   * brief also has to say things about the work - which product, which team,
+   * which style guide, when the deadline is - and those were only sayable by
+   * writing them out in every brief that needed them.
+   */
+  words: Record<string, string>
+  /** What the human is addressed as, and what asking for a new agent is called. */
+  human: string
+  hire: string
+  /**
+   * The role that reports to the human, when more than one may write there.
+   * Empty means "whoever `talks to` allows", which on most floors is one role.
+   */
+  voice?: string
+  /** What a hire is when nothing said which kind. Empty means the first hireable one. */
+  hires?: string
 }
 
 /**
@@ -99,17 +293,64 @@ export type Workflow = {
  */
 const BLANK = /«[^»]*»/
 
-const PARTY_LABEL: Record<string, string> = {
-  [HUMAN_PARTY]: 'the human',
-  [HIRE_PARTY]: 'hiring'
+const partyLabel = (w: Workflow, party: string): string | null =>
+  party === w.human ? 'the human' : party === w.hire ? 'hiring' : null
+
+/**
+ * What a capability behaves like, or null when the floor never declared it.
+ *
+ * A name that is itself one of the four kinds needs no declaration: `builds` is
+ * a capability of kind `builds` on every floor that never said otherwise.
+ */
+/** Whether this role answers to a word, by its own name or a capability it has. */
+const holds = (w: Workflow, role: string, word: string): boolean =>
+  word === role || (w.roles[role]?.can ?? []).includes(word)
+
+/**
+ * The four questions asked outside the card rules, answered from what the floor
+ * already says rather than from a label on each capability.
+ *
+ * Capabilities used to carry a `kind` - which of four things the app should
+ * treat them as - and it was a second copy of what the rest of the file already
+ * said. Who talks to the human is in `talks to`. Who hands work out is whoever
+ * a card rule says opens a card. Who decides it passed is whoever closes one.
+ * Keeping the label meant a floor could contradict itself, and a floor with two
+ * kinds of approval had to pretend they were the same kind.
+ *
+ * `holds` rather than `matches`: no crowds and no recursion. `matches` in the
+ * router asks this, so this cannot ask that.
+ */
+export const rolesWith = (w: Workflow, kind: CapabilityKind): string[] => {
+  const names = Object.keys(w.roles)
+  const fromRules = (status: string): string[] =>
+    names.filter((r) => w.cardRules.some((rule) => rule.status === status && holds(w, r, rule.from)))
+
+  if (kind === 'speaksToHuman') {
+    if (w.voice && w.roles[w.voice]) return [w.voice]
+    return names.filter((r) => (w.talksTo[r] ?? []).includes(w.human))
+  }
+  if (kind === 'assigns') return fromRules('open')
+  if (kind === 'checks') return fromRules('closes')
+
+  // Whoever builds: what the floor hires by default, else everybody the other
+  // three questions did not claim. Not "anybody hireable" - a tester is hireable
+  // too, and calling it a builder made a pass read as a hand-in.
+  if (w.hires && w.roles[w.hires]) return [w.hires]
+  const taken = new Set([
+    ...rolesWith(w, 'speaksToHuman'),
+    ...rolesWith(w, 'assigns'),
+    ...rolesWith(w, 'checks')
+  ])
+  const rest = names.filter((r) => !taken.has(r))
+  return rest.length ? rest : names.filter((r) => w.roles[r].hireable)
 }
 
-/** Every role that can do `cap`. */
-export const rolesWith = (w: Workflow, cap: Capability): string[] =>
-  Object.keys(w.roles).filter((r) => w.roles[r].can.includes(cap))
+export const can = (w: Workflow, role: string, kind: CapabilityKind): boolean =>
+  rolesWith(w, kind).includes(role)
 
-export const can = (w: Workflow, role: string, cap: Capability): boolean =>
-  w.roles[role]?.can.includes(cap) ?? false
+/** True when this role holds that exact capability, by the name it was given. */
+export const hasCapability = (w: Workflow, role: string, cap: string): boolean =>
+  (w.roles[role]?.can ?? []).includes(cap)
 
 /** The roles nobody can fire: they have a fixed agent and no way to re-hire. */
 export const coreRoles = (w: Workflow): string[] =>
@@ -124,7 +365,7 @@ export const roleOfFixedId = (w: Workflow, id: string): string | null =>
   Object.keys(w.roles).find((r) => w.roles[r].fixed?.id === id) ?? null
 
 const nameOf = (w: Workflow, party: string): string =>
-  PARTY_LABEL[party] ?? w.roles[party]?.label ?? party
+  partyLabel(w, party) ?? w.roles[party]?.label ?? party
 
 /**
  * Why this message is not going through, or null when it is.
@@ -154,24 +395,61 @@ export function refuseMail(w: Workflow, from: string, to: string): string | null
  * reads `{{role.qa.id}}` in the agent's own terminal is a bug someone can see,
  * where an empty string is a brief that quietly tells it to mail nobody.
  */
+/** An agent as the picker sees it: what it is, whether it is free, how full. */
+export type Candidate = { id: string; role: string; idle: boolean; ctxPct?: number }
+
+/**
+ * Who takes a task handed to a role rather than to a person.
+ *
+ * The floor's own two numbers decide, the same ones the briefs quote: an idle
+ * agent under `hireAbovePct` can take it, emptiest window first, and anything
+ * at or over that is treated as busy even when it is sitting there. Nobody
+ * eligible is not an error - it means hire, which is the caller's job.
+ *
+ * An agent with no reading yet has not completed a turn, which is empty rather
+ * than full: a fresh hire must be usable on the turn after it is made.
+ */
+export function pickForRole(w: Workflow, role: string, staff: Candidate[]): string | null {
+  const free = staff.filter((a) => a.role === role && a.idle && (a.ctxPct ?? 0) < w.hireAbovePct)
+  if (!free.length) return null
+  const emptiest = [...free].sort((a, b) => (a.ctxPct ?? 0) - (b.ctxPct ?? 0))
+  return emptiest[0].id
+}
+
 export function renderBrief(
   w: Workflow,
   role: string,
   vars: { id: string; name?: string; reportTo?: string }
 ): string {
   const brief = w.roles[role]?.brief ?? ''
-  return brief.replace(/\{\{([\w.]+)\}\}/g, (whole, key: string) => {
+  // Spaces allowed inside the braces: a floor's own word is whatever it calls
+  // the thing - "escalate to", "max length" - and making people slug it would
+  // be one more rule to remember for no reason the code has.
+  return brief.replace(/\{\{([\w.\- ]+)\}\}/g, (whole, raw: string) => {
+    const key = raw.trim()
     if (key === 'self.id') return vars.id
     if (key === 'self.name') return vars.name ?? vars.id
     if (key === 'reportTo') return vars.reportTo ?? ''
     if (key === 'reuseBelowPct') return String(w.reuseBelowPct)
     if (key === 'hireAbovePct') return String(w.hireAbovePct)
+    // The role's own words first, then the floor's - the narrower answer wins,
+    // so a writer with its own `tone` is not overruled by the house one. Both
+    // come after the built-ins: `{{self.id}}` cannot be redefined by a
+    // workflow, because a brief that says it and gets somebody else's is a
+    // message sent by the wrong agent.
+    const own = w.roles[role]?.attrs
+    if (own && key in own) return own[key]
+    if (key in w.words) return w.words[key]
     const m = /^role\.([\w-]+)\.(id|name|label)$/.exec(key)
     if (m) {
       const def = w.roles[m[1]]
       if (!def) return whole
       if (m[2] === 'label') return def.label
-      if (!def.fixed) return whole
+      // A role with nobody standing in it is still an address: mail to the role
+      // name is put in front of whoever is free, or somebody is hired. Leaving
+      // the braces in the brief - which is what this did - put `{{role.ba.id}}`
+      // in front of a model as if it were a name.
+      if (!def.fixed) return m[2] === 'id' ? m[1] : def.label
       return m[2] === 'id' ? def.fixed.id : def.fixed.name
     }
     return whole
@@ -187,56 +465,90 @@ export function renderBrief(
  * the agent in a loop of being handed its own message back. None of that shows
  * up as an error - it shows up as a floor that looks busy and finishes nothing.
  */
-export function lint(w: Workflow): string[] {
+export function lint(w: Workflow, rules?: Rules): string[] {
   const bad: string[] = []
   const names = Object.keys(w.roles)
   if (names.length === 0) return ['A workflow needs at least one role.']
 
-  const known = new Set([...names, HUMAN_PARTY, HIRE_PARTY])
-  for (const [from, tos] of Object.entries(w.talksTo)) {
-    if (!w.roles[from]) bad.push(`talksTo names "${from}", which is not a role.`)
-    for (const to of tos) {
-      if (!known.has(to)) bad.push(`"${from}" is allowed to write to "${to}", which does not exist.`)
+  /**
+   * Whether a law is switched on.
+   *
+   * The rules file decides which of these run: take `must-open` out of it and
+   * nothing checks that a card ever reaches the board. Given no rules at all -
+   * a test, or a caller that has not loaded them - everything runs, because a
+   * missing rulebook is not permission.
+   *
+   * What a failure *says* stays here rather than coming from the rules: the
+   * rules say "nothing may name something that does not exist", and this can
+   * say which line named what.
+   */
+  const on = (id: string): boolean => !rules || lawOn(rules, id)
+
+  // Under this floor's names for them: a workflow that calls the human `boss`
+  // has `talks to: boss`, and checking against `you` would call that a typo.
+  const known = new Set([...names, w.human, w.hire])
+  if (on('names-exist')) {
+    for (const [from, tos] of Object.entries(w.talksTo)) {
+      if (!w.roles[from]) bad.push(`talksTo names "${from}", which is not a role.`)
+      for (const to of tos) {
+        if (!known.has(to)) {
+          bad.push(`"${from}" is allowed to write to "${to}", which does not exist.`)
+        }
+      }
     }
   }
-  for (const r of names) {
-    if (!w.talksTo[r]) bad.push(`"${r}" has no talksTo entry, so it can write to nobody.`)
-    if (!w.roles[r].brief.trim()) bad.push(`"${r}" has an empty brief - it will spawn knowing nothing.`)
+  if (on('roles-are-complete')) {
+    for (const r of names) {
+      if (!w.talksTo[r]) bad.push(`"${r}" has no talksTo entry, so it can write to nobody.`)
+      if (!w.roles[r].brief.trim()) {
+        bad.push(`"${r}" has an empty brief - it will spawn knowing nothing.`)
+      }
+    }
   }
 
-  if (!w.roles[w.dispatch]) bad.push(`dispatch is "${w.dispatch}", which is not a role.`)
-  if (!w.roles[w.entry]) bad.push(`entry is "${w.entry}", which is not a role.`)
-  if (w.dispatch && !w.roles[w.dispatch]?.fixed) {
+  if (on('names-exist')) {
+    if (!w.roles[w.dispatch]) bad.push(`dispatch is "${w.dispatch}", which is not a role.`)
+    if (!w.roles[w.entry]) bad.push(`entry is "${w.entry}", which is not a role.`)
+  }
+  if (on('dispatch-has-agent') && w.dispatch && !w.roles[w.dispatch]?.fixed) {
     bad.push(`"${w.dispatch}" takes the work typed at the floor, so it needs a fixed agent - there is nobody to give it to at launch.`)
   }
-  if (w.entry && !w.roles[w.entry]?.fixed) {
-    bad.push(`"${w.entry}" takes inbound work, so it needs a fixed agent.`)
+  // Fixed or hireable: inbound work is put in front of whoever holds the role,
+  // and somebody is hired when nobody does - so a role nobody stands in is only
+  // a problem if nobody can be put in it either.
+  if (
+    on('dispatch-has-agent') &&
+    w.entry &&
+    !w.roles[w.entry]?.fixed &&
+    w.roles[w.entry]?.hireable !== true
+  ) {
+    bad.push(`"${w.entry}" takes inbound work, and has neither an agent nor anyone to hire.`)
   }
 
-  if (rolesWith(w, 'speaksToHuman').length === 0) {
+  if (on('one-voice') && rolesWith(w, 'speaksToHuman').length === 0) {
     bad.push('Nobody can write to the human, so the floor can never report anything.')
   }
-  if (rolesWith(w, 'builds').length === 0) {
+  if (on('builds-exist') && rolesWith(w, 'builds').length === 0) {
     bad.push('Nobody builds, so no task can ever be worked on.')
   }
-  if (rolesWith(w, 'assigns').length === 0 && rolesWith(w, 'builds').length > 0) {
+  if (on('must-open') && rolesWith(w, 'assigns').length === 0 && rolesWith(w, 'builds').length > 0) {
     bad.push('Nobody assigns, so work reaches a builder only if the human hands it over directly.')
   }
   for (const r of rolesWith(w, 'speaksToHuman')) {
-    if (!(w.talksTo[r] ?? []).includes(HUMAN_PARTY)) {
-      bad.push(`"${r}" is meant to speak to the human but talksTo does not allow "${HUMAN_PARTY}".`)
+    if (!(w.talksTo[r] ?? []).includes(w.human)) {
+      bad.push(`"${r}" is meant to speak to the human but talksTo does not allow "${w.human}".`)
     }
     // Being allowed to write to the human is not the same as being told to.
     // A floor whose voice is never instructed to report does all its work and
     // then says nothing - it looks busy and finishes in silence, which is the
     // failure the operator notices last.
-    if (!new RegExp(`["']${HUMAN_PARTY}["']`).test(w.roles[r].brief)) {
+    if (on('voice-is-told') && !new RegExp(`["']${w.human}["']`).test(w.roles[r].brief)) {
       bad.push(
-        `"${r}" is the floor's voice but its brief never tells it to write to "${HUMAN_PARTY}" - work would finish and the human would never hear.`
+        `"${r}" is the floor's voice but its brief never tells it to write to "${w.human}" - work would finish and the human would never hear.`
       )
     }
   }
-  if (rolesWith(w, 'assigns').every((r) => !(w.talksTo[r] ?? []).includes(HIRE_PARTY))) {
+  if (on('can-hire') && rolesWith(w, 'assigns').every((r) => !(w.talksTo[r] ?? []).includes(w.hire))) {
     if (rolesWith(w, 'assigns').length > 0) {
       bad.push('No role that assigns may "hire", so an empty floor can never staff itself.')
     }
@@ -254,11 +566,13 @@ export function lint(w: Workflow): string[] {
     }
   }
   // Hiring reaches any hireable role, whoever does the hiring.
-  const hires = rolesWith(w, 'assigns').some((r) => (w.talksTo[r] ?? []).includes(HIRE_PARTY))
+  const hires = rolesWith(w, 'assigns').some((r) => (w.talksTo[r] ?? []).includes(w.hire))
   for (const r of names) {
     if (seen.has(r)) continue
     if (hires && w.roles[r].hireable) continue
-    bad.push(`Nothing routes to "${r}" from "${w.dispatch}" - work can never reach it.`)
+    if (on('reachable')) {
+      bad.push(`Nothing routes to "${r}" from "${w.dispatch}" - work can never reach it.`)
+    }
   }
 
   // A brief that names an address its own role may not use is a briefing the
@@ -267,13 +581,76 @@ export function lint(w: Workflow): string[] {
     const allowed = new Set(w.talksTo[r] ?? [])
     for (const m of w.roles[r].brief.matchAll(/\{\{role\.([\w-]+)\.(?:id|name)\}\}/g)) {
       const target = m[1]
-      if (w.roles[target] && !allowed.has(target) && target !== r) {
+      if (on('brief-obeys-talks-to') && w.roles[target] && !allowed.has(target) && target !== r) {
         bad.push(`"${r}" is briefed to write to "${target}", which talksTo refuses.`)
       }
     }
   }
 
-  if (!(w.reuseBelowPct > 0 && w.reuseBelowPct <= w.hireAbovePct && w.hireAbovePct <= 100)) {
+  // The floor's own vocabulary. A rule naming a word nothing answers to is a
+  // rule that never fires, and a card that never moves is the kind of failure
+  // that looks like an agent ignoring you.
+  const capNames = new Set(w.capabilities.map((c) => c.name))
+  if (on('unique-keys')) {
+    for (const c of w.capabilities) {
+      if (w.capabilities.filter((o) => o.name === c.name).length > 1) {
+        bad.push(`"${c.name}" is declared twice under capabilities.`)
+      }
+    }
+  }
+  // A role's `can` names words this floor declared. The markdown parser refuses
+  // an unknown one on the spot; a workflow that arrived as JSON has never been
+  // past that, and the two have to agree on what is legal.
+  if (on('names-exist')) {
+    for (const r of names) {
+      for (const c of w.roles[r].can) {
+        if (!capNames.has(c)) {
+          bad.push(`"${r}" can "${c}", which this floor never declared as a capability.`)
+        }
+      }
+    }
+  }
+
+  const CROWDS = new Set(['anyone', 'staff'])
+  const answersTo = (word: string): boolean =>
+    CROWDS.has(word) ||
+    Boolean(w.roles[word]) ||
+    capNames.has(word) ||
+    (CAPABILITY_KINDS as readonly string[]).includes(word)
+  for (const rule of on('names-exist') ? w.cardRules : []) {
+    if (!answersTo(rule.from)) {
+      bad.push(`No role, capability or crowd answers to "${rule.from}", so "${rule.from} → ${rule.to}" never fires.`)
+    }
+    if (rule.to !== w.human && !answersTo(rule.to)) {
+      bad.push(`No role, capability or crowd answers to "${rule.to}", so "${rule.from} → ${rule.to}" never fires.`)
+    }
+  }
+  if (on('must-open') && !w.cardRules.some((r) => r.status === 'open')) {
+    bad.push('No card rule opens a card, so nothing this floor does will ever reach the board.')
+  }
+
+  if (on('must-finish') && w.columns.length === 0) bad.push('A board needs at least one column.')
+  for (const c of w.columns) {
+    if (on('unique-keys') && w.columns.filter((o) => o.key === c.key).length > 1) {
+      bad.push(`Two columns share the key "${c.key}" - a card can only be in one of them.`)
+    }
+    if (!c.key.trim()) bad.push('A column with no key cannot hold a card.')
+  }
+  // "The card an agent is on" is "its newest that is not finished", so a board
+  // with nothing marked done has every card read as live work forever - and the
+  // agent never gets another one, because it already has one open.
+  if (on('must-finish') && w.columns.length > 0 && !hasColumn(w, 'done') && !w.columns.some((c) => c.key === 'done')) {
+    bad.push('No column is marked (done), so nothing on this board can ever be finished.')
+  }
+
+  if (on('addresses-are-not-roles')) {
+    if (w.human === w.hire) bad.push('The human and hiring cannot share one address.')
+    for (const address of [w.human, w.hire]) {
+      if (w.roles[address]) bad.push(`"${address}" is both a role and a reserved address.`)
+    }
+  }
+
+  if (on('thresholds-ordered') && !(w.reuseBelowPct > 0 && w.reuseBelowPct <= w.hireAbovePct && w.hireAbovePct <= 100)) {
     bad.push('Context thresholds must satisfy 0 < reuseBelowPct <= hireAbovePct <= 100.')
   }
 
@@ -281,7 +658,8 @@ export function lint(w: Workflow): string[] {
   // ordinary prose once they are three screens up: `<what this one does>` would
   // be handed to a real agent as its standing instruction, and it would follow
   // it. Named here rather than left to be noticed.
-  const blank = (text: string): string | null => BLANK.exec(text)?.[0] ?? null
+  const blank = (text: string): string | null =>
+    on('no-blanks') ? (BLANK.exec(text)?.[0] ?? null) : null
   if (blank(w.name)) bad.push(`The workflow still has "${blank(w.name)}" for its name.`)
   if (blank(w.description)) {
     bad.push(`The description still has "${blank(w.description)}" in it.`)
@@ -289,6 +667,8 @@ export function lint(w: Workflow): string[] {
   for (const r of names) {
     const inBrief = blank(w.roles[r].brief)
     if (inBrief) bad.push(`"${r}" still has "${inBrief}" in its brief - that is what it is told.`)
+    const inDoes = w.roles[r].does && blank(w.roles[r].does as string)
+    if (inDoes) bad.push(`"${r}" still has "${inDoes}" for what it does.`)
     const inFixed = w.roles[r].fixed && blank(`${w.roles[r].fixed?.id} ${w.roles[r].fixed?.name}`)
     if (inFixed) bad.push(`"${r}" still has "${inFixed}" for its agent.`)
   }
@@ -312,10 +692,9 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
     if (!/^[\w-]+$/.test(key)) return { error: `Role name "${key}" must be letters, digits, - or _.` }
     if (!v || typeof v !== 'object') return { error: `Role "${key}" must be an object.` }
     const d = v as Record<string, unknown>
-    const can = Array.isArray(d.can) ? d.can.filter((c): c is Capability => CAPABILITIES.includes(c as Capability)) : []
-    if (Array.isArray(d.can) && can.length !== d.can.length) {
-      return { error: `Role "${key}" has an unknown capability. Known: ${CAPABILITIES.join(', ')}.` }
-    }
+    // Whatever the floor calls its work. Which names exist is checked against
+    // the floor's own `## capabilities` by `lint`, not against a list here.
+    const can = Array.isArray(d.can) ? d.can.filter((c): c is Capability => typeof c === 'string') : []
     if (typeof d.brief !== 'string') return { error: `Role "${key}" needs a "brief" string.` }
     let fixed: RoleDef['fixed']
     if (d.fixed !== undefined) {
@@ -329,6 +708,21 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
       can,
       label: typeof d.label === 'string' && d.label.trim() ? d.label : key,
       brief: d.brief,
+      ...(typeof d.does === 'string' && d.does.trim() ? { does: d.does.trim() } : {}),
+      ...(typeof d.cli === 'string' && d.cli.trim() ? { cli: d.cli.trim() } : {}),
+      ...(typeof d.cwd === 'string' && d.cwd.trim() ? { cwd: d.cwd.trim() } : {}),
+      ...(Array.isArray(d.never) && d.never.every((t) => typeof t === 'string')
+        ? { never: d.never as string[] }
+        : {}),
+      ...(d.attrs && typeof d.attrs === 'object'
+        ? {
+            attrs: Object.fromEntries(
+              Object.entries(d.attrs as Record<string, unknown>).filter(
+                ([, v]) => typeof v === 'string'
+              ) as [string, string][]
+            )
+          }
+        : {}),
       ...(fixed ? { fixed } : {}),
       ...(d.hireable === true ? { hireable: true } : {})
     }
@@ -345,11 +739,38 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
   const pct = (v: unknown, fallback: number): number =>
     typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : fallback
 
+  const caps = Array.isArray(o.capabilities)
+    ? (o.capabilities as CapabilityDef[]).filter((c) => c && typeof c.name === 'string')
+    : []
+  const cols = Array.isArray(o.columns)
+    ? (o.columns as Column[]).filter((c) => c && typeof c.key === 'string' && c.key.trim())
+    : []
+  const rules = Array.isArray(o.cardRules)
+    ? (o.cardRules as CardRule[]).filter(
+        (r) => r && typeof r.from === 'string' && typeof r.to === 'string' && typeof r.status === 'string'
+      )
+    : []
+
   const workflow: Workflow = {
     name: o.name.trim(),
     description: typeof o.description === 'string' ? o.description : '',
     roles,
     talksTo,
+    capabilities: caps,
+    columns: cols,
+    cardRules: rules,
+    words:
+      o.words && typeof o.words === 'object'
+        ? Object.fromEntries(
+            Object.entries(o.words as Record<string, unknown>).filter(
+              ([, v]) => typeof v === 'string'
+            ) as [string, string][]
+          )
+        : {},
+    human: typeof o.human === 'string' && o.human.trim() ? o.human.trim() : HUMAN_PARTY,
+    hire: typeof o.hire === 'string' && o.hire.trim() ? o.hire.trim() : HIRE_PARTY,
+    ...(typeof o.voice === 'string' && o.voice.trim() ? { voice: o.voice.trim() } : {}),
+    ...(typeof o.hires === 'string' && o.hires.trim() ? { hires: o.hires.trim() } : {}),
     dispatch: typeof o.dispatch === 'string' ? o.dispatch : Object.keys(roles)[0] ?? '',
     entry: typeof o.entry === 'string' ? o.entry : typeof o.dispatch === 'string' ? o.dispatch : '',
     reuseBelowPct: pct(o.reuseBelowPct, 50),
@@ -367,7 +788,7 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
  * part somebody customising a floor actually has to write, and it was the part
  * the format made hardest.
  *
- * The shape:
+ * The cast comes first, then the briefs:
  *
  * ```markdown
  * # my-floor
@@ -376,17 +797,28 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
  * - reuse below: 50
  * - hire above: 70
  *
- * ## boss
+ * ## roles
+ *
+ * ### boss · the boss
  * - agent: michael · Michael
  * - can: speaksToHuman
+ * - does: takes what you dispatch, hands it to the lead, and reports back to you
  * - talks to: lead, you
  * - dispatch
  *
+ * ## briefs
+ *
+ * ### boss
  * You are {{self.name}}, and you stand in for the person running this floor.
  * ...the rest of the brief, as many paragraphs as it needs...
  * ```
  *
- * Everything after the bullet list, up to the next `##`, is that role's brief.
+ * Roles before prose, because that order is what makes the file readable: the
+ * first thing a person needs from a workflow is who is on this floor and what
+ * each of them is for, and that answer used to be four definitions buried under
+ * four pages of instructions. The original single-section form - `## role` with
+ * its bullets and then its brief - is still read, so nothing saved before this
+ * stopped opening.
  */
 export function parseMarkdown(text: string): { workflow: Workflow } | { error: string } {
   // HTML comments come out first. The starter template teaches the format by
@@ -394,6 +826,11 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
   // the brief of whichever role it sat under - and handed to a real agent.
   const lines = text
     .replace(/\r\n?/g, '\n')
+    // A comment on a line of its own takes the line with it. Left behind as a
+    // blank it ended the bullet block early, and every bullet under it - `-
+    // dispatch` among them - was read as the first line of the brief. The file
+    // parsed; the workflow it described was not the one on screen.
+    .replace(/^[ \t]*<!--[\s\S]*?-->[ \t]*\n/gm, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .split('\n')
 
@@ -401,14 +838,19 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
   if (title === -1) return { error: 'Start with `# <workflow name>` on its own line.' }
   const name = lines[title].replace(/^#\s+/, '').trim()
 
-  // Where each role starts. Everything before the first one is the header.
-  const heads: number[] = []
+  // Both heading levels, because which one names a role depends on the form:
+  // `## roles` / `### <role>` in the two-part shape, `## <role>` in the old one.
+  type Head = { at: number; level: number; text: string }
+  const heads: Head[] = []
   lines.forEach((l, i) => {
-    if (/^##\s+\S/.test(l)) heads.push(i)
+    const m = /^(#{2,3})\s+(\S.*)$/.exec(l)
+    if (m) heads.push({ at: i, level: m[1].length, text: m[2].trim() })
   })
-  if (heads.length === 0) return { error: 'Add at least one role, as `## <role name>`.' }
+  if (heads.length === 0) {
+    return { error: 'Add at least one role, as `### <role name>` under `## roles`.' }
+  }
 
-  const header = lines.slice(title + 1, heads[0])
+  const header = lines.slice(title + 1, heads[0].at)
   const description = header.find((l) => l.trim() && !l.trim().startsWith('-'))?.trim() ?? ''
 
   /** `- key: value` out of a block of lines, case- and spacing-insensitive. */
@@ -433,17 +875,204 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     return Number.isFinite(n) ? Math.round(n) : fallback
   }
 
+  const list = (v: string | null): string[] =>
+    (v ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean)
+
+  // `### boss · the boss` - the part after the separator is the label used in
+  // refusals ("the boss does not write to a tester").
+  const nameOfHead = (head: string): string => head.split(/\s+[·|]\s+/)[0].trim()
+
+  const ROLES_SECTION = /^roles?\b/i
+  const BRIEFS_SECTION = /^briefs?\b/i
+  // Sections that describe the floor rather than the people on it. Named here
+  // so neither form mistakes one for a role called "board".
+  const CAPS_SECTION = /^capabilit(y|ies)\b/i
+  const WORDS_SECTION = /^words?\b/i
+  const BOARD_SECTION = /^(board|columns?)\b/i
+  const RULES_SECTION = /^card[\s-]*rules?\b/i
+  const aside = (t: string): boolean =>
+    CAPS_SECTION.test(t) || BOARD_SECTION.test(t) || RULES_SECTION.test(t) || WORDS_SECTION.test(t)
+  const twoPart = heads.some((h) => h.level === 2 && ROLES_SECTION.test(h.text))
+
+  /** The bullet lines under a top-level section, by which section it is. */
+  const asides: Record<string, string[]> = {}
+  heads.forEach((h, k) => {
+    if (h.level !== 2 || !aside(h.text)) return
+    const body = lines.slice(h.at + 1, heads[k + 1]?.at ?? lines.length)
+    const key = CAPS_SECTION.test(h.text)
+      ? 'caps'
+      : BOARD_SECTION.test(h.text)
+        ? 'board'
+        : WORDS_SECTION.test(h.text)
+          ? 'words'
+          : 'rules'
+    asides[key] = [...(asides[key] ?? []), ...body]
+  })
+
+  /** One role's heading and everything under it, in either form. */
+  const blocks: { head: string; body: string[] }[] = []
+  /** Briefs written apart from the definitions, by role name. */
+  const briefs: Record<string, string> = {}
+
+  if (!twoPart) {
+    const tops = heads.filter((h) => h.level === 2 && !aside(h.text))
+    tops.forEach((h, k) =>
+      blocks.push({ head: h.text, body: lines.slice(h.at + 1, tops[k + 1]?.at ?? lines.length) })
+    )
+  } else {
+    // The cast first, so the second pass knows which `###` names a role.
+    let section = ''
+    heads.forEach((h, k) => {
+      if (h.level === 2) {
+        section = ROLES_SECTION.test(h.text) ? 'roles' : BRIEFS_SECTION.test(h.text) ? 'briefs' : ''
+        return
+      }
+      if (section === 'roles') {
+        blocks.push({ head: h.text, body: lines.slice(h.at + 1, heads[k + 1]?.at ?? lines.length) })
+      }
+    })
+
+    const named = new Set(blocks.map((b) => nameOfHead(b.head)))
+    let current = ''
+    let from = 0
+    const keep = (end: number): void => {
+      if (!current) return
+      const text = lines.slice(from, end).join('\n').trim()
+      briefs[current] = briefs[current] ? `${briefs[current]}\n\n${text}` : text
+      current = ''
+    }
+    section = ''
+    for (const h of heads) {
+      if (h.level === 2) {
+        keep(h.at)
+        section = ROLES_SECTION.test(h.text) ? 'roles' : BRIEFS_SECTION.test(h.text) ? 'briefs' : ''
+        continue
+      }
+      if (section !== 'briefs') continue
+      // A `###` inside a brief that is not one of the role names is part of
+      // that brief: briefs are prose, and prose is allowed its own headings.
+      const key = nameOfHead(h.text)
+      if (!named.has(key)) continue
+      keep(h.at)
+      current = key
+      from = h.at + 1
+    }
+    keep(lines.length)
+  }
+
+  if (blocks.length === 0) {
+    return { error: 'No roles found. Define them as `### <role name>` under `## roles`.' }
+  }
+
+  // `- drafts (builds) — writes the first version`. The kind in brackets is what
+  // the floor does with it; without one, the name has to be a kind itself.
+  const CAP_LINE = /^\s*[-*]\s*([\w-]+)\s*(?:\(([\w]+)\))?\s*(?:[—–·:-]+\s*(.*))?$/
+  const capabilities: CapabilityDef[] = []
+  for (const line of asides.caps ?? []) {
+    const m = CAP_LINE.exec(line)
+    if (!m) continue
+    // A bracket used to say which of four things the app should treat it as.
+    // Nothing reads that now - the card rules and `talks to` already say it -
+    // so anything in brackets is ignored rather than refused: a floor written
+    // last week still opens.
+    capabilities.push({ name: m[1], what: (m[3] ?? '').trim() })
+  }
+
+  // `- in_review: In review #c9a2e8 (waiting)`. The key is this board's own -
+  // it is what a card is stored under - and the kind in brackets is what the
+  // floor uses the column for when nobody sent a message.
+  const COL_LINE =
+    /^\s*[-*]\s*([\w-]+)\s*[:·—–]\s*([^#(]*?)\s*(#[0-9a-fA-F]{3,8})?\s*(?:\(([\w]+)\))?\s*$/
+  const written: Column[] = []
+  for (const line of asides.board ?? []) {
+    const m = COL_LINE.exec(line)
+    if (!m) continue
+    const kind = m[4] as ColumnKind | undefined
+    if (kind && !(COLUMN_KINDS as readonly string[]).includes(kind)) {
+      return { error: `Column "${m[1]}" is for "${kind}", which is not one of: ${COLUMN_KINDS.join(', ')}.` }
+    }
+    // A column called `todo` or `done` gets its job without being told, because
+    // that is what those words mean and every board written before this used
+    // them. Anything else says what it is for or is just a column.
+    const fallback = KNOWN_COLUMNS.find((c) => c.key === m[1])
+    written.push({
+      key: m[1],
+      label: m[2].trim() || fallback?.label || m[1],
+      bar: m[3] ?? fallback?.bar ?? '#7fc7e8',
+      // A column that says nothing about its job still has one when its key is
+      // a name Bullpen already knows - which is what keeps `- doing: drafting`
+      // meaning the column work starts in.
+      ...(kind ? { kind } : fallback?.kind ? { kind: fallback.kind } : {})
+    })
+  }
+  // What the file says, and nothing else. A floor used to be handed four
+  // capabilities, five columns and eight card rules it never asked for, which
+  // made "what does this floor do" a question you could not answer by reading
+  // it - half the answer was in the source.
+  const columns: Column[] = written
+
+  /** A column by its key or by whatever this floor calls it. */
+  const columnKey = (word: string): string | null => {
+    const flat = word.trim().toLowerCase().replace(/[\s-]+/g, '_')
+    const hit = columns.find(
+      (c) => c.key === flat || c.label.toLowerCase().replace(/[\s-]+/g, '_') === flat
+    )
+    return hit?.key ?? null
+  }
+
+  // `- drafts → assigns: in review`, and the two that are not columns:
+  // `opens a card`, and `closes it` - which finishes the work being checked too.
+  // `:` only. `·` already means something on this line - it separates what
+  // happens from when it happens - and taking it as the first separator too
+  // read "when: ..." as the status.
+  const RULE_LINE = /^\s*[-*]\s*(.+?)\s*(?:→|->|=>)\s*(.+?)\s*:\s*(.+?)\s*$/
+  const cardRules: CardRule[] = []
+  for (const line of asides.rules ?? []) {
+    const m = RULE_LINE.exec(line)
+    if (!m) continue
+    // "doing (their card) · when they send it back" - the bracket says whose
+    // card moves, and anything after the dot is why the rule is there.
+    const [saidPart, ...whenParts] = m[3].split('·')
+    const when = whenParts.join('·').replace(/^\s*when\s+/i, '').trim()
+    const said = saidPart.trim().toLowerCase()
+    const theirs = /\((their card|theirs)\)\s*$/i.test(said)
+    const words = saidPart.replace(/\((their card|theirs)\)\s*$/i, '').trim()
+    const status = /^opens?\b/.test(said) ? 'open' : /^closes?\b/.test(said) ? 'closes' : columnKey(words)
+    if (!status) {
+      return {
+        error: `"${m[3].trim()}" is not a column on this board, and not "opens a card" or "closes it".`
+      }
+    }
+    cardRules.push({
+      from: m[1].trim(),
+      to: m[2].trim(),
+      status,
+      ...(theirs ? { whose: 'to' as const } : {}),
+      ...(when ? { when } : {})
+    })
+  }
+
+  // `- {{team}} — Falcon`. The braces are optional in the file; what reaches
+  // `renderBrief` is the bare name, because that is what it substitutes.
+  const WORD_LINE = /^\s*[-*]\s*\{?\{?([\w.-]+)\}?\}?\s*[—–:-]+\s*(.*)$/
+  const words: Record<string, string> = {}
+  for (const line of asides.words ?? []) {
+    const m = WORD_LINE.exec(line)
+    if (m) words[m[1]] = m[2].trim()
+  }
+
+  const declared = capabilities
+  const known = new Set<string>([...declared.map((c) => c.name), ...CAPABILITY_KINDS])
+
   const roles: Record<string, RoleDef> = {}
   const talksTo: Record<string, string[]> = {}
   let dispatch = ''
   let entry = ''
 
-  for (let i = 0; i < heads.length; i++) {
-    const from = heads[i]
-    const to = heads[i + 1] ?? lines.length
-    const head = lines[from].replace(/^##\s+/, '').trim()
-    // `## boss · the boss` - the part after the separator is the label used in
-    // refusals ("the boss does not write to a tester").
+  for (const { head, body } of blocks) {
     const [rawRole, rawLabel] = head.split(/\s+[·|]\s+/)
     const role = rawRole.trim()
     if (!/^[\w-]+$/.test(role)) {
@@ -451,15 +1080,14 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     }
     if (roles[role]) return { error: `"${role}" appears twice.` }
 
-    // The bullet list is however many bullets follow the heading; the brief is
-    // everything after them.
+    // The bullet list is however many bullets follow the heading; anything
+    // after them is brief, whether it was written here or under `## briefs`.
     //
     // The config block is the run of bullets directly under the heading, and it
     // ends at the first blank line after them. Ending it only at the first
     // non-bullet swallowed a brief that opened with a list - "- report when you
     // are done" read as a role field, vanished from the brief, and the agent was
     // never told. Nothing errored; the instruction was simply gone.
-    const body = lines.slice(from + 1, to)
     let end = 0
     for (let j = 0; j < body.length; j++) {
       if (/^\s*[-*]\s+\S/.test(body[j])) {
@@ -474,18 +1102,14 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
       break
     }
     const block = body.slice(0, end)
-    const brief = body.slice(end).join('\n').trim()
-
-    const list = (v: string | null): string[] =>
-      (v ?? '')
-        .split(',')
-        .map((x) => x.trim())
-        .filter(Boolean)
+    const brief = [body.slice(end).join('\n').trim(), briefs[role] ?? ''].filter(Boolean).join('\n\n')
 
     const caps = list(field(block, 'can'))
-    const bad = caps.find((c) => !CAPABILITIES.includes(c as Capability))
+    const bad = caps.find((c) => !known.has(c))
     if (bad) {
-      return { error: `"${role}" has an unknown capability "${bad}". Known: ${CAPABILITIES.join(', ')}.` }
+      return {
+        error: `"${role}" has an unknown capability "${bad}". This floor has: ${[...known].join(', ')}.`
+      }
     }
 
     let fixed: RoleDef['fixed']
@@ -499,10 +1123,29 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
       fixed = { id: cleanId, name: (display ?? '').replace(/\)\s*$/, '').trim() || cleanId }
     }
 
+    const does = field(block, 'does')
+    const cli = field(block, 'cli')
+    const where = field(block, 'cwd')
+    const never = list(field(block, 'never'))
+
+    // Everything else on the bullet list is this floor's own word for this
+    // role. Read rather than refused, because the alternative is a format that
+    // can only ever say what Bullpen thought of first.
+    const OWN = new Set(['agent', 'can', 'does', 'talks to', 'talksto', 'cli', 'cwd', 'never'])
+    const attrs: Record<string, string> = {}
+    for (const line of block) {
+      const m = /^\s*[-*]\s*([^:]+?)\s*:\s*(.+)$/.exec(line)
+      if (m && !OWN.has(m[1].trim().toLowerCase())) attrs[m[1].trim()] = m[2].trim()
+    }
     roles[role] = {
       can: caps as Capability[],
       label: (rawLabel ?? '').trim() || role,
       brief,
+      ...(does ? { does } : {}),
+      ...(Object.keys(attrs).length ? { attrs } : {}),
+      ...(cli ? { cli } : {}),
+      ...(where ? { cwd: where } : {}),
+      ...(never.length ? { never } : {}),
       ...(fixed ? { fixed } : {}),
       ...(flag(block, 'hireable') ? { hireable: true } : {})
     }
@@ -510,6 +1153,14 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     if (flag(block, 'dispatch')) dispatch = role
     if (flag(block, 'entry')) entry = role
   }
+
+  // Said at the top instead: `- dispatch: boss`. Both forms mean the same
+  // thing, and refusing the header one was refusing a file over where a fact
+  // was written rather than what it said - which is what most people, and
+  // every model asked to write one of these, reach for first.
+  const said = (key: string): string => (field(header, key) ?? '').trim()
+  if (!dispatch && roles[said('dispatch')]) dispatch = said('dispatch')
+  if (!entry && roles[said('entry')]) entry = said('entry')
 
   if (!dispatch) {
     return { error: 'No role is marked `- dispatch`. That is who a task typed at the floor goes to.' }
@@ -524,28 +1175,119 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
       dispatch,
       entry: entry || dispatch,
       reuseBelowPct: num(field(header, 'reuse below'), 50),
-      hireAbovePct: num(field(header, 'hire above'), 70)
+      hireAbovePct: num(field(header, 'hire above'), 70),
+      capabilities: declared,
+      columns,
+      cardRules,
+      words,
+      human: field(header, 'human address')?.trim() || HUMAN_PARTY,
+      hire: field(header, 'hire address')?.trim() || HIRE_PARTY,
+      ...(field(header, 'reports to you') ? { voice: field(header, 'reports to you')!.trim() } : {}),
+      ...(field(header, 'hires') ? { hires: field(header, 'hires')!.trim() } : {})
     }
   }
 }
 
-/** The same workflow, written back out. Round-trips through `parseMarkdown`. */
+/**
+ * The same workflow, written back out. Round-trips through `parseMarkdown`.
+ *
+ * Always in the two-part form, whichever form it was read from: the editor
+ * shows what this returns, so opening an old workflow is also how it gets
+ * rewritten into the shape that can be read at a glance.
+ */
 export function toMarkdown(w: Workflow): string {
   const out: string[] = [`# ${w.name}`]
   if (w.description) out.push('', w.description)
   out.push('', `- reuse below: ${w.reuseBelowPct}`, `- hire above: ${w.hireAbovePct}`)
+  if (w.human !== HUMAN_PARTY) out.push(`- human address: ${w.human}`)
+  if (w.hire !== HIRE_PARTY) out.push(`- hire address: ${w.hire}`)
+  if (w.voice) out.push(`- reports to you: ${w.voice}`)
+  if (w.hires) out.push(`- hires: ${w.hires}`)
 
+  // Capabilities first: a role's `- can:` line names them, and reading
+  // `can: drafts` before anything says what drafting is is reading backwards.
+  out.push('', '## capabilities')
+  for (const c of w.capabilities) out.push(`- ${c.name}${c.what ? ` — ${c.what}` : ''}`)
+
+  out.push('', '## roles')
   for (const [role, def] of Object.entries(w.roles)) {
-    out.push('', `## ${role}${def.label && def.label !== role ? ` · ${def.label}` : ''}`)
+    out.push('', `### ${role}${def.label && def.label !== role ? ` · ${def.label}` : ''}`)
     if (def.fixed) out.push(`- agent: ${def.fixed.id} · ${def.fixed.name}`)
     out.push(`- can: ${def.can.join(', ')}`)
+    if (def.does) out.push(`- does: ${def.does}`)
+    if (def.cli) out.push(`- cli: ${def.cli}`)
+    if (def.cwd) out.push(`- cwd: ${def.cwd}`)
+    if (def.never?.length) out.push(`- never: ${def.never.join(', ')}`)
+    for (const [key, value] of Object.entries(def.attrs ?? {})) out.push(`- ${key}: ${value}`)
     out.push(`- talks to: ${(w.talksTo[role] ?? []).join(', ')}`)
     if (def.hireable) out.push('- hireable')
     if (role === w.dispatch) out.push('- dispatch')
     if (role === w.entry) out.push('- entry')
-    out.push('', def.brief)
+  }
+
+  if (Object.keys(w.words).length) {
+    out.push('', '## words')
+    for (const [name, stands] of Object.entries(w.words)) out.push(`- {{${name}}} — ${stands}`)
+  }
+
+  out.push('', '## board')
+  for (const c of w.columns) {
+    out.push(`- ${c.key}: ${c.label} ${c.bar}${c.kind ? ` (${c.kind})` : ''}`)
+  }
+
+  out.push('', '## card rules')
+  for (const r of w.cardRules) {
+    const said =
+      r.status === 'open'
+        ? 'opens a card'
+        : r.status === 'closes'
+          ? 'closes it'
+          : (w.columns.find((c) => c.key === r.status)?.label ?? r.status)
+    const whose = r.whose === 'to' ? ' (their card)' : ''
+    const when = r.when ? ` · when ${r.when}` : ''
+    out.push(`- ${r.from} → ${r.to}: ${said}${whose}${when}`)
+  }
+
+  out.push('', '## briefs')
+  for (const [role, def] of Object.entries(w.roles)) {
+    out.push('', `### ${role}`, '', def.brief)
   }
   return out.join('\n') + '\n'
+}
+
+/**
+ * The rules, as the operator may have replaced them.
+ *
+ * Bullpen ships one - `rules.md`, bundled - and it is what the linter enforces,
+ * what the settings dialog draws, and what the model that writes workflows is
+ * briefed with. A floor with its own conventions has its own rules, and editing
+ * them should not mean editing the source: `~/.bullpen/rules.md` takes over.
+ *
+ * Read on every call rather than cached, so an edit takes effect on the next
+ * open instead of the next launch. It costs one small read of a file nobody
+ * touches, at the two moments somebody asked to see or use it.
+ *
+ * Not seeded on first run. A copy written at install freezes at the version it
+ * was installed at, and every later improvement to the shipped document stops
+ * reaching the person who accepted the copy - the file is there when somebody
+ * decides to write one, and absent until then.
+ */
+export const formatPath = (home: string): string => join(home, 'rules.md')
+
+export function formatDoc(
+  home: string,
+  shipped: string
+): { text: string; path: string; custom: boolean } {
+  const path = formatPath(home)
+  try {
+    const text = readFileSync(path, 'utf8')
+    // An empty file is a truncated save, not an instruction to describe the
+    // format as nothing: the writer would be briefed on a blank page.
+    if (text.trim()) return { text, path, custom: true }
+  } catch {
+    // Absent or unreadable - the shipped document is the answer either way.
+  }
+  return { text: shipped, path, custom: false }
 }
 
 /**
@@ -605,11 +1347,33 @@ export function listWorkflows(home: string): SavedWorkflow[] {
 }
 
 /** Write one, atomically. Returns what was parsed out of it. */
+/**
+ * Whether a floor has a place for an agent that is already running.
+ *
+ * Asked when one floor replaces another. A role that is gone takes its agents
+ * with it; a role that is still there keeps whoever is doing it, unless the new
+ * floor names somebody else for it and this one was standing in that spot.
+ */
+export function hasPlaceFor(
+  w: Workflow,
+  agent: { id: string; role: string; standing: boolean }
+): boolean {
+  const def = w.roles[agent.role]
+  if (!def) return false
+  const named = def.fixed?.id
+  if (!named || named === agent.id) return true
+  // Somebody else is named for this role. A hired agent doing that job is still
+  // doing it; the one that was standing in the named spot has been replaced.
+  return !agent.standing
+}
+
 export function saveWorkflow(home: string, markdown: string): Workflow {
   const parsed = parseMarkdown(markdown)
   if ('error' in parsed) throw new Error(parsed.error)
-  const problems = lint(parsed.workflow)
-  if (problems.length) throw new Error(problems.join('\n'))
+  // Parse errors only. This used to lint with every law switched on, which was
+  // fine while laws were built in and is not now: no floor ships with card
+  // rules, so every one of them failed a check nobody had asked for and could
+  // not be written to disk at all.
   const dir = workflowDir(home)
   mkdirSync(dir, { recursive: true })
   const path = workflowFile(home, parsed.workflow.name)
@@ -626,6 +1390,3 @@ export function deleteWorkflow(home: string, name: string): void {
   const path = workflowFile(home, name)
   if (existsSync(path)) rmSync(path)
 }
-
-/** Built from the shared spec, so the dialog and the writer never disagree. */
-export const GENERATOR_BRIEF = generatorBrief()

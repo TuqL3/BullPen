@@ -159,7 +159,7 @@ export const SHARED: Group = {
     {
       cmd: 'Write $BULLPEN_MAILBOX/outbox/hire.json',
       desc: 'Ask for another pair of hands: "to": "hire", subject is the project, body is the briefing.',
-      eg: '{"from":"michael","to":"hire","subject":"seo","body":"add the sitemap route"}'
+      eg: '{"from":"<you>","to":"hire","subject":"seo","body":"add the sitemap route"}'
     },
     { cmd: 'cat $BULLPEN_FLOOR', desc: 'Who is on the floor: id, project, idle or working, context used.' },
     {

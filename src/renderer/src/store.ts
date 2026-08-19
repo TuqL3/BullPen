@@ -1,21 +1,23 @@
 import { create } from 'zustand'
+// Explicit extension: the node test runner loads this file directly, and
+// bundler-style extensionless resolution is Vite's, not node's.
+import { buildRole, isCore } from './shape.ts'
 
 export type Agent = {
   id: string
   /**
-   * What this agent is for.
+   * What this agent is for: a role name out of the running workflow.
    *
-   * The god agent is the operator's own clone: one per floor, pinned above the
-   * projects. It is what dispatch routes through, what sits at the centre of
-   * the graph, and what the activity log means by "god". The analyst sits
-   * beside it, above the projects too: she is who work is handed to, and every
-   * dev and tester below is hired by her.
+   * The roles with a fixed agent are the floor itself - pinned above the
+   * projects, never fired - and the rest are staff hired onto a project. Which
+   * is which is the workflow's answer, read through `shape.ts`; nothing in the
+   * UI knows a role by name.
    *
    * 'worker' is what everyone below used to be, kept so an agent made by the
    * wizard before roles existed still loads as somebody who builds.
    */
   role: string
-  /** Which project this agent belongs to. God agents belong to none. */
+  /** Which project this agent belongs to. The floor's own agents belong to none. */
   project: string
   /** What the human typed in the wizard; `id` is its slug. */
   name: string
@@ -34,7 +36,7 @@ export type Agent = {
   /**
    * What it was last asked to do, in the words it was asked in.
    *
-   * Its hiring brief, or the last message Michael sent it. The monitor answers
+   * Its hiring brief, or the last message it was sent. The monitor answers
    * "what is everyone doing" with a tool call, which says what an agent is
    * touching this second and nothing about what it was sent for.
    */
@@ -61,18 +63,6 @@ export type Agent = {
   exitCode?: number
 }
 
-/**
- * The roles that cannot be fired: they have a fixed agent and no re-hire path.
- *
- * Set from the running workflow at startup rather than written here - somebody
- * else's floor does not have a "god" and a "ba" on it. The default is the
- * default workflow's, so a floor that never sets one is still protected.
- */
-let coreRoles: ReadonlySet<string> = new Set(['god', 'ba'])
-export const setCoreRoles = (roles: string[]): void => {
-  coreRoles = new Set(roles)
-}
-export const isCore = (role: string): boolean => coreRoles.has(role)
 
 export type Approval = {
   id: string
@@ -125,7 +115,8 @@ export const useStore = create<State>((set, get) => ({
       const i = s.agents.findIndex((x) => x.id === a.id)
       if (i === -1) {
         const fresh: Agent = {
-          role: 'dev',
+          // Whoever builds on this floor, rather than a name from one workflow.
+          role: buildRole(),
           project: '',
           name: a.id,
           cwd: '',
@@ -150,10 +141,9 @@ export const useStore = create<State>((set, get) => ({
    */
   removeAgent: (id) =>
     set((s) => {
-      // Michael and the analyst are the floor, not staff on it: dispatch routes
-      // through him, every hire below reports to her, and nothing in the UI
-      // brings either one back. Enforced here rather than only in the row that
-      // hides the button, so no later caller can route around it.
+      // A role with a fixed agent is the floor, not staff on it: the app spawns
+      // it and nothing in the UI brings it back. Enforced here rather than only
+      // in the row that hides the button, so no later caller routes around it.
       if (isCore(s.agents.find((a) => a.id === id)?.role ?? '')) return s
       const agents = s.agents.filter((a) => a.id !== id)
       return {

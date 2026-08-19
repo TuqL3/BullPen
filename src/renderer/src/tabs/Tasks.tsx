@@ -4,19 +4,11 @@ import { ago } from '../fleet'
 import { LABEL, MONO } from '../theme'
 import type { ActivityItem } from '../../../preload/index'
 import type { Agent } from '../store'
+import { columns as boardColumns } from '../shape'
 
-type Status = 'todo' | 'doing' | 'wait_test' | 'blocked' | 'done'
+/** A column key. Which keys exist is the workflow's answer, not this file's. */
+type Status = string
 type Task = { id: string; agentId: string; text: string; status: Status; createdAt: number }
-
-const COLUMNS: { key: Status; label: string; bar: string }[] = [
-  { key: 'todo', label: 'todo', bar: '#7fc7e8' },
-  { key: 'doing', label: 'doing', bar: '#e8cf6a' },
-  // Built, and nobody but the developer has said so. A card lands here on its
-  // own when the developer reports, and leaves it only when a tester passes it.
-  { key: 'wait_test', label: 'wait to test', bar: '#c9a2e8' },
-  { key: 'blocked', label: 'blocked', bar: '#e8917f' },
-  { key: 'done', label: 'done', bar: '#7fd8a0' }
-]
 
 /**
  * One agent's board: the cards belonging to whoever is selected.
@@ -35,6 +27,11 @@ export function Tasks({
   /** The workflow's dispatch role - the only one whose work is not a board. */
   dispatch: string
 }) {
+  // The columns, their names and their colours are the workflow's: a floor of
+  // writers has a card in "in review", not in "wait to test", and one where
+  // nobody checks has no such column at all.
+  const columns = boardColumns()
+
   // Dispatch relays: what reaches it goes straight back out, and every one of
   // those is done the moment it is done - a board of them would be four columns
   // with everything in the last one.
@@ -95,9 +92,19 @@ export function Tasks({
         </span>
       </div>
 
-      <div style={S.board}>
-        {COLUMNS.map((col) => {
-          const cards = tasks.filter((t) => t.status === col.key)
+      {/* A floor where nobody checks work never parks a card in wait-to-test -
+          `routeCard` closes it on the builder's word - so the column would sit
+          empty forever, describing a step this workflow does not have. */}
+      <div style={{ ...S.board, gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}>
+        {columns.map((col, i) => {
+          // A card in a column this workflow no longer has - the board was
+          // written under a different one, or the column was renamed - is shown
+          // in the first column rather than dropped. A card nobody can see is
+          // worse than a card in the wrong place.
+          const known = new Set(columns.map((c) => c.key))
+          const cards = tasks.filter(
+            (t) => t.status === col.key || (i === 0 && !known.has(t.status))
+          )
           return (
             <div
               key={col.key}
@@ -252,8 +259,8 @@ function Ledger({ agent }: { agent: Agent }) {
       </div>
       <p style={S.note}>
         This is what your clone has done, not a list to work through: what
-        reaches him goes straight back out, and he reports to you. Everyone
-        else on the floor works a board.
+        reaches them goes straight back out, and they are who reports to you.
+        Everyone else on the floor works a board.
       </p>
     </div>
   )
