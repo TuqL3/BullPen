@@ -103,13 +103,16 @@ rather than quietly blank.
 
 ## law
 
-Each line here is a check that runs against every floor. There are none: a floor
-is whatever you drew, and nothing is refused for being half-finished or for not
-looking like the one Bullpen used to ship.
+Each line here is a check that runs against every floor. There are two: a floor
+is otherwise whatever you drew, and nothing else is refused for being
+half-finished or for not looking like the one Bullpen ships.
 
-Add one by writing its id and what it should say - the ids the app knows are
+- `dispatch-hands-off` — the role a task is typed at must be able to write to at least one other role. It decides who does the work; it is not the one who does it.
+- `lines-have-rules` — on a floor that writes its own card rules, every line between two roles must be covered by one, or work handed along it moves nothing and the board says nobody is working.
+
+Add another by writing its id and what it should say - the ids the app knows are
 `names-exist`, `one-voice`, `voice-is-told`, `must-open`, `must-finish`,
-`dispatch-has-agent`, `builds-exist`, `can-hire`, `reachable`,
-`brief-obeys-talks-to`, `thresholds-ordered`, `no-blanks`, `unique-keys`,
-`roles-are-complete` and `addresses-are-not-roles`. An id nothing knows is
-ignored.
+`dispatch-has-agent`, `dispatch-hands-off`, `lines-have-rules`, `builds-exist`,
+`can-hire`, `reachable`, `brief-obeys-talks-to`, `thresholds-ordered`,
+`no-blanks`, `unique-keys`, `roles-are-complete` and `addresses-are-not-roles`. An id nothing
+knows is ignored. Take a line out and that check stops running.

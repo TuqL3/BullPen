@@ -1449,6 +1449,28 @@ function wire(): void {
   approvals.on('pending', (p: Pending) => send('approvals:pending', p))
   approvals.on('resolved', (p: Pending, decision: string) => send('approvals:resolved', p, decision))
 
+  /**
+   * Three answers, which `window.confirm` cannot give.
+   *
+   * Leaving a floor mid-drawing is not a yes/no: the third answer - write it
+   * down first, then go - is the one somebody actually wants, and offering only
+   * "lose them?" made every exit a choice between staying put and throwing work
+   * away. Escape and the window close both come back as `cancel`, so the
+   * accident-prone answer is never the destructive one.
+   */
+  ipcMain.handle('ui:unsaved', async (_e, detail: string) => {
+    if (!win) return 'cancel'
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Save first', 'Leave without saving', 'Stay here'],
+      defaultId: 0,
+      cancelId: 2,
+      message: 'This floor has changes that are not written down.',
+      detail
+    })
+    return (['save', 'discard', 'cancel'] as const)[response] ?? 'cancel'
+  })
+
   // window.prompt does not exist in Electron - it throws. The directory has to
   // come from the native dialog (or be typed into the renderer's own input).
   ipcMain.handle('dialog:pickDir', async () => {
@@ -1662,19 +1684,7 @@ function wire(): void {
    * - they are starting points, and losing them would be losing the only
    * examples of the format.
    */
-  /** Put every shipped floor back on the list. The only way out of §35. */
-  ipcMain.handle('workflow:unhide', () => {
-    const cfg = readConfig(BULLPEN_HOME)
-    writeConfig(BULLPEN_HOME, { ...cfg, ui: { ...cfg.ui, hidden: [] } })
-    return true
-  })
-
-  ipcMain.handle('workflow:list', () => {
-    const hidden = new Set(readConfig(BULLPEN_HOME).ui?.hidden ?? [])
-    // Never the one being run: a list that cannot show what is running is a
-    // list somebody has to guess their way back to.
-    return LIST().filter((w) => w.name === wf.name || !hidden.has(w.name))
-  })
+  ipcMain.handle('workflow:list', () => LIST())
 
   const LIST = (): { name: string; description: string; markdown: string; builtin: boolean }[] => [
     ...PRESETS.map((w) => ({
@@ -1788,15 +1798,41 @@ function wire(): void {
    */
   ipcMain.handle('workflow:rules', (_e, patch: Partial<Workflow>) => {
     try {
-      return { rules: drawnCardRules(patched({ ...patch, cardRules: [] })) }
+      return { rules: drawnCardRules(withWork(patched({ ...patch, cardRules: [] }))) }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }
     }
   })
 
+  /** Whether the floor Bullpen ships refuses to be saved over. */
+  const SHIPPED_IS_READ_ONLY = false
+
+  /**
+   * Write the floor to disk - unless it breaks a law.
+   *
+   * A law is what the rules file says every floor must be, and there is no
+   * reading of "must" where the file is written anyway and the breach reported
+   * underneath it. Half-drawn is fine and stays fine: nothing here is refused
+   * for being unfinished, only for being against a rule somebody wrote down.
+   */
   ipcMain.handle('workflow:save', (_e, text: string) => {
     const parsed = parseMarkdown(text)
     if ('error' in parsed) return { error: parsed.error }
+    // A shipped floor is in the source, not on disk. Saving one wrote a file
+    // beside it under the same name - and the list drops a saved floor that
+    // takes a shipped one's name, so the edit went to disk, vanished from the
+    // list, and the floor it was made on carried on unchanged.
+    //
+    // Off while the redraft is being tried on the shipped floor itself: it is
+    // the only floor there is, and testing "write it" on anything else means
+    // drawing one first. Set it back to true.
+    if (SHIPPED_IS_READ_ONLY && PRESETS.some((p) => p.name === parsed.workflow.name)) {
+      return {
+        error: `"${parsed.workflow.name}" is the floor Bullpen ships and is not yours to write over. Give it another name in the file and it is yours to keep.`
+      }
+    }
+    const problems = lint(parsed.workflow, rulebook())
+    if (problems.length) return { error: problems[0], problems }
     try {
       saveWorkflow(BULLPEN_HOME, text)
     } catch (err) {
@@ -1805,7 +1841,7 @@ function wire(): void {
     return {
       workflow: parsed.workflow,
       markdown: toMarkdown(parsed.workflow),
-      problems: lint(parsed.workflow, rulebook())
+      problems: []
     }
   })
 
@@ -1891,32 +1927,158 @@ function wire(): void {
     })
   }
 
+  const ask = (prompt: string): Promise<string> =>
+    new Promise((done, fail) => {
+      // No shell, argv only: the description is the operator's own text and
+      // must never reach a command line as anything but one argument.
+      const child = execFile(
+        'claude',
+        ['-p', prompt],
+        // Measured, not guessed: a real generation of a four-role floor took
+        // over two minutes, and the repair round is a second turn on top.
+        { cwd: currentGodCwd(), maxBuffer: 4_000_000, timeout: 420_000 },
+        (err, stdout) => (err && !stdout.trim() ? fail(err) : done(stdout))
+      )
+      child.stdin?.end()
+    })
+
+  const clean = (out: string): string =>
+    out
+      .trim()
+      // A fenced answer is still the right answer; unwrap rather than refuse.
+      .replace(/^```(?:markdown|md)?\n?/, '')
+      .replace(/\n?```$/, '')
+      .trim()
+
+  /**
+   * One role's brief, written from a sentence about what it is for.
+   *
+   * The whole-floor generator writes every brief at once, which is the wrong
+   * shape for a role added to a floor that already exists: it would rewrite the
+   * three that were already right to add a fourth. This asks for one, and is
+   * given the floor it is joining so the brief names the people actually there.
+   */
+  ipcMain.handle('role:brief', async (_e, floor: Workflow, role: string, said: string) => {
+    const want = said.trim()
+    if (!want) return { error: 'Say what this role is for first.' }
+    const def = floor?.roles?.[role]
+    if (!def) return { error: `No role called "${role}" on this floor.` }
+    try {
+      const out = clean(
+        await ask(
+          `You are writing one role's brief for a Bullpen floor. A brief is addressed to the ` +
+            `agent that will do the job - second person, plain sentences, no headings and no ` +
+            `markdown fences.\n\n` +
+            `This is the floor as it stands, in the format Bullpen reads:\n\n${toMarkdown(floor)}\n\n` +
+            `Write the brief for "${role}" (shown as "${def.label}"), whose job is:\n\n${want}\n\n` +
+            `Say what they are for, what they must not do, what they send when a task is ` +
+            `finished, and who they send it to - use the ids this floor already uses, and the ` +
+            `same {{...}} placeholders the other briefs use. The first sentence is what the ` +
+            `floor shows everywhere else, so make it stand on its own. Answer with the brief ` +
+            `and nothing else.`
+        )
+      )
+      return out ? { brief: out } : { error: 'The model answered with nothing.' }
+    } catch (err) {
+      return {
+        error: `Could not reach the claude CLI: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+  })
+
+  /**
+   * The whole file, written again to match the drawing.
+   *
+   * The drawing is the shape - who is on the floor, who may write to whom, who
+   * takes what is typed at it. Everything else in the file is prose about that
+   * shape, and prose does not follow a line being moved: a role dragged from
+   * under the boss to under an analyst keeps a brief telling it to report to
+   * the boss, and the floor runs with the two disagreeing.
+   *
+   * So the shape is not the model's to change. What comes back is taken for its
+   * words - labels, `does`, briefs, card rules, the summary - and the roles,
+   * the lines and the two seats are put back exactly as drawn.
+   */
+  ipcMain.handle('workflow:redraft', async (_e, floor: Workflow) => {
+    if (!floor?.roles) return { error: 'No floor to write.' }
+    const drawn = toMarkdown(floor)
+    const say = (extra = ''): string =>
+      `This is a Bullpen floor. The drawing is settled and is not yours to change: the roles, ` +
+      `their ids, who each may write to, which one is dispatch and which is entry all stay ` +
+      `exactly as they are here.\n\n${drawn}\n\n` +
+      `Write the whole file again so that everything else agrees with that drawing:\n` +
+      `- every role's "- does:" line, in one sentence\n` +
+      `- every brief, addressed to the agent, naming only the roles that role may write to, and ` +
+      `saying what it reports and to whom\n` +
+      `- a "## how it works" section of three to five sentences for whoever opens this floor next\n` +
+      `Leave "## card rules" exactly as it is - what a message does to a card is worked out from ` +
+      `the drawing here, and anything you write there is thrown away.\n` +
+      `Answer with the whole file in Bullpen's format and nothing else - no fences, no preamble.` +
+      extra
+
+    /** The words are the model's; the shape is the drawing's. */
+    const keep = (md: string): { markdown: string; problems: string[] } | { error: string } => {
+      const parsed = parseMarkdown(md)
+      if ('error' in parsed) return { error: parsed.error }
+      const w = parsed.workflow
+      const filled = withWork(floor).roles
+      const roles = Object.fromEntries(
+        Object.entries(filled).map(([id, was]) => {
+          const now = w.roles[id]
+          return [
+            id,
+            now
+              ? { ...was, label: now.label || was.label, does: now.does ?? was.does, brief: now.brief || was.brief }
+              : was
+          ]
+        })
+      )
+      const next: Workflow = {
+        ...floor,
+        description: w.description || floor.description,
+        summary: w.summary ?? floor.summary,
+        roles,
+        columns: floor.columns,
+        // Worked out, not asked for. What a message does to a card follows from
+        // the drawing - who hands work out, who does it, who decides it passed -
+        // and a model asked to write those lines wrote a floor where handing
+        // work over moved the sender's own card, a worker reporting finished
+        // put its card back into `doing`, and the first task typed at the floor
+        // opened nothing at all. None of that is visible in the file; it is
+        // visible three days later as a board that does not move.
+        cardRules: drawnCardRules(withWork({ ...floor, cardRules: [] }))
+      }
+      return { markdown: toMarkdown(next), problems: lint(next) }
+    }
+
+    try {
+      let out = keep(clean(await ask(say())))
+      if ('error' in out) return out
+      if (out.problems.length) {
+        const again = keep(
+          clean(
+            await ask(
+              say(
+                `\n\nYou wrote this and it was rejected:\n\n${out.markdown}\n\n` +
+                  `Fix exactly these and answer with the whole file again:\n` +
+                  out.problems.map((p) => `- ${p}`).join('\n')
+              )
+            )
+          )
+        )
+        if (!('error' in again)) out = again
+      }
+      return out
+    } catch (err) {
+      return {
+        error: `Could not reach the claude CLI: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+  })
+
   ipcMain.handle('workflow:generate', async (_e, description: string) => {
     const want = description.trim()
     if (!want) return { error: 'Say what the floor should do first.' }
-
-    const ask = (prompt: string): Promise<string> =>
-      new Promise((done, fail) => {
-        // No shell, argv only: the description is the operator's own text and
-        // must never reach a command line as anything but one argument.
-        const child = execFile(
-          'claude',
-          ['-p', prompt],
-          // Measured, not guessed: a real generation of a four-role floor took
-          // over two minutes, and the repair round is a second turn on top.
-          { cwd: currentGodCwd(), maxBuffer: 4_000_000, timeout: 420_000 },
-          (err, stdout) => (err && !stdout.trim() ? fail(err) : done(stdout))
-        )
-        child.stdin?.end()
-      })
-
-    const clean = (out: string): string =>
-      out
-        .trim()
-        // A fenced answer is still the right answer; unwrap rather than refuse.
-        .replace(/^```(?:markdown|md)?\n?/, '')
-        .replace(/\n?```$/, '')
-        .trim()
 
     try {
       const brief = generatorPrompt()
@@ -1938,16 +2100,17 @@ function wire(): void {
     }
   })
 
+  /**
+   * A saved floor, off the disk. Only ever a saved one.
+   *
+   * Bullpen shipped six floors once, then two, and a way to take the ones you
+   * did not want off the list - which was a note in the config, a button to
+   * undo it, and a delete that meant two different things depending on the row
+   * it was on. It ships one floor now, and one floor is not a list to curate.
+   */
   ipcMain.handle('workflow:delete', (_e, name: string) => {
     try {
       deleteWorkflow(BULLPEN_HOME, name)
-      // A shipped floor has no file to remove, so taking it off the list is a
-      // note in the config rather than a deletion. Written for saved ones too:
-      // a saved floor that took a preset's name would otherwise reappear as the
-      // preset the moment its file went.
-      const cfg = readConfig(BULLPEN_HOME)
-      const hidden = [...new Set([...(cfg.ui?.hidden ?? []), name])]
-      writeConfig(BULLPEN_HOME, { ...cfg, ui: { ...cfg.ui, hidden } })
       return { ok: true }
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) }

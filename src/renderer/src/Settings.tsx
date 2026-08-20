@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { WorkflowInfo } from '../../preload/index'
 import { FLOORS } from './floor/tiles'
 import { OrgChart } from './OrgChart'
@@ -69,6 +69,8 @@ export function Settings({
 }) {
   const [section, setSection] = useState<Section>('floor')
   const [dirty, setDirty] = useState(false)
+  /** The chart's own save, so `shut` can offer it. */
+  const saveFloor = useRef<(() => Promise<boolean>) | null>(null)
   const [stale, setStale] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
 
@@ -83,8 +85,46 @@ export function Settings({
    * hits by accident - a click a few pixels outside used to be the cheapest
    * way to lose a floor.
    */
-  const shut = (): void => {
-    if (dirty && !confirm('The floor has unsaved changes. Close and lose them?')) return
+  /**
+   * The unsaved question, and what to do when the dialog behind it is not
+   * there yet: main and this window reload separately, and a press that throws
+   * because the bridge is a version behind is a press that silently does
+   * nothing. Two answers rather than three, and never the destructive one by
+   * accident.
+   */
+  const askUnsaved = async (detail: string): Promise<'save' | 'discard' | 'cancel'> =>
+    window.bullpen.unsavedAsk
+      ? window.bullpen.unsavedAsk(detail)
+      : confirm(`${detail}\n\nLeave without saving?`)
+        ? 'discard'
+        : 'cancel'
+
+  /**
+   * Leaving the floor for another tab, which unmounts the canvas.
+   *
+   * The × and the backdrop asked; this did not, and it is one click away from
+   * both - so the cheapest way to lose a drawing was to glance at the other
+   * tab. Same question, same three answers.
+   */
+  const go = async (to: Section): Promise<void> => {
+    if (to === section) return
+    if (section === 'floor' && dirty) {
+      const ans = await askUnsaved('The drawing is not kept when you leave it.')
+      if (ans === 'cancel') return
+      if (ans === 'save' && !(await saveFloor.current?.())) return
+    }
+    setSection(to)
+  }
+
+  const shut = async (): Promise<void> => {
+    if (dirty) {
+      const ans = await askUnsaved('Closing takes the drawing off the screen.')
+      if (ans === 'cancel') return
+      // Saving can fail - a file that does not read as a floor, a disk that
+      // says no - and closing over a save that did not happen is the same lost
+      // drawing the question was asked to prevent.
+      if (ans === 'save' && !(await saveFloor.current?.())) return
+    }
     onClose()
   }
 
@@ -102,7 +142,7 @@ export function Settings({
               key={key}
               title={hint}
               style={{ ...S.tab, ...(section === key ? S.tabOn : null) }}
-              onClick={() => setSection(key)}
+              onClick={() => go(key)}
             >
               {title}
             </button>
@@ -127,7 +167,13 @@ export function Settings({
                 arrived until `apply` started reopening it on the way back in,
                 and then the window came back blank. */}
             {workflow ? (
-              <OrgChart workflow={workflow} onDirty={setDirty} />
+              <OrgChart
+                workflow={workflow}
+                onDirty={(d, save) => {
+                  setDirty(d)
+                  saveFloor.current = save
+                }}
+              />
             ) : (
               <div style={{ color: 'var(--faint)', padding: 8 }}>reading the floor…</div>
             )}

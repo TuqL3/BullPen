@@ -91,8 +91,12 @@ test('a floor carries its own defaults, said once', () => {
  * which is the difference between a rule and a description of one.
  */
 test('laws are listed with an id and the sentence a person is shown', () => {
-  // None ship: a floor is whatever was drawn. The mechanism is what is tested.
-  assert.deepEqual(RULES.laws, [])
+  // One ships: the boss has to be able to hand work to somebody. A floor is
+  // otherwise whatever was drawn, and the mechanism is what is tested here.
+  assert.deepEqual(
+    RULES.laws.map((l) => l.id),
+    ['dispatch-hands-off', 'lines-have-rules']
+  )
   const mine = readRules(
     RULES.text + '\n- `must-open` — at least one card rule must open a card\n'
   )
@@ -102,6 +106,26 @@ test('laws are listed with an id and the sentence a person is shown', () => {
     mine.laws.find((l) => l.id === 'must-open')?.says ?? '',
     /card rule must open a card/
   )
+})
+
+test('the boss must have somebody to hand work to', () => {
+  const w = structuredClone(DEFAULT_WORKFLOW)
+  // Every line out of dispatch cut but the one back to the human: the floor
+  // still reads, still has roles, and stops every task at the first desk.
+  w.talksTo = { ...w.talksTo, [w.dispatch]: [w.human] }
+  const said = lint(w, RULES)
+  assert.ok(
+    said.some((p) => p.includes(w.dispatch) && p.includes('draw a line')),
+    said.join(' | ')
+  )
+
+  // Asking for a hire is not having somebody: there is no other role to hire
+  // into on a floor like this.
+  w.talksTo = { ...w.talksTo, [w.dispatch]: [w.human, w.hire] }
+  assert.ok(lint(w, RULES).some((p) => p.includes('draw a line')))
+
+  // And the floor as it stands is fine, on this law and on the whole rulebook.
+  assert.deepEqual(lint(structuredClone(DEFAULT_WORKFLOW), RULES), [])
 })
 
 test('a rules file that will not parse is empty, not an exception', () => {
@@ -122,8 +146,11 @@ test('a law that is not in the rules is a check that does not run', () => {
   w.hireAbovePct = 10
   w.cardRules = w.cardRules.filter((r) => r.status !== 'open')
 
-  // Nothing ships switched on, so nothing is said about either.
-  assert.deepEqual(lint(w, RULES), [])
+  // Neither law ships switched on, so nothing is said about either. Filtered
+  // to those two: taking the `open` rules off leaves lines with no rule, which
+  // is a law that does ship and is right to complain.
+  const about = (p: string): boolean => p.includes('thresholds') || p.includes('reach the board')
+  assert.deepEqual(lint(w, RULES).filter(about), [])
 
   // Write the two laws in and the same floor is refused on both counts.
   const full = lint(

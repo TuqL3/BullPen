@@ -127,41 +127,31 @@ test('how the chart is being looked at survives a restart', () => {
   rmSync(home, { recursive: true, force: true })
 })
 
-/** A shipped floor has no file to delete, so "remove" is a note in the config. */
-test('floors taken off the list survive a restart', () => {
-  const home = mkdtempSync(join(tmpdir(), 'bullpen-hide-'))
-  writeConfig(home, { ui: { hidden: ['solo', 'qa-lead'] } })
-  assert.deepEqual(readConfig(home).ui?.hidden, ['solo', 'qa-lead'])
-
-  // Junk in the list is dropped rather than carried into the UI.
-  writeConfig(home, { ui: { hidden: ['solo', '', 42 as unknown as string] } })
-  assert.deepEqual(readConfig(home).ui?.hidden, ['solo'])
-  rmSync(home, { recursive: true, force: true })
-})
-
-
 test('a ui preference nobody named survives one that is set', () => {
-  // Removing a shipped floor is a note in `ui.hidden` - it has no file to
-  // delete. The prefs handler rebuilt `ui` from the four fields it knew about,
-  // so changing the font size, or dragging one box on the chart, put every
-  // removed floor back on the list without a word.
+  // The prefs handler rebuilt `ui` from the fields it knew about, so a field it
+  // did not know about was dropped by an unrelated write - changing the font
+  // size, or dragging one box on the chart. `hidden` was that field, and it is
+  // gone; the next one to be added must not repeat it, so this passes a field
+  // the type does not name.
   const current = {
     fontSize: 12.5,
     floor: 'green',
-    hidden: ['analyst-chain', 'solo'],
+    someday: ['a', 'b'],
     chart: { 'floor-a': { boss: { x: 1, y: 2 } } },
     view: { 'floor-a': { k: 1, tx: 0, ty: 0 } }
   }
 
-  const bigger = mergeUi(current, { fontSize: 16 })
-  assert.deepEqual(bigger.hidden, ['analyst-chain', 'solo'], 'still removed')
+  const bigger = mergeUi(current, { fontSize: 16 }) as typeof current
+  assert.deepEqual(bigger.someday, ['a', 'b'], 'carried through')
   assert.equal(bigger.fontSize, 16)
   assert.equal(bigger.floor, 'green', 'and untouched fields keep their value')
 
-  // One floor's chart saved does not wipe another's, and hidden still stands.
-  const moved = mergeUi(current, { chart: { 'floor-b': { boss: { x: 9, y: 9 } } } })
+  // One floor's chart saved does not wipe another's, and the stranger stands.
+  const moved = mergeUi(current, {
+    chart: { 'floor-b': { boss: { x: 9, y: 9 } } }
+  }) as typeof current
   assert.deepEqual(Object.keys(moved.chart ?? {}).sort(), ['floor-a', 'floor-b'])
-  assert.deepEqual(moved.hidden, ['analyst-chain', 'solo'])
+  assert.deepEqual(moved.someday, ['a', 'b'])
   assert.deepEqual(moved.view, current.view)
 
   // Out-of-range font sizes are still clamped rather than trusted.

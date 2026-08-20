@@ -12,6 +12,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { bootMain, type Main } from './main-harness.ts'
+import { DEFAULT_WORKFLOW as CHAIN } from './floors.ts'
+import { PRESETS as SHIPPED } from '../src/main/presets.ts'
+import { toMarkdown } from '../src/main/workflow.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'bullpen-main-'))
 const work = mkdtempSync(join(tmpdir(), 'bullpen-work-'))
@@ -47,6 +50,12 @@ test('main comes up and registers its surface', async () => {
   main = await bootMain(home)
   assert.ok(main.channels.includes('agent:kill'), `channels: ${main.channels.length}`)
   assert.ok(main.channels.length > 40, `only ${main.channels.length} channels`)
+
+  // The floor these tests are written about: an analyst who hands work out, a
+  // developer, a tester. Bullpen ships a boss and a worker now, and every role
+  // named below - `ba`, `dev`, `tester` - is a role that floor does not have.
+  const set = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(CHAIN))
+  assert.equal(set.error, undefined, `the chain must apply: ${set.error}`)
 })
 
 test('an agent killed mid-turn does not jam the floor for the rest of the run', async () => {
@@ -129,6 +138,44 @@ test('a halted agent takes its blocked request off the queue with it', async () 
   ])
   assert.equal(out.permissionDecision, 'deny', 'the request is answered, not left hanging')
   assert.ok(main.last('approvals:resolved'), 'and the queue is told')
+})
+
+// Off while the shipped floor is what `write it` is being tried on: main's
+// `SHIPPED_IS_READ_ONLY` is false, and this is the test that says so.
+test.skip('the floor that ships is not written over', async () => {
+  // It has no file: it is in the source. Saving one used to write a file beside
+  // it under the same name, which the list then dropped for being a duplicate -
+  // so an edit to the shipped floor went to disk and disappeared.
+  // This run is on the chain fixture, so the name is what makes it the shipped
+  // one - which is exactly what main checks.
+  const md = await main.invoke<{ markdown: string }>('workflow:get')
+  const shipped = md.markdown.replace(/^# .*$/m, `# ${SHIPPED[0].name}`)
+  const mine = md.markdown.replace(/^# .*$/m, '# mine')
+
+  const refused = await main.invoke<{ error?: string }>('workflow:save', shipped)
+  assert.match(refused.error ?? '', /Bullpen ships/)
+
+  const kept = await main.invoke<{ error?: string }>('workflow:save', mine)
+  assert.equal(kept.error, undefined, `under another name it saves: ${kept.error}`)
+})
+
+test('a floor against a law is not written to disk', async () => {
+  // The one law that ships: the desk a task is typed at has to be able to hand
+  // it on. Saving used to write the file and report the breach underneath it,
+  // which is not what "must" means - and the drawing that broke it was a role
+  // deleted from the canvas, one keystroke away.
+  const md = await main.invoke<{ markdown: string }>('workflow:get')
+  const lonely = md.markdown.replace(/^- talks to: .*$/m, '- talks to: you, hire')
+
+  const refused = await main.invoke<{ error?: string }>('workflow:save', lonely)
+  assert.match(refused.error ?? '', /can write to nobody but/)
+
+  // And the floor on disk is still the one that was there before it.
+  const still = await main.invoke<{ markdown: string }>('workflow:get')
+  assert.equal(still.markdown, md.markdown)
+
+  const ok = await main.invoke<{ error?: string }>('workflow:save', md.markdown)
+  assert.equal(ok.error, undefined, `a legal floor still saves: ${ok.error}`)
 })
 
 test('a message the floor refuses is handed back with somewhere else to send it', async () => {

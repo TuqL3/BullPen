@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { floorPath, publishFloor, writeBriefing, type FloorAgent } from '../src/main/god.ts'
-import { DEFAULT_WORKFLOW as WF } from '../src/main/presets.ts'
+import { DEFAULT_WORKFLOW as WF } from './floors.ts'
 import { refuseMail as refuse, renderBrief } from '../src/main/workflow.ts'
 
 /**

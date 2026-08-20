@@ -66,15 +66,6 @@ export type Config = {
     chart?: Record<string, Record<string, { x: number; y: number }>>
     /** How the chart is being looked at, per floor: zoom, and the corner. */
     view?: Record<string, { k: number; tx: number; ty: number }>
-    /**
-     * Shipped floors the operator has taken off the list.
-     *
-     * A preset has no file to delete - it is in the source - so "remove" on one
-     * is a note here saying not to offer it. Kept rather than actually deleted
-     * because the presets are the only worked examples of the format, and a
-     * fresh install should still have them.
-     */
-    hidden?: string[]
   }
   /**
    * The floor's shape: roles, who writes to whom, and what each is told.
@@ -136,16 +127,12 @@ export function readConfig(home: string): Config {
       const floor = typeof ui.floor === 'string' && ui.floor.trim() ? ui.floor : undefined
       const chart = ui.chart && typeof ui.chart === 'object' ? ui.chart : undefined
       const view = ui.view && typeof ui.view === 'object' ? ui.view : undefined
-      const hidden = Array.isArray(ui.hidden)
-        ? ui.hidden.filter((n): n is string => typeof n === 'string' && n.trim() !== '')
-        : undefined
-      if (size !== undefined || floor || chart || view || hidden) {
+      if (size !== undefined || floor || chart || view) {
         out.ui = {
           ...(size !== undefined ? { fontSize: size } : {}),
           ...(floor ? { floor } : {}),
           ...(chart ? { chart } : {}),
-          ...(view ? { view } : {}),
-          ...(hidden ? { hidden } : {})
+          ...(view ? { view } : {})
         }
       }
     }
@@ -193,11 +180,11 @@ export function checkWorkspace(dir: string, home: string): string | null {
  * Fold a partial UI preference into the one on disk.
  *
  * Here rather than inline in the handler because the handler rebuilt the whole
- * `ui` object from the four fields it knew about, and `hidden` was not one of
- * them - so changing the font size, or dragging one box on the chart, silently
- * put every floor the operator had removed back on the list. Anything this does
- * not name is carried through untouched, which is the only version of this that
- * stays right when a fifth field is added.
+ * `ui` object from the fields it knew about, so a field it did not know about -
+ * and there has been one - was dropped by an unrelated write: changing the font
+ * size, or dragging one box on the chart. Anything this does not name is
+ * carried through untouched, which is the only version of this that stays right
+ * when the next field is added.
  */
 export function mergeUi(current: Config['ui'], next: NonNullable<Config['ui']>): NonNullable<Config['ui']> {
   return {

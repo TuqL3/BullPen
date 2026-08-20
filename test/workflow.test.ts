@@ -26,7 +26,10 @@ import {
   rolesWith,
   saveWorkflow,
   drawnCardRules,
+  matches,
+  withWork,
   toMarkdown,
+  type CardRule,
   type Workflow,
   workCwd,
   workflowFile
@@ -37,15 +40,21 @@ import {
  * `review` checks by reading instead of running - if either needs a special
  * case in the code, the workflow is not really data.
  */
-test('a shipped floor arrives with no rules of its own, and nothing else missing', () => {
-  // The floors ship as drawings: roles, who writes to whom, and a board. What
-  // an arrow does to a card is written by whoever runs the floor, so every
-  // preset fails the two laws about card rules and no others.
-  const aboutRules = (p: string): boolean => /card|assigns/i.test(p)
+test('the shipped floor is whole: its rules name its own roles and its own board', () => {
+  // It used to ship as a drawing with no rules on it, because it was an example
+  // somebody would rewrite. It is the floor the app runs now, so its rules ship
+  // with it - and a rule naming a role or a column this floor does not have is
+  // a rule that never fires, which reads as an agent ignoring you.
   for (const w of SHIPPED) {
-    assert.deepEqual(w.cardRules, [], `preset "${w.name}" ships with rules on it`)
-    const left = lint(w).filter((p) => !aboutRules(p))
-    assert.deepEqual(left, [], `preset "${w.name}" is missing something other than its rules`)
+    const known = new Set([...Object.keys(w.roles), w.human, w.hire, 'anyone', 'staff'])
+    const caps = new Set(w.capabilities.map((c) => c.name))
+    const columns = new Set([...w.columns.map((c) => c.key), 'open', 'closes'])
+    for (const r of w.cardRules) {
+      assert.ok(known.has(r.from) || caps.has(r.from), `"${w.name}": rule from "${r.from}"`)
+      assert.ok(known.has(r.to) || caps.has(r.to), `"${w.name}": rule to "${r.to}"`)
+      assert.ok(columns.has(r.status), `"${w.name}": rule moves a card to "${r.status}"`)
+    }
+    assert.deepEqual(lint(w), [], `preset "${w.name}" is missing something`)
   }
 })
 
@@ -248,6 +257,61 @@ test('markdown mistakes come back as a sentence, not a broken floor', () => {
  * no line between them, so a file written from it drifts from the drawing the
  * moment anybody edits either.
  */
+test('every line drawn gets a rule, whatever shape the floor is', () => {
+  // The rules are written from pairs of capabilities - who assigns, who builds,
+  // who checks - and a drawing can put a line where no pair names it: two
+  // builders working to each other, a role holding a word nobody writes rules
+  // about, a loop. Those lines came back from `write it` with nothing on them,
+  // which is a hand-off the board never hears about.
+  const bare = (id: string): Workflow['roles'][string] => ({
+    label: id,
+    can: [],
+    brief: 'x',
+    ...(id === 'boss' ? { fixed: { id: 'michael', name: 'M' } } : { hireable: true })
+  })
+  const floor = (talksTo: Record<string, string[]>, can: Record<string, string[]> = {}): Workflow =>
+    ({
+      ...DEFAULT_WORKFLOW,
+      name: 'shape',
+      dispatch: 'boss',
+      entry: 'boss',
+      cardRules: [],
+      talksTo,
+      roles: Object.fromEntries(
+        Object.keys(talksTo).map((id) => [id, { ...bare(id), can: can[id] ?? [] }])
+      )
+    }) as Workflow
+
+  const shapes: [string, Workflow][] = [
+    ['a chain', floor({ boss: ['you', 'hire', 'a'], a: ['boss', 'b'], b: ['a'] })],
+    ['two under one', floor({ boss: ['you', 'a', 'b'], a: ['boss'], b: ['boss'] })],
+    [
+      'builders working to each other',
+      floor({ boss: ['you', 'a'], a: ['boss', 'b'], b: ['a'] }, { a: ['builds'], b: ['builds'] })
+    ],
+    ['a loop', floor({ boss: ['you', 'a'], a: ['b'], b: ['boss'] })],
+    [
+      'a word nothing writes rules about',
+      floor({ boss: ['you', 'a'], a: ['boss'] }, { boss: ['assigns'], a: ['cites'] })
+    ]
+  ]
+
+  for (const [what, drawn] of shapes) {
+    const w = withWork(drawn)
+    const ruled: Workflow = { ...w, cardRules: drawnCardRules(w) }
+    for (const [from, tos] of Object.entries(w.talksTo)) {
+      if (!w.roles[from]) continue
+      for (const to of tos) {
+        if (!w.roles[to] || to === from) continue
+        assert.ok(
+          ruled.cardRules.some((r) => matches(ruled, from, r.from) && matches(ruled, to, r.to)),
+          `${what}: nothing says what "${from}" writing to "${to}" does`
+        )
+      }
+    }
+  }
+})
+
 test('the rules written from a drawing name only pairs that have a line', () => {
   const w = DEFAULT_WORKFLOW as Workflow
   const rules = drawnCardRules(w)
@@ -256,7 +320,9 @@ test('the rules written from a drawing name only pairs that have a line', () => 
   const talks = (a: string, b: string): boolean =>
     (w.talksTo[a] ?? []).includes(b) || (a === w.human && b === w.dispatch)
   for (const r of rules) {
-    assert.ok(w.roles[r.from], `"${r.from}" is a role, not a word`)
+    // The human is one of the two ends a line can have, and the rule about the
+    // task they type is the first card of every job on the floor.
+    assert.ok(r.from === w.human || w.roles[r.from], `"${r.from}" is a role or the human`)
     assert.ok(r.to === w.human || w.roles[r.to], `"${r.to}" is a role or the human`)
     assert.ok(talks(r.from, r.to), `${r.from} → ${r.to} is a line on this floor`)
   }
@@ -745,6 +811,8 @@ Principal → researcher ⇄ reviewer.
 
 ## card rules
 - plans → staff: opens a card
+- reports → staff: opens a card
+- collects → replicates: Replicating
 - collects → plans: Replicating
 - replicates → collects: Running (their card)
 - replicates → plans: closes it
@@ -813,7 +881,10 @@ You repeat it. Send problems to the researcher, and pass it to {{reportTo}}.
     w.capabilities.map((c) => c.name),
     ['reports', 'plans', 'collects', 'replicates', 'cites']
   )
-  assert.deepEqual(rolesWith(w, 'assigns'), ['planner'], 'whoever a rule says opens a card')
+  // Both, because both are written as opening one: the principal hands the
+  // question to the planner, and the planner hands the work out. Read off the
+  // rules, which is the point - nothing here labels either of them.
+  assert.deepEqual(rolesWith(w, 'assigns'), ['chief', 'planner'], 'whoever a rule says opens a card')
   assert.deepEqual(rolesWith(w, 'checks'), ['checker'], 'whoever a rule says closes one')
   assert.deepEqual(rolesWith(w, 'speaksToHuman'), ['chief'], 'whoever talks-to allows')
   // Columns keep their own keys, and their kinds are what the floor reaches for.
@@ -823,9 +894,18 @@ You repeat it. Send problems to the researcher, and pass it to {{reportTo}}.
   )
   assert.equal(columnFor(w, 'working'), 'running')
   assert.equal(columnFor(w, 'done'), 'written_up')
-  // A rule written with the column's display name resolves to its key.
-  assert.deepEqual(w.cardRules[1], { from: 'collects', to: 'plans', status: 'replicating' })
-  assert.deepEqual(w.cardRules[2], {
+  // A rule written with the column's display name resolves to its key. By what
+  // it says rather than by where it sits: the list grew a line and every index
+  // after it moved, which is a test about the parser failing about an edit to
+  // the fixture.
+  const rule = (from: string, to: string): CardRule | undefined =>
+    w.cardRules.find((r) => r.from === from && r.to === to)
+  assert.deepEqual(rule('collects', 'plans'), {
+    from: 'collects',
+    to: 'plans',
+    status: 'replicating'
+  })
+  assert.deepEqual(rule('replicates', 'collects'), {
     from: 'replicates',
     to: 'collects',
     status: 'running',

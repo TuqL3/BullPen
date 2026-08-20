@@ -2,8 +2,8 @@ import {
   can,
   columnFor,
   defaultCardRules,
-  hasCapability,
   hasColumn,
+  matches,
   rolesWith,
   type Workflow
 } from './workflow.ts'
@@ -30,25 +30,6 @@ export type CardMove =
   /** A checker has spoken: close its own card and the work it was checking. */
   | { kind: 'checked'; agent: string; subject: string }
   | null
-
-/**
- * Whether `role` answers to a word in a rule.
- *
- * Four things a rule may name, in the order somebody writing one would expect:
- * the role itself, a capability by the name this floor gave it, one of the four
- * kinds, and the two crowds - `anyone`, and `staff` for anyone who is not the
- * floor's voice.
- */
-function matches(w: Workflow, role: string, word: string): boolean {
-  if (word === 'anyone') return true
-  if (word === 'staff') return !can(w, role, 'speaksToHuman')
-  if (word === role) return true
-  // By the name the floor gave it, and nothing else. A rule that said `builds`
-  // used to match twice - once as a capability, once as a category the app
-  // inferred - and the second reading swept in whoever the app had decided was
-  // a builder, which on a floor where the tester is also hireable was both.
-  return hasCapability(w, role, word)
-}
 
 export function routeCard(
   w: Workflow,

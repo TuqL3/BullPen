@@ -51,6 +51,8 @@ export type ContextRule = {
 export type WorkflowInfo = {
   name: string
   description: string
+  /** What this floor is for, in prose. Written by the model, kept in the file. */
+  summary?: string
   dispatch: string
   entry: string
   reuseBelowPct: number
@@ -298,8 +300,26 @@ const api = {
   ): Promise<{ markdown?: string; problems?: string[]; error?: string }> =>
     ipcRenderer.invoke('workflow:generate', description),
   /** An annotated empty floor, for a first workflow. */
-  /** A new chart: you, whoever takes what you dispatch, and the two rules between. */
+  /** A new chart: you, the boss you dispatch to, a worker under them, and the rules between. */
   workflowBlank: (): Promise<string> => ipcRenderer.invoke('workflow:blank'),
+  /** Leaving an unsaved floor: write it first, leave it, or stay. */
+  unsavedAsk: (detail: string): Promise<'save' | 'discard' | 'cancel'> =>
+    ipcRenderer.invoke('ui:unsaved', detail),
+  /**
+   * The whole file, written again to match the drawing: every `does`, every
+   * brief, the card rules and the summary. The shape stays as drawn.
+   */
+  redraftWorkflow: (
+    floor: WorkflowInfo
+  ): Promise<{ markdown?: string; problems?: string[]; error?: string }> =>
+    ipcRenderer.invoke('workflow:redraft', floor),
+  /** One role's brief, written by the model from a sentence about the job. */
+  roleBrief: (
+    floor: WorkflowInfo,
+    role: string,
+    said: string
+  ): Promise<{ brief?: string; error?: string }> =>
+    ipcRenderer.invoke('role:brief', floor, role, said),
   /**
    * The format reference: the document Bullpen ships, or the one at `path` if
    * the operator wrote their own there. `custom` says which is being read.
@@ -367,8 +387,6 @@ const api = {
   /** Keep one without running it. */
   deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('workflow:delete', name),
-  /** Put back every floor that was taken off the list. */
-  unhideWorkflows: (): Promise<boolean> => ipcRenderer.invoke('workflow:unhide'),
   /**
    * Read the editor's text without applying it: what is wrong with it, and the
    * floor it describes, for the preview beside it.

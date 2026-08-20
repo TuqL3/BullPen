@@ -239,15 +239,17 @@ test('a rule can be written about the person running the floor', () => {
 
 
 test('a floor nobody has written a rule on still moves cards', () => {
-  // Every shipped floor has an empty `cardRules`, and for a while that meant
+  // A floor drawn and left alone has no card rules, and for a while that meant
   // the board never moved: work was handed over, done and reported, and nothing
   // appeared on it. Somebody drawing a floor had to write a rule on every line
   // before the app did anything visible.
   //
   // What each word behaves like is enough to say what a message does, so a
-  // floor that has written nothing is read that way instead.
-  for (const w of SHIPPED) {
-    assert.deepEqual(w.cardRules, [], `"${w.name}" is expected to ship with none`)
+  // floor that has written nothing is read that way instead. Run against the
+  // shipped floor with its own rules taken off, which is what a floor looks
+  // like the moment it is drawn.
+  for (const shipped of SHIPPED) {
+    const w = { ...shipped, cardRules: [] }
     const roleOf = (id: string): string => id
     const names = Object.keys(w.roles)
     const moves = names.flatMap((from) =>

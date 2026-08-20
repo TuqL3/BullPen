@@ -104,6 +104,21 @@ export const rolesWith = (kind: string): string[] => rolesWithIn(wf, kind)
  * It is answered by asking who already does the work here and taking their
  * word for it.
  */
+/**
+ * The four words a floor gets when it declares none of its own.
+ *
+ * The same four main ships, written again here rather than imported: main is
+ * node - fs, child_process, the pty - and pulling `workflow.ts` into the window
+ * pulls all of it. Four names and what each behaves like is a smaller thing to
+ * keep in step than that.
+ */
+export const HOUSE_CAPABILITIES: WorkflowInfo['capabilities'] = [
+  { name: 'speaksToHuman', kind: 'speaksToHuman', what: 'may write to "you"' },
+  { name: 'assigns', kind: 'assigns', what: 'hands work out and may hire' },
+  { name: 'builds', kind: 'builds', what: 'does the work and reports when done' },
+  { name: 'checks', kind: 'checks', what: 'decides whether it passes' }
+]
+
 export const buildsCapabilityIn = (w: WorkflowInfo | null): string | undefined =>
   // Whatever this floor declared as the doing of the work, then whoever already
   // does it, then anything at all. A new box does the work; it does not hand it

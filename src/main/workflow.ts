@@ -253,6 +253,11 @@ export type Workflow = {
   name: string
   /** One line, shown where a workflow is picked. */
   description: string
+  /**
+   * What this floor is for, in prose, for whoever opens it next. Not read by
+   * anything at runtime - the router works off the roles and the rules.
+   */
+  summary?: string
   roles: Record<string, RoleDef>
   /**
    * Who may write to whom. Keys and values are role names, plus two addresses
@@ -338,6 +343,24 @@ const partyLabel = (w: Workflow, party: string): string | null =>
 /** Whether this role answers to a word, by its own name or a capability it has. */
 const holds = (w: Workflow, role: string, word: string): boolean =>
   word === role || (w.roles[role]?.can ?? []).includes(word)
+
+/**
+ * Whether `role` answers to a word in a rule.
+ *
+ * Four things a rule may name, in the order somebody writing one would expect:
+ * the role itself, a capability by the name this floor gave it, and the two
+ * crowds - `anyone`, and `staff` for anyone who is not the floor's voice.
+ *
+ * Here rather than in `cards.ts`, where it was, because the linter has to ask
+ * the same question the router will: a law about which lines a rule covers,
+ * answered by a second reading of the word, is a law that passes floors the
+ * router ignores and fails floors it does not.
+ */
+export function matches(w: Workflow, role: string, word: string): boolean {
+  if (word === 'anyone') return true
+  if (word === 'staff') return !rolesWith(w, 'speaksToHuman').includes(role)
+  return holds(w, role, word)
+}
 
 /**
  * The four questions asked outside the card rules, answered from what the floor
@@ -473,6 +496,30 @@ export function defaultCardRules(w: Workflow): CardRule[] {
  * One rule per direction, first one wins - which is also how the router reads
  * them, so what is written is what will fire.
  */
+/**
+ * The same floor, with a word for the work on every role that had none.
+ *
+ * What a message does to a card is worked out from what each role may do, so a
+ * role holding nothing is a role every line to it is silent about - the drawing
+ * shows the hand-off, the briefs describe it, and the board never hears. A role
+ * that says nothing about itself does the work: that is what a floor is for,
+ * and it is the reading that makes the lines mean something.
+ *
+ * Only the empty ones. Anything written stays written, including a role
+ * deliberately left inert on a floor whose rules name it by its own name.
+ */
+export function withWork(w: Workflow): Workflow {
+  const builds = w.capabilities.find((c) => c.kind === 'builds')?.name
+  if (!builds) return w
+  const roles = Object.fromEntries(
+    Object.entries(w.roles).map(([id, def]) => [
+      id,
+      (def.can ?? []).length ? def : { ...def, can: [builds] }
+    ])
+  )
+  return { ...w, roles }
+}
+
 export function drawnCardRules(w: Workflow): CardRule[] {
   const talks = (a: string, b: string): boolean =>
     (w.talksTo[a] ?? []).includes(b) || (a === w.human && b === w.dispatch)
@@ -512,10 +559,57 @@ export function drawnCardRules(w: Workflow): CardRule[] {
     for (const b of builds) for (const a of assigns) add(b, a, col('waiting'))
   }
   if (has('done')) for (const a of assigns) for (const v of voice) add(a, v, col('done'))
+  // A builder reporting to whoever handed it out, on a floor with nobody to
+  // check it. `wait to test` is the right answer where there is a checker and a
+  // column to wait in; without either, built is as far as the work goes and the
+  // card is done - and with neither rule written, a worker reporting finished
+  // moved nothing at all and its card sat in `doing` forever.
+  if (!has('waiting') && has('done')) {
+    for (const b of builds) for (const a of [...assigns, ...voice]) add(b, a, col('done'))
+  }
   // Handing work over opens a card, whoever hands it over and whoever to.
   for (const a of [...assigns, ...voice]) for (const r of Object.keys(w.roles)) add(a, r, 'open')
+  // The human handing work to the floor opens the first card of all. Every rule
+  // above is about one role writing to another, so the one message that starts
+  // everything - somebody typing a task at the floor - was the one message that
+  // put nothing on the board.
+  add(w.human, w.dispatch, 'open')
   // And the last step of anything here: the human is told.
   if (has('done')) for (const v of voice) add(v, w.human, col('done'))
+
+  /**
+   * Anything still uncovered, so that no line drawn is silent.
+   *
+   * Everything above is a rule about a pair of capabilities - who assigns, who
+   * builds, who checks - and a floor can be drawn whose lines those pairs do
+   * not name: two builders working to each other, a role holding a word nobody
+   * writes rules about. Those lines came out of `write it` with nothing on
+   * them, which is a hand-off the board never hears about and nothing in the
+   * file says so.
+   *
+   * Which way it goes is the only question left, and the drawing answers it:
+   * towards somebody further from the operator, work is being handed over and a
+   * card opens; back towards them, it is being reported and the card is done.
+   */
+  const depth = new Map<string, number>([[w.dispatch, 0]])
+  for (const queue = [w.dispatch]; queue.length; ) {
+    const here = queue.shift() as string
+    for (const to of w.talksTo[here] ?? []) {
+      if (!w.roles[to] || depth.has(to)) continue
+      depth.set(to, (depth.get(here) ?? 0) + 1)
+      queue.push(to)
+    }
+  }
+  const far = (r: string): number => depth.get(r) ?? Number.MAX_SAFE_INTEGER
+  for (const [from, tos] of Object.entries(w.talksTo)) {
+    if (!w.roles[from]) continue
+    for (const to of tos) {
+      if (!w.roles[to] || to === from) continue
+      if (taken.has(`${from}\u0000${to}`)) continue
+      if (far(to) > far(from)) add(from, to, 'open')
+      else if (has('done')) add(from, to, col('done'))
+    }
+  }
   return out
 }
 
@@ -687,6 +781,27 @@ export function lint(w: Workflow, rules?: Rules): string[] {
   if (on('dispatch-has-agent') && w.dispatch && !w.roles[w.dispatch]?.fixed) {
     bad.push(`"${w.dispatch}" takes the work typed at the floor, so it needs a fixed agent - there is nobody to give it to at launch.`)
   }
+  /**
+   * The boss has somebody to hand to.
+   *
+   * Dispatch is who a task typed at the floor goes to, and what that role is
+   * for is deciding what happens to it - not doing it. A floor whose dispatch
+   * writes only to the human is a floor where every task stops at the first
+   * desk: it reads as finished drawing and does nothing, and the drawing gives
+   * no hint of it, because the one line on it is the line back to you.
+   *
+   * `hire` does not count. Hiring is asking for somebody in a role, and on a
+   * floor with no other role there is no role to ask for.
+   */
+  if (on('dispatch-hands-off') && w.roles[w.dispatch]) {
+    const handsTo = (w.talksTo[w.dispatch] ?? []).filter((to) => w.roles[to] && to !== w.dispatch)
+    if (handsTo.length === 0) {
+      bad.push(
+        `"${w.dispatch}" takes what is typed at the floor and can write to nobody but "${w.human}" - draw a line from it to whoever does the work.`
+      )
+    }
+  }
+
   // Fixed or hireable: inbound work is put in front of whoever holds the role,
   // and somebody is hired when nobody does - so a role nobody stands in is only
   // a problem if nobody can be put in it either.
@@ -792,13 +907,56 @@ export function lint(w: Workflow, rules?: Rules): string[] {
     capNames.has(word) ||
     (CAPABILITY_KINDS as readonly string[]).includes(word)
   for (const rule of on('names-exist') ? w.cardRules : []) {
-    if (!answersTo(rule.from)) {
+    // The human is a sender as well as an address. `to` was exempt and `from`
+    // was not, so the one rule every floor has - somebody types a task and a
+    // card opens - was reported as a rule that never fires, while the router
+    // was firing it.
+    if (rule.from !== w.human && !answersTo(rule.from)) {
       bad.push(`No role, capability or crowd answers to "${rule.from}", so "${rule.from} → ${rule.to}" never fires.`)
     }
     if (rule.to !== w.human && !answersTo(rule.to)) {
       bad.push(`No role, capability or crowd answers to "${rule.to}", so "${rule.from} → ${rule.to}" never fires.`)
     }
   }
+  /**
+   * Every line drawn, covered by a rule.
+   *
+   * A rule is what a message between two roles does to the board, and the rules
+   * are worked out from what each role may do - so a floor whose roles hold no
+   * capability, or hold the wrong one, gets rules for some of its lines and
+   * none for the others. Nothing said so: the briefs told two agents to work
+   * together, the drawing showed the line, and the board never heard about
+   * either of them. Silence is what this is here to break.
+   *
+   * Only when the floor has written rules at all. One that has written none is
+   * read through `defaultCardRules`, which answers in words and covers whoever
+   * ends up holding them.
+   */
+  if (on('lines-have-rules') && w.cardRules.length) {
+    const covers = (from: string, to: string): boolean =>
+      w.cardRules.some(
+        (r) =>
+          (from === w.human ? r.from === w.human : matches(w, from, r.from)) &&
+          (to === w.human ? r.to === w.human : matches(w, to, r.to))
+      )
+    // Between roles, not to and from the human. A floor whose first card opens
+    // one hop in - the human hands over, the boss hands on, and that is the
+    // card - is a floor somebody wrote on purpose; a hand-off between two
+    // agents that moves nothing is not.
+    const lines: [string, string][] = []
+    for (const [from, tos] of Object.entries(w.talksTo)) {
+      if (!w.roles[from]) continue
+      for (const to of tos) if (w.roles[to] && to !== from) lines.push([from, to])
+    }
+    for (const [from, to] of lines) {
+      if (!covers(from, to)) {
+        bad.push(
+          `Nothing says what a message from "${from}" to "${to}" does to the board, so that line moves no card.`
+        )
+      }
+    }
+  }
+
   // The rules this floor will actually run under, which is not the same as the
   // ones it wrote: a floor that writes none gets `defaultCardRules`, and since
   // the canvas stopped editing card rules that is most floors drawn by hand.
@@ -1094,6 +1252,14 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
 
   const ROLES_SECTION = /^roles?\b/i
   const BRIEFS_SECTION = /^briefs?\b/i
+/**
+ * The section a floor is described in, in the operator's own words.
+ *
+ * Everything else in the file is what the router reads. This is the one part
+ * written for whoever opens the floor next - the drawing says who writes to
+ * whom, and nothing anywhere said what the floor is for.
+ */
+const HOW_SECTION = /^how (it|this floor) works\b/i
   // Sections that describe the floor rather than the people on it. Named here
   // so neither form mistakes one for a role called "board".
   const CAPS_SECTION = /^capabilit(y|ies)\b/i
@@ -1118,6 +1284,18 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
           : 'rules'
     asides[key] = [...(asides[key] ?? []), ...body]
   })
+
+  /** What the floor is for, when the file says. Prose, kept as written. */
+  const howHead = heads.find((h) => h.level === 2 && HOW_SECTION.test(h.text))
+  const summary = howHead
+    ? lines
+        .slice(
+          howHead.at + 1,
+          heads.find((h) => h.level === 2 && h.at > howHead.at)?.at ?? lines.length
+        )
+        .join('\n')
+        .trim()
+    : ''
 
   /** One role's heading and everything under it, in either form. */
   const blocks: { head: string; body: string[] }[] = []
@@ -1409,6 +1587,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     workflow: {
       name,
       description,
+      ...(summary ? { summary } : {}),
       roles,
       talksTo,
       dispatch,
@@ -1470,6 +1649,11 @@ export function toMarkdown(w: Workflow): string {
   if (w.says?.theirs) out.push(`- their card: ${w.says.theirs}`)
   if (w.says?.when) out.push(`- when: ${w.says.when}`)
   if (w.hires) out.push(`- hires: ${w.hires}`)
+
+  // After the header fields, never before them: everything under a `##` belongs
+  // to that section, and a summary written above `- reuse below:` takes the
+  // whole header with it.
+  if (w.summary?.trim()) out.push('', '## how it works', '', w.summary.trim())
 
   // Capabilities first: a role's `- can:` line names them, and reading
   // `can: drafts` before anything says what drafting is is reading backwards.
