@@ -88,7 +88,7 @@ const S: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: '0.12em'
   },
-  chipOn: { background: 'var(--sunk)', borderColor: 'var(--accent)' },
+  chipOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
   row: {
     display: 'flex',
     alignItems: 'baseline',

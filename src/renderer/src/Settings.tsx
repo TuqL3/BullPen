@@ -44,7 +44,6 @@ type Section = 'floor' | 'app'
 export function Settings({
   workflow,
   onClose,
-  onApplied,
   onRestartFloor,
   mode,
   onMode,
@@ -56,7 +55,6 @@ export function Settings({
 }: {
   workflow: WorkflowInfo | null
   onClose: () => void
-  onApplied: (w: WorkflowInfo) => void
   /** Take the standing agents down and bring them back on the running shape. */
   onRestartFloor: () => Promise<void>
   mode: 'light' | 'dark'
@@ -104,10 +102,7 @@ export function Settings({
               key={key}
               title={hint}
               style={{ ...S.tab, ...(section === key ? S.tabOn : null) }}
-              onClick={(e) => {
-                e.currentTarget.blur()
-                setSection(key)
-              }}
+              onClick={() => setSection(key)}
             >
               {title}
             </button>
@@ -123,7 +118,19 @@ export function Settings({
             to its content and the canvas pushes the dialog off screen. */}
         {section === 'floor' ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <OrgChart workflow={workflow} onApplied={onApplied} onDirty={setDirty} />
+            {/* Not until there is one to draw.
+                `OrgChart` returns early when it has no floor, and three of its
+                effects are declared after that return - so mounting it empty
+                and handing it a floor a moment later changed the number of
+                hooks between two renders, which React answers by unmounting
+                the tree. Nothing opened this dialog before the floor had
+                arrived until `apply` started reopening it on the way back in,
+                and then the window came back blank. */}
+            {workflow ? (
+              <OrgChart workflow={workflow} onDirty={setDirty} />
+            ) : (
+              <div style={{ color: 'var(--faint)', padding: 8 }}>reading the floor…</div>
+            )}
           </div>
         ) : (
           <div style={S.page}>
@@ -195,12 +202,7 @@ function LookPane({
           <button
             key={m}
             style={{ ...S.btn, ...(mode === m ? S.btnGo : null) }}
-            // Blurred on the way out: a button the pointer chose keeps focus,
-            // and the ring around it reads as a second kind of selected.
-            onClick={(e) => {
-              e.currentTarget.blur()
-              onMode(m)
-            }}
+            onClick={() => onMode(m)}
           >
             {m}
           </button>
@@ -245,10 +247,7 @@ function LookPane({
           <button
             key={f}
             style={{ ...S.btn, ...(prefs.floor === f ? S.btnGo : null) }}
-            onClick={(e) => {
-              e.currentTarget.blur()
-              onPrefs({ floor: f })
-            }}
+            onClick={() => onPrefs({ floor: f })}
           >
             {f}
           </button>
@@ -361,8 +360,9 @@ const S: Record<string, React.CSSProperties> = {
   rule: { height: 1, background: 'var(--line)', margin: '18px 0' },
   btn: {
     background: 'transparent',
-    color: 'var(--ink)',
-    border: '1px solid var(--line)',
+    color: 'var(--muted)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     cursor: 'pointer',
     padding: '5px 12px',
     font: `12px ${MONO}`
@@ -375,7 +375,11 @@ const S: Record<string, React.CSSProperties> = {
   tab: {
     background: 'none',
     border: 'none',
-    borderBottom: '2px solid transparent',
+    // Longhand, because `tabOn` sets `borderBottomColor`: React clears that
+    // on the way out without rewriting the shorthand still in the object, and
+    // the tab nobody was on kept an underline in `currentcolor`.
+    borderBottom: '2px solid',
+    borderBottomColor: 'transparent',
     color: 'var(--muted)',
     cursor: 'pointer',
     padding: '4px 10px',
@@ -383,5 +387,5 @@ const S: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: '0.08em'
   },
-  tabOn: { color: 'var(--ink)', borderBottomColor: 'var(--accent)' }
+  tabOn: { color: 'var(--accent-ink)', borderBottomColor: 'var(--accent-ink)' }
 }

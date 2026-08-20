@@ -40,6 +40,10 @@ rings.textContent = `
   /* Same reason: a checkbox is the other control that arrives in the system's
      blue rather than the app's. */
   input[type='checkbox'] { accent-color: var(--accent-ink) }
+
+  /* The one animation in the app: something turning while a floor is handed
+     over and the window is taken down. */
+  @keyframes bp-spin { to { transform: rotate(360deg) } }
   input[type='range']::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 9px;
@@ -50,6 +54,23 @@ rings.textContent = `
   }
 `
 document.head.appendChild(rings)
+
+/**
+ * A control the pointer chose does not keep the ring.
+ *
+ * Focus stays on whatever was last clicked, and the ring around it is drawn in
+ * the same colour as selected - so a toggle switched *off* by the click still
+ * read as on, and the only way to clear it was to click somewhere else. Two
+ * buttons had already grown their own `blur()` in their own `onClick`, which is
+ * a fix that has to be remembered every time a button is written. Once, here,
+ * for every button there is. Keyboard focus is untouched: `blur` on pointerup
+ * cannot fire for a key.
+ */
+document.addEventListener('pointerup', (e) => {
+  const hit = (e.target as HTMLElement | null)?.closest('button')
+  if (hit && document.activeElement === hit) hit.blur()
+})
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

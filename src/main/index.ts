@@ -36,6 +36,7 @@ import {
   fixedId,
   formatDoc,
   hasPlaceFor,
+  drawnCardRules,
   lint,
   listWorkflows,
   parseMarkdown,
@@ -1769,6 +1770,45 @@ function wire(): void {
     return { markdown: toMarkdown(next), problems: lint(next, rulebook()) }
   })
 
+  /**
+   * Write a floor to disk without making it the one that runs.
+   *
+   * `workflow:patch` and `workflow:set` both save *and* apply, so there was no
+   * way to put a floor down and come back to it - opening another one to look
+   * at it retired agents and changed every screen in the app. Saving is saving;
+   * running is `workflow:set`, which the operator asks for by name.
+   */
+  /**
+   * The rules the drawing says, for a floor that is being drawn.
+   *
+   * Computed in main rather than in the renderer because this is the same
+   * reading of a floor the router does - who hands work out, who does it, who
+   * decides it passed - and a second copy of that in the drawing is a second
+   * copy that goes out of step.
+   */
+  ipcMain.handle('workflow:rules', (_e, patch: Partial<Workflow>) => {
+    try {
+      return { rules: drawnCardRules(patched({ ...patch, cardRules: [] })) }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('workflow:save', (_e, text: string) => {
+    const parsed = parseMarkdown(text)
+    if ('error' in parsed) return { error: parsed.error }
+    try {
+      saveWorkflow(BULLPEN_HOME, text)
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+    return {
+      workflow: parsed.workflow,
+      markdown: toMarkdown(parsed.workflow),
+      problems: lint(parsed.workflow, rulebook())
+    }
+  })
+
   ipcMain.handle('workflow:patch', async (_e, patch: Partial<Workflow>) => {
     const next = patched(patch)
     // Before `wf` moves, while the old floor can still say who was who.
@@ -1813,6 +1853,44 @@ function wire(): void {
     return 'error' in parsed ? [parsed.error] : lint(parsed.workflow)
   }
 
+  /**
+   * What a written floor has to be true of, whatever the model wrote.
+   *
+   * Rules a model can forget are not rules. Three of them are worth more than
+   * the prompt line asking for them:
+   *
+   * The front desk is Michael. The model picks a plausible id and a plausible
+   * name every time - `chief · Michael` on one floor, `lead · Dana` on the next
+   * - and the desk work is dispatched to is the same desk on all of them: the
+   * same agent, the same face on the roster, the same id every brief already
+   * writes to.
+   *
+   * `- reports to you:` and `- hires:` name a role or they are nothing. A floor
+   * came back naming `boss` for both on a floor whose roles are `manager`,
+   * `ba`, `dev` and `tester`; both were read, both were dropped, and nothing
+   * anywhere said so.
+   *
+   * A capability with no kind in brackets leaves whoever holds it classified as
+   * whatever the other three questions did not claim - which is "builds". A
+   * floor whose analyst said `- phan-tich-yeu-cau — turns a request into
+   * requirements` came out with the analyst counted as a builder: no tag on the
+   * roster, and the default hire for build work.
+   */
+  const tidy = (markdown: string): string => {
+    const parsed = parseMarkdown(markdown)
+    if ('error' in parsed) return markdown
+    const w = parsed.workflow
+    const seat = w.roles[w.dispatch]
+    if (!seat) return markdown
+    const named = (r: string | undefined): boolean => Boolean(r && w.roles[r])
+    return toMarkdown({
+      ...w,
+      roles: { ...w.roles, [w.dispatch]: { ...seat, fixed: { id: 'michael', name: 'Michael' } } },
+      voice: named(w.voice) ? w.voice : undefined,
+      hires: named(w.hires) ? w.hires : undefined
+    })
+  }
+
   ipcMain.handle('workflow:generate', async (_e, description: string) => {
     const want = description.trim()
     if (!want) return { error: 'Say what the floor should do first.' }
@@ -1854,7 +1932,7 @@ function wire(): void {
         )
         problems = check(md)
       }
-      return { markdown: md, problems }
+      return { markdown: tidy(md), problems }
     } catch (err) {
       return { error: `Could not reach the claude CLI: ${err instanceof Error ? err.message : String(err)}` }
     }

@@ -551,7 +551,8 @@ const S: Record<string, React.CSSProperties> = {
     padding: '6px 12px',
     background: 'transparent',
     color: 'var(--muted)',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     cursor: 'pointer',
     font: `11px ${MONO}`
   },

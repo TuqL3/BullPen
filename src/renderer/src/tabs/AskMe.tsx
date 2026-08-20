@@ -177,7 +177,7 @@ const S: Record<string, React.CSSProperties> = {
   btn: {
     padding: '6px 12px',
     background: 'var(--sunk)',
-    color: 'var(--ink)',
+    color: 'var(--muted)',
     border: '1px solid',
     borderColor: 'var(--line)',
     cursor: 'pointer',

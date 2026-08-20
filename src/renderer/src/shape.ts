@@ -51,18 +51,25 @@ export const rolesWithIn = (w: WorkflowInfo | null, kind: string): string[] => {
   // like when there are none - the same fallback main uses, and for the same
   // reason: both answers come from the rules, so a floor with none could not be
   // asked either of them.
-  const fromRules = (status: string): string[] =>
-    (w?.cardRules ?? []).length
+  const declared = (kind: string): string[] =>
+    names.filter((r) =>
+      (w?.roles[r]?.can ?? []).some(
+        (c) => (w?.capabilities ?? []).find((d) => d.name === c)?.kind === kind
+      )
+    )
+
+  // Both, not one or the other: a floor can write rules and still never write a
+  // `closes` one, and taking the rules as the whole answer said nobody here
+  // decides anything passes while the file declared a capability `(checks)`.
+  const fromRules = (status: string): string[] => {
+    const kind = status === 'open' ? 'assigns' : 'checks'
+    const written = (w?.cardRules ?? []).length
       ? names.filter((r) =>
           (w?.cardRules ?? []).some((rule) => rule.status === status && holds(w, r, rule.from))
         )
-      : names.filter((r) =>
-          (w?.roles[r]?.can ?? []).some(
-            (c) =>
-              (w?.capabilities ?? []).find((d) => d.name === c)?.kind ===
-              (status === 'open' ? 'assigns' : 'checks')
-          )
-        )
+      : []
+    return [...new Set([...written, ...declared(kind)])]
+  }
 
   if (kind === 'speaksToHuman') {
     if (w?.voice && w.roles[w.voice]) return [w.voice]
@@ -70,6 +77,13 @@ export const rolesWithIn = (w: WorkflowInfo | null, kind: string): string[] => {
   }
   if (kind === 'assigns') return fromRules('open')
   if (kind === 'checks') return fromRules('closes')
+
+  // Said outright when a capability declares itself `(builds)`. The other three
+  // are read off the lines and the rules, and this was whatever they did not
+  // claim - so an analyst holding a word of its own counted as a builder.
+  const builders = declared('builds')
+  if (builders.length) return builders
+
   if (w?.hires && w.roles[w.hires]) return [w.hires]
   const taken = new Set([
     ...rolesWithIn(w, 'speaksToHuman'),

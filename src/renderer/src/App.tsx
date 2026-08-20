@@ -110,6 +110,31 @@ export default function App() {
    */
   const [wf, setWf] = useState<WorkflowInfo | null>(null)
   const [settings, setSettings] = useState(false)
+  /**
+   * Open on the way back in, when a floor was just applied.
+   *
+   * Applying takes the window down and brings it up on the new floor, and
+   * whoever pressed it was in the middle of drawing - landing on a bare
+   * desktop with the dialog gone reads as the app having lost the work rather
+   * than as having done what was asked.
+   *
+   * In the URL, not in `sessionStorage`: the packaged app is loaded over
+   * `file:`, where reading storage throws rather than returning nothing - and
+   * this ran inside a `useState` initialiser, so the throw took the whole tree
+   * with it and the window came back empty. A hash cannot throw, and this is
+   * an effect either way, where a failure costs the dialog and not the app.
+   */
+  useEffect(() => {
+    if (window.location.hash !== '#floor') return
+    setSettings(true)
+    try {
+      history.replaceState(null, '', window.location.pathname + window.location.search)
+    } catch {
+      // Left in the URL rather than lost: it only means the next reload opens
+      // the dialog too.
+    }
+  }, [])
+
   const [dragging, setDragging] = useState<PanelId | null>(null)
   // Null when closed; otherwise the fields the wizard opens with. Hiring the
   // second agent into a project should not mean re-answering where it lives.
@@ -484,19 +509,6 @@ export default function App() {
    * running the shape it started on and nothing in the UI could move it. Their
    * conversations do not survive it, which is why the dialog says so first.
    */
-  /**
-   * A floor was applied. Agents follow it both ways: main stands down whoever
-   * the new one has no role for, and this brings up whoever it names and
-   * nobody is doing yet - without which a floor could be switched to and have
-   * nobody standing in half its roles until the app restarted.
-   */
-  const applyFloor = async (next: WorkflowInfo): Promise<void> => {
-    setWf(next)
-    setShape(next)
-    const { cols, rows } = paneSize(document.querySelector('section'))
-    for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
-  }
-
   const restartFloor = async (): Promise<void> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
     await window.bullpen.stopFixed()
@@ -957,7 +969,6 @@ export default function App() {
       {settings && (
         <Settings
           workflow={wf}
-          onApplied={applyFloor}
           onRestartFloor={restartFloor}
           mode={mode}
           onMode={(next) => {
@@ -1823,7 +1834,7 @@ const S: Record<string, React.CSSProperties> = {
   btn: {
     padding: '6px 10px',
     background: 'var(--sunk)',
-    color: 'var(--ink)',
+    color: 'var(--muted)',
     border: '1px solid',
     borderColor: 'var(--line)',
     cursor: 'pointer',

@@ -348,6 +348,22 @@ const api = {
     error?: string
   }> =>
     ipcRenderer.invoke('workflow:patch', patch),
+
+  /** The card rules the drawing itself says, one per line drawn on it. */
+  rulesFromDrawing: (
+    patch: Partial<WorkflowInfo>
+  ): Promise<{ rules?: WorkflowInfo['cardRules']; error?: string }> =>
+    ipcRenderer.invoke('workflow:rules', patch),
+
+  /** Write it to disk. What runs is unchanged until `setWorkflow`. */
+  saveWorkflowFile: (
+    markdown: string
+  ): Promise<{
+    workflow?: WorkflowInfo
+    markdown?: string
+    problems?: string[]
+    error?: string
+  }> => ipcRenderer.invoke('workflow:save', markdown),
   /** Keep one without running it. */
   deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('workflow:delete', name),

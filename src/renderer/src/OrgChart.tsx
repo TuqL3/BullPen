@@ -2,17 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import type { WorkflowInfo } from '../../preload/index'
 import {
   anchor,
-  connect,
-  disconnect,
   edges,
   freeRoleId,
+  fillRules,
+  ruled,
+  firing,
+  link,
+  ranks,
   staffed,
+  takeLineOff,
   LABEL_H,
   layout,
   NODE_H,
   NODE_W,
-  readTalk,
-  writeTalk,
   type ChartNode
 } from './chart'
 import { buildsCapabilityIn } from './shape'
@@ -32,18 +34,47 @@ import { LABEL, MONO } from './theme'
  * and what gets written is still the same markdown file, because that is what
  * the router reads and what you would hand to somebody else.
  */
+/**
+ * The part of a floor its card rules are about: who is on it, and who writes to
+ * whom. Sorted, because a line drawn and drawn again arrives in a different
+ * order and means the same thing.
+ */
+const shapeKey = (w: WorkflowInfo | null): string =>
+  !w
+    ? ''
+    : JSON.stringify({
+        roles: Object.keys(w.roles).sort(),
+        dispatch: w.dispatch,
+        talksTo: Object.fromEntries(
+          Object.entries(w.talksTo)
+            .map(([from, tos]) => [from, [...tos].sort()] as const)
+            .sort(([a], [b]) => a.localeCompare(b))
+        )
+      })
+
 export function OrgChart({
   workflow,
-  onApplied,
   onDirty
 }: {
   workflow: WorkflowInfo | null
-  onApplied: (w: WorkflowInfo, markdown?: string) => void
-  /** Told whenever the drawing stops matching the floor that is running. */
+  /** Told whenever the drawing has changes that are not written down. */
   onDirty?: (dirty: boolean) => void
 }) {
   /** The whole floor, edited in one place and saved in one go. */
   const [draft, setDraft] = useState<WorkflowInfo | null>(workflow)
+  /** The drawing as it was last written down, which is what `dirty` is against. */
+  const [saved, setSaved] = useState<WorkflowInfo | null>(workflow)
+  /** And whether the file beside it has been typed in since. */
+  const [fileEdited, setFileEdited] = useState(false)
+  /**
+   * The shape of the floor the rules were last written for.
+   *
+   * A rule is about a pair, and moving a line moves the pair - so rules that
+   * were right a moment ago are now about a floor that is not on screen. Saving
+   * that is how a file comes to describe a drawing nobody drew, and it cannot
+   * be spotted by reading either one on its own.
+   */
+  const [ruledAt, setRuledAt] = useState(() => shapeKey(workflow))
   const [nodes, setNodes] = useState<ChartNode[]>([])
   /**
    * What is open, and where.
@@ -66,8 +97,6 @@ export function OrgChart({
   const [drag, setDrag] = useState<{ id: string; dx: number; dy: number } | null>(null)
   const [wire, setWire] = useState<{ from: string; x: number; y: number } | null>(null)
   const [note, setNote] = useState('')
-  /** Whether the file is open beside the drawing. */
-  const [reading, setReading] = useState(false)
   /**
    * Where the canvas is being looked at from: scale, and the corner it starts
    * at. Scrollbars are the wrong instrument for a drawing - they move one axis
@@ -78,6 +107,8 @@ export function OrgChart({
   const [pan, setPan] = useState<{ x: number; y: number } | null>(null)
   const typing = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState('')
+  /** Set while the floor is being handed over and the window taken down. */
+  const [applying, setApplying] = useState(false)
   const svg = useRef<SVGSVGElement>(null)
   const board = useRef<HTMLDivElement>(null)
   const gesture = useRef(false)
@@ -96,10 +127,12 @@ export function OrgChart({
     ;(async () => {
       const prefs = await window.bullpen.uiPrefs()
       if (!live) return
-      const saved = prefs.chart?.[workflow?.name ?? ''] ?? {}
+      const placed = prefs.chart?.[workflow?.name ?? ''] ?? {}
       const seen = prefs.view?.[workflow?.name ?? '']
       setDraft(workflow)
-      setNodes(layout(workflow).map((n) => ({ ...n, ...(saved[n.id] ?? {}) })))
+      setSaved(workflow)
+      setRuledAt(shapeKey(workflow))
+      setNodes(layout(workflow).map((n) => ({ ...n, ...(placed[n.id] ?? {}) })))
       if (seen) setView(seen)
     })()
     return () => {
@@ -121,6 +154,15 @@ export function OrgChart({
     window.bullpen.setUiPrefs({ chart: { [name]: where } })
   }
 
+  /**
+   * Nothing to draw yet.
+   *
+   * Three of the effects below this line are declared after it, so a render
+   * that takes this branch runs fewer hooks than one that does not - and React
+   * answers a changed hook count by tearing the tree down. Whoever renders this
+   * has to have a floor already: `Settings` waits for one rather than mounting
+   * this empty and handing it one a moment later.
+   */
   if (!draft) return <div style={S.wrap} />
 
   const set = (patch: Partial<WorkflowInfo>): void => setDraft({ ...draft, ...patch })
@@ -154,13 +196,31 @@ export function OrgChart({
     typing.current = setTimeout(() => {
       window.bullpen.lintWorkflow(markdown).then((r) => {
         said(Boolean(r.preview), r.problems ?? [])
-        if (!r.preview) return
+        if (!r.preview) {
+          // On the bar, where the save button is. It was said under the text
+          // box, which is as tall as the column - so somebody who typed a line
+          // the parser cannot read saw a save button that would not light and
+          // nothing anywhere saying why.
+          return setError(r.problems?.[0] ?? 'The file does not read as a floor yet.')
+        }
+        setError('')
         setDraft(r.preview)
         relayout(r.preview)
       })
     }, 400)
   }
-  const dirty = JSON.stringify(draft) !== JSON.stringify(workflow)
+  /**
+   * Unsaved, rather than "not the floor that is running".
+   *
+   * Those were the same thing while saving also applied. They are not any more:
+   * a floor can be drawn, saved, and left on the canvas without the app running
+   * it, so what the save button is about is what has not been written down.
+   */
+  const dirty = JSON.stringify(draft) !== JSON.stringify(saved) || fileEdited
+  /** Whether the rules are about the floor as it is now drawn. */
+  const rulesStale = shapeKey(draft) !== ruledAt
+  /** Whether what is drawn is what the app is running. */
+  const running = draft.name === workflow?.name && JSON.stringify(draft) === JSON.stringify(workflow)
   // Reported up so the dialog around this can refuse to be dismissed over an
   // unsaved drawing: closing it unmounts the canvas, and a floor somebody has
   // spent ten minutes on goes with it, without a word.
@@ -223,6 +283,53 @@ export function OrgChart({
     } else if (wire) setWire({ ...wire, x: p.x, y: p.y })
   }
 
+  /**
+   * The rules a new line needs, worked out and put in.
+   *
+   * Taking a line off has always taken its rules with it. Drawing one put none
+   * back, so a floor written by the model and then redrawn by hand ended up
+   * with arrows the board does not follow. What is already written keeps its
+   * place - the router takes the first rule that fits, and a rule somebody
+   * wrote is the answer they meant.
+   */
+  const ruleTheLines = async (next: WorkflowInfo): Promise<void> => {
+    const res = await window.bullpen.rulesFromDrawing(next)
+    if (!res.rules) return
+    const filled = fillRules(next, res.rules)
+    if (filled.length !== next.cardRules.length) setDraft({ ...next, cardRules: filled })
+  }
+
+  /**
+   * Every rule, written again from the drawing as it now stands.
+   *
+   * The other two keep up on their own - a line taken off takes its rules, a
+   * line drawn gets the one it was missing - and both leave everything already
+   * written alone, which is right until the drawing has moved far enough that
+   * what was written is about a floor that no longer exists. This is the one
+   * that throws those away.
+   */
+  const rewriteRules = async (): Promise<void> => {
+    if (
+      draft.cardRules.length > 0 &&
+      !confirm(
+        'Write the card rules from the drawing?\n\n' +
+          `The ${draft.cardRules.length} rules in this file go, and what replaces them is one rule ` +
+          'per line: who hands work out, who does it, who decides it passed, and who tells you. ' +
+          'Nothing that is not drawn survives.'
+      )
+    ) {
+      return
+    }
+    setError('')
+    const res = await window.bullpen.rulesFromDrawing(draft)
+    if (res.error) return setError(res.error)
+    if (res.rules) {
+      set({ cardRules: res.rules })
+      setRuledAt(shapeKey(draft))
+      setNote(`The rules are the drawing: ${res.rules.length} of them, one per line.`)
+    }
+  }
+
   const drop = (e: React.PointerEvent): void => {
     if (wire) {
       const p = point(e)
@@ -237,7 +344,29 @@ export function OrgChart({
           p.y >= n.y - near &&
           p.y <= n.y + NODE_H + LABEL_H + near
       )
-      if (hit && hit.id !== wire.from) set({ talksTo: connect(draft.talksTo, wire.from, hit.id) })
+      if (hit && hit.id !== wire.from) {
+        // A line out of `you` is not a permission. The human is refused by
+        // nobody - `hive.gate` lets them write to anyone - and `talksTo` is
+        // written by roles about roles, so an entry under `you` lints as a
+        // floor naming a role that does not exist. What the gesture can only
+        // mean is where a task typed at this floor lands, so that is what it
+        // does: the arrow moves rather than a second one appearing.
+        if (wire.from === draft.human) {
+          if (draft.roles[hit.id]) {
+            set({
+              dispatch: hit.id,
+              // Inbound work follows it unless somebody had already sent it
+              // somewhere else on purpose.
+              ...(draft.entry === draft.dispatch ? { entry: hit.id } : {})
+            })
+          }
+        } else {
+          const talksTo = link(draft, wire.from, hit.id)
+          const next = { ...draft, talksTo }
+          setDraft(next)
+          void ruleTheLines(next)
+        }
+      }
     }
     // Only when there was one. Setting state on every pointerup re-rendered the
     // drawing between the press and the release, and a browser does not raise
@@ -250,7 +379,33 @@ export function OrgChart({
     if (wire) setWire(null)
   }
 
-  /** A new role, with enough in it to be a legal one. */
+  /**
+ * What a role drawn on the canvas is told until somebody writes it properly.
+ *
+ * Written to them rather than about them, and in placeholders, because the box
+ * has no name yet and the one who assigns it depends on the line that is drawn
+ * next.
+ */
+const STARTING_BRIEF = [
+  'You are "{{self.id}}", an agent on a Bullpen floor. {{reportTo}} assigns your work.',
+  '',
+  'Do the task you were sent and nothing beside it. If it turns out to be bigger than it read,',
+  'say so rather than growing it.',
+  '',
+  'Do not report that something works without the command output that shows it. If a build or a',
+  'test is red, say red and paste the line that failed.',
+  '',
+  'Report to whoever sent you the task - take their id from the message you were sent.',
+  '{{reportTo}} is only who to write to when nothing was sent. You write to anyone by putting one',
+  'JSON file in $BULLPEN_MAILBOX/outbox; mail for you is in $BULLPEN_MAILBOX/inbox:',
+  '',
+  '{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "done: <the task>", "body": "<what you did, and what you ran to check it>"}',
+  '',
+  'Report the same way when you are blocked, and say what would unblock it. Silence is the one',
+  'answer nobody can act on.'
+].join('\n')
+
+/** A new role, with enough in it to be a legal one. */
   const addRole = (): void => {
     const id = freeRoleId(draft.roles)
     // Whoever does the work on this floor, not whichever capability happens to
@@ -267,7 +422,11 @@ export function OrgChart({
           does: '',
           can: builds ? [builds] : [],
           hireable: true,
-          brief: ''
+          // Something to start on. A role drawn on the canvas came out with an
+          // empty brief, and a brief is handed to the CLI once at spawn and
+          // never again - so the first agent hired into it started knowing
+          // nothing at all, on a floor whose every other role had a page.
+          brief: STARTING_BRIEF
         }
       },
       talksTo: { ...draft.talksTo, [id]: [] }
@@ -284,7 +443,9 @@ export function OrgChart({
         .filter(([from]) => from !== id)
         .map(([from, tos]) => [from, tos.filter((t) => t !== id)])
     )
-    set({ roles, talksTo })
+    // And the rules that named it. A rule about a role the floor no longer has
+    // is not a rule that fires later.
+    set({ roles, talksTo, cardRules: firing({ ...draft, roles, talksTo }) })
     setNodes(nodes.filter((n) => n.id !== id))
     setPanel(null)
   }
@@ -292,16 +453,58 @@ export function OrgChart({
   const save = async (): Promise<void> => {
     setError('')
     setNote('')
-    const res = await window.bullpen.patchWorkflow(staffed(draft))
+    const shown = await window.bullpen.previewWorkflow(staffed(draft))
+    const res = await window.bullpen.saveWorkflowFile(shown.markdown)
     if (res.error) return setError(res.error)
-    if (res.workflow) {
-      onApplied(res.workflow, res.markdown)
-      // Saved either way; what is unfinished is said, not enforced.
-      setNote(
-        res.problems?.length
-          ? `Saved. Still unfinished: ${res.problems[0]}`
-          : 'Saved. The file is written; the floor runs it.'
+    setSaved(draft)
+    setFileEdited(false)
+    // Saved either way; what is unfinished is said, not enforced.
+    setNote(
+      res.problems?.length
+        ? `Saved. Still unfinished: ${res.problems[0]}`
+        : running
+          ? 'Saved. The file is written; the floor runs it.'
+          : 'Saved. Press apply to run it.'
+    )
+  }
+
+  /**
+   * Run this floor, and start the window again on it.
+   *
+   * Applying changes what every screen is about - the board's columns, who is
+   * on the roster, what the router allows - and the renderer keeps whatever it
+   * read when it opened. Rather than teach each screen to follow, the window
+   * comes back up on the new floor, which is what an operator would have done
+   * by hand. The dialog is reopened on the way in, so the floor somebody was
+   * halfway through drawing is still in front of them.
+   */
+  const apply = async (): Promise<void> => {
+    if (
+      !confirm(
+        `Run "${draft.name}"?\n\nThe window starts again on it. Agents already on the floor keep ` +
+          `running and keep the shape they were briefed with until they are restarted.`
       )
+    ) {
+      return
+    }
+    setError('')
+    setNote('')
+    setApplying(true)
+    try {
+      const shown = await window.bullpen.previewWorkflow(staffed(draft))
+      const res = await window.bullpen.setWorkflow(shown.markdown)
+      if (res.error) {
+        setApplying(false)
+        return setError(res.error)
+      }
+      // Read on the way back in, so the dialog is where it was left. In the
+      // URL rather than in storage: the packaged app is loaded over `file:`,
+      // where reading storage throws.
+      window.location.hash = 'floor'
+      window.location.reload()
+    } catch (err) {
+      setApplying(false)
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -347,6 +550,24 @@ export function OrgChart({
   }, [off.x, off.y])
 
   /**
+   * Take a line off, both ways at once.
+   *
+   * The dot is the pair rather than one arrow, so removing one direction and
+   * leaving the other is not a thing anybody clicking it meant. Work arriving
+   * is the exception and cannot go: `edges` puts it back on the next render
+   * because no role declares it, which is why pressing delete on it looked
+   * like a key that did nothing.
+   */
+  /**
+   * Take a line off. Both directions at once, because the dot is the pair -
+   * and if it is the one work arrives on, that arrow moves rather than goes.
+   */
+  const dropEdge = (from: string, to: string): void => {
+    set(takeLineOff(draft, from, to))
+    setPanel(null)
+  }
+
+  /**
    * Whatever is open is what is selected, so `delete` deletes it.
    *
    * Removing a role meant open the box, scroll past the brief, find a button;
@@ -366,13 +587,7 @@ export function OrgChart({
       }
       if (panel.kind === 'edge' && panel.id && panel.to) {
         e.preventDefault()
-        // Both ways: the dot is the line between two of them, and the line is
-        // gone. The one arrow nobody drew - work arriving - stays.
-        let talksTo = draft.talksTo
-        if (panel.id !== draft.human) talksTo = disconnect(talksTo, panel.id, panel.to)
-        if (panel.to !== draft.human) talksTo = disconnect(talksTo, panel.to, panel.id)
-        set({ talksTo })
-        setPanel(null)
+        dropEdge(panel.id, panel.to)
       }
     }
     window.addEventListener('keydown', key)
@@ -424,14 +639,7 @@ export function OrgChart({
     ]
     const spot = tries.find((t) => !busy(t.x, t.y)) ?? tries[3]
     const { x, y } = spot
-    // The first thing this pair says, if anything: the label on the line.
-    const when = draft.cardRules.find(
-      (r) =>
-        r.when &&
-        ((matchesRole(draft, from, r.from) && matchesRole(draft, to, r.to)) ||
-          (matchesRole(draft, to, r.from) && matchesRole(draft, from, r.to)))
-    )?.when
-    return [{ from, to, x, y, when }]
+    return [{ from, to, x, y }]
   })
 
   return (
@@ -448,39 +656,85 @@ export function OrgChart({
             {note}
           </span>
         )}
-        <button
-          style={{ ...S.btn, ...(reading && !panel ? S.btnOn : {}) }}
-          onClick={() => {
-            // One column, so opening the file puts away whatever was in it.
-            setPanel(null)
-            setReading(!reading || Boolean(panel))
-          }}
-        >
-          read it
-        </button>
-        <button style={S.btn} onClick={() => setPanel({ kind: 'company' })}>
-          the company
-        </button>
-        <button style={S.btn} onClick={() => setPanel({ kind: 'floors' })}>
-          floors
-        </button>
-        {dirty && (
-          <>
-            <button
-              style={S.btn}
-              onClick={() => {
-                setDraft(workflow)
-                if (workflow) relayout(workflow)
-                setPanel(null)
-              }}
-            >
-              undo
-            </button>
-            <button style={{ ...S.btn, ...S.btnGo }} onClick={save}>
-              save the floor
-            </button>
-          </>
+        {/* Lit while it is open, and the same press puts it away. Neither was
+            true: they set the panel every time, so the button that opened a
+            thing looked identical to one that did nothing and the only way
+            back was the × on the panel itself. */}
+        {(['company', 'floors'] as const).map((kind) => (
+          <button
+            key={kind}
+            style={{ ...S.btn, ...(panel?.kind === kind ? S.btnOn : {}) }}
+            onClick={() => setPanel(panel?.kind === kind ? null : { kind })}
+          >
+            {kind === 'company' ? 'the company' : 'floors'}
+          </button>
+        ))}
+        {/* On the bar, lit, and in the way of the save. It lived in `the
+            company`, two clicks behind a panel that covers the drawing - and a
+            floor could be redrawn and saved without it ever being pressed, so
+            the file went to disk describing a drawing nobody drew. */}
+        {rulesStale && (
+          <button style={{ ...S.btn, ...S.btnGo }} onClick={rewriteRules}>
+            write the rules from the drawing
+          </button>
         )}
+        {dirty && (
+          <button
+            style={S.btn}
+            onClick={() => {
+              setDraft(workflow)
+              if (workflow) relayout(workflow)
+              setPanel(null)
+            }}
+          >
+            undo
+          </button>
+        )}
+        {/* Always on the bar, lit only when there is something to save.
+            It appeared with `undo` the moment the drawing differed and was not
+            there otherwise - so a floor you had just made had no save button
+            anywhere, which reads as "this cannot be saved" rather than as
+            "this is already saved". */}
+        <button
+          style={{ ...S.btn, ...(dirty && !rulesStale ? S.btnGo : S.btnOff) }}
+          disabled={!dirty || applying || rulesStale}
+          title={
+            rulesStale
+              ? 'the lines have moved - write the rules from the drawing first'
+              : dirty
+                ? 'write the file'
+                : error
+                  ? 'the file does not read as a floor yet'
+                  : 'nothing has changed since it was last saved'
+          }
+          onClick={save}
+        >
+          save the floor
+        </button>
+        {/* Two presses, not one. Saving writes the file; this is the one that
+            changes what the app is running, and it says so before it does. */}
+        <button
+          style={{ ...S.btn, ...(running || dirty ? {} : S.btnGo) }}
+          disabled={applying || running || dirty}
+          title={
+            dirty
+              ? 'save it first - what runs is the file, not the drawing'
+              : running
+                ? 'this is the floor the app is running'
+                : `run ${draft.name}`
+          }
+          onClick={apply}
+        >
+          {applying ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Spinner /> starting the floor…
+            </span>
+          ) : running && !dirty ? (
+            'running'
+          ) : (
+            'apply'
+          )}
+        </button>
       </div>
 
       <div style={S.body}>
@@ -697,23 +951,28 @@ export function OrgChart({
                     <text x={NODE_W / 2} y={NODE_H + 30} style={S.what} pointerEvents="none">
                       {n.id}
                     </text>
-                    {n.kind !== 'human' && (
-                      <circle
-                        cx={NODE_W}
-                        cy={NODE_H / 2}
-                        r={5}
-                        fill="var(--accent-ink)"
-                        style={{ cursor: 'crosshair' }}
-                        onPointerDown={(e) => {
-                          e.stopPropagation()
-                          e.currentTarget.setPointerCapture(e.pointerId)
-                          const p = point(e)
-                          setWire({ from: n.id, x: p.x, y: p.y })
-                        }}
-                      >
-                        <title>drag to whoever this one may write to</title>
-                      </circle>
-                    )}
+                    {/* The human had no dot, so the one arrow an operator
+                        wants to move - where a task they type goes - was the
+                        one arrow they could not draw. */}
+                    <circle
+                      cx={NODE_W}
+                      cy={NODE_H / 2}
+                      r={5}
+                      fill="var(--accent-ink)"
+                      style={{ cursor: 'crosshair' }}
+                      onPointerDown={(e) => {
+                        e.stopPropagation()
+                        e.currentTarget.setPointerCapture(e.pointerId)
+                        const p = point(e)
+                        setWire({ from: n.id, x: p.x, y: p.y })
+                      }}
+                    >
+                      <title>
+                        {n.kind === 'human'
+                          ? 'drag to whoever a task you type should go to'
+                          : 'drag to whoever this one may write to'}
+                      </title>
+                    </circle>
                     <circle
                       cx={0}
                       cy={NODE_H / 2}
@@ -733,21 +992,10 @@ export function OrgChart({
               press and release both landed, `click` never did - so the one
               thing on this canvas nothing could open was the flow itself. An
               HTML button is not clever, and it works. */}
-          {/* What the line is for, beside it: the rule's own words. */}
-          {handles.map(({ from, to, x, y, when }) =>
-            when ? (
-              <span
-                key={`${from}->${to}:label`}
-                style={{ ...S.edgeLabel, left: x - off.x + 44, top: y - off.y + 22 }}
-              >
-                {when}
-              </span>
-            ) : null
-          )}
           {handles.map(({ from, to, x, y }) => (
             <button
               key={`${from}->${to}`}
-              title={`${from} → ${to} · click to say how they talk`}
+              title={`${from} → ${to}`}
               style={{
                 ...S.handle,
                 left: x - off.x + 30 - 9,
@@ -763,6 +1011,68 @@ export function OrgChart({
               }}
             />
           ))}
+
+          {/* The role, at the box. Same reason as the line below it: what was
+              clicked and what says something about it should not be at
+              opposite ends of the screen. */}
+          {panel?.kind === 'role' &&
+            nodes
+              .filter((n) => n.id === panel.id && draft.roles[n.id])
+              .map((n) => (
+                <div
+                  key={`${n.id}:panel`}
+                  style={{
+                    ...S.pop,
+                    width: 320,
+                    left: n.x - off.x + 30 + NODE_W + 14,
+                    top: n.y - off.y + 30,
+                    transform: `scale(${1 / view.k})`
+                  }}
+                  onWheel={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onContextMenu={(e) => e.stopPropagation()}
+                >
+                  <RoleInspector
+                    floor={draft}
+                    role={n.id}
+                    onChange={set}
+                    onClose={() => setPanel(null)}
+                  />
+                </div>
+              ))}
+
+          {/* The line, said at the line.
+              It opened a column beside the drawing, so clicking a dot meant
+              looking away from the thing clicked to read two sentences about
+              it - and the drawing scrolled sideways to make room. Counter-
+              scaled so the words stay the size words are at any zoom. */}
+          {panel?.kind === 'edge' &&
+            handles
+              .filter((h) => h.from === panel.id && h.to === panel.to)
+              .map(({ from, to, x, y }) => (
+                <div
+                  key={`${from}->${to}:panel`}
+                  style={{
+                    ...S.pop,
+                    left: x - off.x + 30 + 14,
+                    top: y - off.y + 30 - 9,
+                    transform: `scale(${1 / view.k})`
+                  }}
+                  onWheel={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onContextMenu={(e) => e.stopPropagation()}
+                >
+                  <TalkInspector
+                    floor={draft}
+                    from={from}
+                    to={to}
+                    onDelete={() => dropEdge(from, to)}
+                    onClose={() => setPanel(null)}
+                  />
+                </div>
+              ))}
           </div>
 
           {menu && (
@@ -829,63 +1139,55 @@ export function OrgChart({
           )}
         </div>
 
-        {/* Beside the drawing, never over it, and as tall as the dialog.
-            These were 330x460 boxes floating on the canvas: everything in them
-            scrolled inside a box smaller than the thing it described, and they
-            covered the drawing they were about. One column, one at a time -
-            you are either reading the file or editing one thing in it. */}
-        {(panel || reading) && (
-          <div
-            style={S.side}
-            onWheel={(e) => e.stopPropagation()}
-            onContextMenu={(e) => e.stopPropagation()}
-          >
-            <div style={S.sideHead}>
-              <span style={{ ...LABEL, color: 'var(--faint)', flex: 1 }}>
-                {panel ? PANEL_TITLE[panel.kind] : 'the whole file'}
-              </span>
-              <button
-                style={S.close}
-                title="close"
-                onClick={() => (panel ? setPanel(null) : setReading(false))}
-              >
-                ×
-              </button>
-            </div>
-            <div style={S.sideBody}>
-              {!panel ? (
-                <FilePanel floor={staffed(draft)} onText={fromText} onClose={() => setReading(false)} />
-              ) : panel.kind === 'try' ? (
-                <TryPanel dirty={dirty} />
-              ) : panel.kind === 'company' ? (
-                <CompanyPanel floor={draft} onChange={set} />
-              ) : panel.kind === 'floors' ? (
-                <FloorsPanel
-                  running={draft.name}
-                  dirty={dirty}
-                  onRan={(w, md) => {
-                    onApplied(w, md)
-                    setPanel(null)
-                  }}
-                />
-              ) : panel.kind === 'edge' && panel.id && panel.to ? (
-                <TalkInspector
-                  // Per pair, so the box is re-read when another line is
-                  // clicked: without it React keeps the same instance, the
-                  // text state never re-initialises, and the second line
-                  // opened shows the first one's rules.
-                  key={`${panel.id}->${panel.to}`}
-                  floor={draft}
-                  from={panel.id}
-                  to={panel.to}
-                  onChange={set}
-                />
-              ) : panel.id && draft.roles[panel.id] ? (
-                <RoleInspector floor={draft} role={panel.id} onChange={set} />
-              ) : null}
-            </div>
+        {/* One column beside the drawing, and the file is what is in it.
+            Anything about the whole floor - the words it uses, which floor is
+            running - opens over the top of it rather than beside it: a third
+            column took its width from the drawing, which is the thing all of
+            them are about. */}
+        <div
+          style={S.side}
+          onWheel={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          <div style={S.sideHead}>
+            <span style={{ ...LABEL, color: 'var(--faint)', flex: 1 }}>the whole file</span>
           </div>
-        )}
+          <div style={{ ...S.sideBody, ...S.sideTall }}>
+            <FilePanel floor={staffed(draft)} onText={fromText} onEdited={setFileEdited} />
+          </div>
+
+          {panel && panel.kind !== 'edge' && panel.kind !== 'role' && (
+            <div style={S.over}>
+              <div style={S.sideHead}>
+                <span style={{ ...LABEL, color: 'var(--faint)', flex: 1 }}>
+                  {PANEL_TITLE[panel.kind]}
+                </span>
+              </div>
+              <div style={S.sideBody}>
+                {panel.kind === 'try' ? (
+                  <TryPanel dirty={dirty} />
+                ) : panel.kind === 'company' ? (
+                  <CompanyPanel floor={draft} onChange={set} />
+                ) : panel.kind === 'floors' ? (
+                  <FloorsPanel
+                    running={workflow?.name ?? ''}
+                    dirty={dirty}
+                    onPick={(w, written) => {
+                      setDraft(w)
+                      // One off the list is already a file. Only a floor that
+                      // has never been written - a blank one, or one the model
+                      // has just drawn - opens with something to save, which is
+                      // what the save button should be saying.
+                      if (written) setSaved(w)
+                      relayout(w)
+                      setPanel(null)
+                    }}
+                  />
+                ) : null}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -909,19 +1211,56 @@ export function OrgChart({
 function RoleInspector({
   floor,
   role,
-  onChange
+  onChange,
+  onClose
 }: {
   floor: WorkflowInfo
   role: string
   onChange: (patch: Partial<WorkflowInfo>) => void
+  onClose: () => void
 }) {
   const def = floor.roles[role]
   const set = (patch: Partial<typeof def>): void =>
     onChange({ roles: { ...floor.roles, [role]: { ...def, ...patch } } })
 
+  /**
+   * Who this one answers to: of everybody it has a line with, whoever stands
+   * nearest the person running the floor. `you` is nearest of all, so the role
+   * work is dispatched to reports to the human and nobody reports to the human
+   * through anybody else.
+   *
+   * Read off the lines rather than typed on the role: a rank in the file is a
+   * second opinion about the drawing, and the two disagree the first time an
+   * arrow moves.
+   */
+  const rank = ranks(floor)
+  const mine = rank.get(role) ?? 99
+  const linked = (r: string): boolean =>
+    (floor.talksTo[role] ?? []).includes(r) ||
+    (floor.talksTo[r] ?? []).includes(role) ||
+    (r === floor.human && role === floor.dispatch)
+  const above = [...Object.keys(floor.roles), floor.human]
+    .filter((r) => r !== role && linked(r) && (rank.get(r) ?? 99) < mine)
+    .sort((a, b) => (rank.get(a) ?? 99) - (rank.get(b) ?? 99))[0]
+  const name = (r: string): string => (r === floor.human ? 'you' : (floor.roles[r]?.label ?? r))
+
   return (
     <div>
-      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>{role}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ ...LABEL, color: 'var(--accent-ink)', flex: 1 }}>{role}</span>
+        <button style={S.close} title="close" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+        {above ? (
+          <>
+            Reports the work back to <b>{name(above)}</b>.
+          </>
+        ) : (
+          'Reports to nobody - draw a line to whoever this one answers to.'
+        )}
+      </div>
 
       <Row label="called">
         <input
@@ -932,54 +1271,13 @@ function RoleInspector({
         />
       </Row>
 
-      {/* What kind of work this one does, in the floor's own words. The card
-          rules are written against these, so a role holding none of them is a
-          role no rule can name - which reads as a card that never moves. */}
-      <div style={{ ...LABEL, marginTop: 8 }}>what kind of work</div>
-      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 4px' }}>
-        What this one does on this floor. Add the words under <b>the company</b>.
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {floor.capabilities.length === 0 && (
-          <span style={{ color: 'var(--faint)' }}>This floor has named none yet.</span>
-        )}
-        {floor.capabilities.map((c) => {
-          const on = def.can.includes(c.name)
-          return (
-            <span
-              key={c.name}
-              title={c.what}
-              style={{ ...S.choice, ...(on ? S.choiceOn : null) }}
-              onClick={() =>
-                set({ can: on ? def.can.filter((x) => x !== c.name) : [...def.can, c.name] })
-              }
-            >
-              {c.name}
-            </span>
-          )
-        })}
-      </div>
-
-      {/* Whether somebody is at this desk when the app opens, or is hired when
-          there is work for them. Dispatch is neither - it is who you type at. */}
-      {role !== floor.dispatch && (
-        <label style={{ ...S.checkRow, marginTop: 10 }}>
-          <input
-            type="checkbox"
-            checked={Boolean(def.fixed)}
-            onChange={(e) =>
-              set(
-                e.target.checked
-                  ? { fixed: { id: role, name: def.label || role }, hireable: undefined }
-                  : { fixed: undefined, hireable: true }
-              )
-            }
-          />
-          <span style={{ color: 'var(--muted)' }}>
-            standing here from launch — otherwise hired when there is work
-          </span>
-        </label>
-      )}
+      {/* A tick stood here for "somebody at this desk from launch, otherwise
+          hired when there is work". Every floor there is answers it the same
+          way - dispatch stands, everybody else is hired - and `staffed` writes
+          that on save whether or not anybody ticked anything. A second standing
+          agent is still a floor that can be written; it is `- agent: id · Name`
+          in the file, which is where the rest of what the drawing cannot show
+          already lives. */}
 
       <div style={{ ...LABEL, marginTop: 8 }}>what this one does</div>
       <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 4px' }}>
@@ -988,7 +1286,7 @@ function RoleInspector({
         everywhere else.
       </div>
       <textarea
-        style={{ ...S.area, height: 240 }}
+        style={{ ...S.area, height: 150 }}
         value={def.brief}
         spellCheck={false}
         placeholder={
@@ -997,7 +1295,13 @@ function RoleInspector({
           'When it is done: {"from": "{{self.id}}", "to": "editor", "subject": "done: <the piece>", "body": "<what you wrote>"}\n\n' +
           'Say the same when you are stuck, and why.'
         }
-        onChange={(e) => set({ brief: e.target.value, does: firstLine(e.target.value) })}
+        // The brief only. It also wrote `- does:` from this box's first line,
+        // which is the one line the hire dialog shows to say what a role is
+        // for - and a brief opens "You are {{self.name}}, and you stand in for
+        // the person running this floor", so the summary became the greeting,
+        // placeholders and all, the moment anybody touched the brief. It is
+        // its own sentence or it is nothing.
+        onChange={(e) => set({ brief: e.target.value })}
       />
       <div style={{ color: 'var(--faint)', marginTop: 8 }}>
         <kbd>delete</kbd> takes this one off the floor.
@@ -1006,13 +1310,39 @@ function RoleInspector({
   )
 }
 
-/** The opening sentence, which is what a role is described by everywhere else. */
-const firstLine = (brief: string): string =>
-  brief
-    .split('\n')
-    .map((l) => l.trim())
-    .find(Boolean)
-    ?.slice(0, 160) ?? ''
+/**
+ * The floor from the top down, above the file it is written in.
+ *
+ * The file says who writes to whom and leaves the shape of it to be worked out
+ * by reading every `- talks to:` line at once. This is that shape: the person
+ * running the floor, then whoever they dispatch to, then whoever that one hands
+ * work to. Nobody types it - it is read off the same lines the drawing is - so
+ * it cannot disagree with the file underneath it.
+ */
+function Ladder({ floor }: { floor: WorkflowInfo }) {
+  const rank = ranks(floor)
+  const levels = new Map<number, string[]>()
+  for (const [who, at] of rank) levels.set(at, [...(levels.get(at) ?? []), who])
+  const name = (r: string): string => (r === floor.human ? 'you' : (floor.roles[r]?.label ?? r))
+
+  return (
+    <div style={S.ladder}>
+      {[...levels.keys()]
+        .sort((a, b) => a - b)
+        .map((at) => (
+          <div key={at} style={{ display: 'flex', gap: 8 }}>
+            <span style={{ color: 'var(--faint)', width: 14, flex: '0 0 auto' }}>{at}</span>
+            <span style={{ color: at === 0 ? 'var(--accent-ink)' : 'var(--muted)' }}>
+              {levels
+                .get(at)
+                ?.map(name)
+                .join(' · ')}
+            </span>
+          </div>
+        ))}
+    </div>
+  )
+}
 
 /**
  * The floor as the file it is.
@@ -1025,16 +1355,26 @@ const firstLine = (brief: string): string =>
 function FilePanel({
   floor,
   onText,
-  onClose
+  onEdited
 }: {
   floor: WorkflowInfo
   onText: (markdown: string, said: (ok: boolean, problems: string[]) => void) => void
-  onClose: () => void
+  /**
+   * Whether the box no longer says what the floor says.
+   *
+   * The bar's save button watched the drawing, and the parser drops what it
+   * does not recognise rather than refusing it - so a line typed in here that
+   * means nothing to it changed the text, changed no floor, and left a save
+   * button that would not light in front of a file that plainly had been
+   * edited. What is in the box is a thing that can be saved, whether or not it
+   * survives the read.
+   */
+  onEdited: (differs: boolean) => void
 }) {
   const [text, setText] = useState('')
-  const [was, setWas] = useState('')
+  /** The floor as the file writes it, which is what `onEdited` is against. */
+  const [canon, setCanon] = useState('')
   const [problems, setProblems] = useState<string[]>([])
-  const [error, setError] = useState('')
   /**
    * Whether they are typing in here right now.
    *
@@ -1059,45 +1399,30 @@ function FilePanel({
     window.bullpen.previewWorkflow(floor).then((r) => {
       if (!live) return
       setText(r.markdown)
-      setWas(r.markdown)
+      setCanon(r.markdown)
       setProblems(r.problems ?? [])
+      onEdited(false)
     })
     return () => {
       live = false
     }
   }, [floor, writing, bad])
 
-  const save = async (): Promise<void> => {
-    const res = await window.bullpen.setWorkflow(text)
-    if (res.error) return setError(res.error)
-    setWas(res.markdown ?? text)
-    onClose()
-    reopen()
-  }
-
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>the whole file</div>
-      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+      {/* One save, on the bar, where the apply is. There was a second one at
+          the bottom of this column: two buttons for one act, on a box that
+          already redraws the floor as it is typed in. */}
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '0 0 6px' }}>
         The drawing, as it reads. Type in it and the drawing changes with it.
       </div>
-      <textarea
-        style={{ ...S.area, flex: 1, minHeight: 300 }}
-        value={text}
-        spellCheck={false}
-        onFocus={() => setWriting(true)}
-        onBlur={() => setWriting(false)}
-        onChange={(e) => {
-          setText(e.target.value)
-          onText(e.target.value, (ok, said) => {
-            setBad(!ok)
-            setProblems(said)
-          })
-        }}
-      />
-      {error ? (
-        <div style={{ color: 'var(--danger)', lineHeight: 1.6 }}>{error.split('\n')[0]}</div>
-      ) : bad ? (
+      <Ladder floor={floor} />
+      {/* Above the box, not under it.
+          `save the file` used to sit at the bottom of this column with the
+          problems above it, and the box between them is as tall as the column -
+          so somebody who typed a line the parser cannot read had the save
+          button refuse to light with the reason two screens down. */}
+      {bad ? (
         <div style={{ color: 'var(--muted)', lineHeight: 1.6 }}>
           {problems[0] ?? 'Not a floor yet - the drawing is waiting for this to read.'}
         </div>
@@ -1108,13 +1433,21 @@ function FilePanel({
           ))}
         </div>
       ) : null}
-      <button
-        style={{ ...S.btn, ...(text !== was ? S.btnGo : S.btnOff), marginTop: 6 }}
-        disabled={text === was}
-        onClick={save}
-      >
-        save the file
-      </button>
+      <textarea
+        style={{ ...S.area, flex: 1, minHeight: 300 }}
+        value={text}
+        spellCheck={false}
+        onFocus={() => setWriting(true)}
+        onBlur={() => setWriting(false)}
+        onChange={(e) => {
+          setText(e.target.value)
+          onEdited(e.target.value !== canon)
+          onText(e.target.value, (ok, said) => {
+            setBad(!ok)
+            setProblems(said)
+          })
+        }}
+      />
     </div>
   )
 }
@@ -1177,28 +1510,15 @@ function TryPanel({ dirty }: { dirty: boolean }) {
 }
 
 /** The floors you have, and which one is running. */
-/**
- * Take the whole window back to the floor that is now running.
- *
- * Applying a floor changes what every screen is about: the board's columns, who
- * is on the roster, what the router will allow. Main is told at once and the
- * agents follow (§28), but the renderer keeps whatever it read when it opened -
- * a task list under the old columns, a roster with roles this floor does not
- * have. Reloading is cheap here: main owns the agents and the terminals, and
- * nothing in the window is worth more than being right.
- */
-const reopen = (): void => {
-  setTimeout(() => window.location.reload(), 200)
-}
-
 function FloorsPanel({
   running,
   dirty,
-  onRan
+  onPick
 }: {
   running: string
   dirty: boolean
-  onRan: (w: WorkflowInfo, markdown?: string) => void
+  /** Draw it. Running it is a second press, on the bar. */
+  onPick: (w: WorkflowInfo, written: boolean) => void
 }) {
   const [saved, setSaved] = useState<
     { name: string; description: string; markdown: string; builtin: boolean }[]
@@ -1208,6 +1528,8 @@ function FloorsPanel({
   const [said, setSaid] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  /** What the last press did, said where it was pressed. */
+  const [note, setNote] = useState('')
 
   const list = (): void => {
     window.bullpen.workflowList().then(async (all) => {
@@ -1220,21 +1542,28 @@ function FloorsPanel({
   }
   useEffect(list, [])
 
-  const run = async (markdown: string): Promise<void> => {
-    if (dirty && !confirm('The floor has unsaved changes. Switch anyway and lose them?')) return
-    setError('')
-    const res = await window.bullpen.setWorkflow(markdown)
-    if (res.error) return setError(res.error)
-    if (res.workflow) {
-      onRan(res.workflow, res.markdown)
-      reopen()
+  /**
+   * Put one on the canvas. It used to be running by the time the click
+   * finished - every screen in the app changed, agents were retired, and the
+   * only way to look at a floor was to be on it. Picking is picking; `apply`
+   * on the bar is what changes what the app runs.
+   */
+  const run = async (markdown: string, written = true): Promise<void> => {
+    if (dirty && !confirm('The floor you are drawing has unsaved changes. Open another and lose them?')) {
+      return
     }
+    setError('')
+    setNote('')
+    const res = await window.bullpen.lintWorkflow(markdown)
+    if (!res.preview) return setError(res.problems?.[0] ?? 'That floor could not be read.')
+    onPick(res.preview, written)
+    setNote('Drawn. Nothing is running it yet - press apply on the bar.')
   }
 
   /** A chart with the two parties every floor has, and nothing else. */
   const blank = async (): Promise<void> => {
     setBusy('new')
-    await run(await window.bullpen.workflowBlank())
+    await run(await window.bullpen.workflowBlank(), false)
     setBusy('')
   }
 
@@ -1254,7 +1583,7 @@ function FloorsPanel({
     setBusy('')
     if (res.error) return setError(res.error)
     if (res.markdown) {
-      await run(res.markdown)
+      await run(res.markdown, false)
       setSaid('')
       list()
       if (res.problems?.length) setError(`Drawn, with something left: ${res.problems[0]}`)
@@ -1263,8 +1592,7 @@ function FloorsPanel({
 
   return (
     <div>
-      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>another floor</div>
-      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '0 0 6px' }}>
         Switching changes what the app runs. Agents already up keep the shape they started on
         until they are restarted.
       </div>
@@ -1289,66 +1617,100 @@ function FloorsPanel({
         </button>
       </div>
 
-      {saved.map((w) => {
-        const here = w.name === running
-        return (
-          <div
-            key={w.name}
-            role="button"
-            title={here ? 'this is the floor running' : `run ${w.name}`}
-            style={{ ...S.card, ...(here ? S.cardOn : {}), cursor: here ? 'default' : 'pointer' }}
-            onClick={() => !here && run(w.markdown)}
-          >
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{ color: here ? 'var(--ok)' : 'var(--ink)', flex: 1 }}>{w.name}</span>
-              {!here && (
-                <button
-                  style={S.linkBtn}
-                  title={
-                    w.builtin
-                      ? 'take this one off the list - it ships with Bullpen and is not deleted'
-                      : 'delete this floor'
-                  }
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    // A shipped floor is only taken off the list and `show the
-                    // ones I removed` brings it back. One you wrote is a file,
-                    // deleted outright, with nothing anywhere that restores it -
-                    // and it sat one unguarded click from a card you click to
-                    // switch floors.
-                    if (
-                      !w.builtin &&
-                      !confirm(
-                        `Delete "${w.name}"? The file is removed and there is no way back to it.`
-                      )
-                    ) {
-                      return
-                    }
-                    const res = await window.bullpen.deleteWorkflow(w.name)
-                    if (res.error) return setError(res.error)
-                    list()
+      {/* Two lists, not one.
+          They were one, sorted by nothing, with `remove` in red beside every
+          row - and `remove` meant two different things depending on which row
+          it was on: a floor you wrote is a file and goes for good, one that
+          ships with Bullpen only comes off the list. Same word, same colour,
+          two outcomes, and nothing on the row saying which kind it was. */}
+      {(
+        [
+          ['the ones you wrote', saved.filter((w) => !w.builtin)],
+          ['the ones that ship', saved.filter((w) => w.builtin)]
+        ] as const
+      ).map(([title, group]) =>
+        group.length === 0 ? null : (
+          <div key={title}>
+            <div style={{ ...LABEL, marginTop: 10, marginBottom: 4 }}>{title}</div>
+            {group.map((w) => {
+              const here = w.name === running
+              return (
+                <div
+                  key={w.name}
+                  role="button"
+                  title={here ? 'this is the floor running' : `run ${w.name}`}
+                  style={{
+                    ...S.card,
+                    ...(here ? S.cardOn : {}),
+                    cursor: here ? 'default' : 'pointer'
                   }}
+                  onClick={() => !here && run(w.markdown)}
                 >
-                  remove
-                </button>
-              )}
-            </div>
-            <div style={{ color: 'var(--faint)', lineHeight: 1.5 }}>{w.description}</div>
-            <Shape floor={shape[w.name]} />
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                    <span style={{ color: here ? 'var(--ok)' : 'var(--ink)', flex: 1 }}>
+                      {w.name}
+                    </span>
+                    {here && <span style={{ color: 'var(--ok)' }}>running</span>}
+                    {!here && (
+                      <button
+                        style={S.btn}
+                        title={
+                          w.builtin
+                            ? 'off the list only - it ships with Bullpen and the file is not yours to delete'
+                            : 'delete the file, with nothing that brings it back'
+                        }
+                        onClick={async (e) => {
+                          e.stopPropagation()
+                          // One you wrote is a file, deleted outright, with
+                          // nothing anywhere that restores it - and it sat one
+                          // unguarded click from a card you click to switch
+                          // floors.
+                          if (
+                            !w.builtin &&
+                            !confirm(
+                              `Delete "${w.name}"? The file is removed and there is no way back to it.`
+                            )
+                          ) {
+                            return
+                          }
+                          setError('')
+                          setNote('')
+                          const res = await window.bullpen.deleteWorkflow(w.name)
+                          if (res.error) return setError(res.error)
+                          setNote(
+                            w.builtin
+                              ? `${w.name} is off the list.`
+                              : `${w.name} is deleted.`
+                          )
+                          list()
+                        }}
+                      >
+                        {w.builtin ? 'hide' : 'delete'}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ color: 'var(--faint)', lineHeight: 1.5 }}>{w.description}</div>
+                  <Shape floor={shape[w.name]} />
+                </div>
+              )
+            })}
           </div>
         )
-      })}
-      {/* Removing a shipped floor only takes it off the list, and without this
+      )}
+      {/* Hiding a shipped floor only takes it off the list, and without this
           there was no way back to it short of editing the config by hand. */}
       <button
-        style={{ ...S.linkBtn, marginTop: 4 }}
+        style={{ ...S.btn, marginTop: 8 }}
         onClick={async () => {
           await window.bullpen.unhideWorkflows()
+          setError('')
+          setNote('Every floor that ships is on the list again.')
           list()
         }}
       >
-        show the ones I removed
+        put the hidden ones back
       </button>
+      {note && <div style={{ color: 'var(--ok)', marginTop: 6 }}>{note}</div>}
       {error && <div style={{ color: 'var(--danger)' }}>{error.split('\n')[0]}</div>}
     </div>
   )
@@ -1378,8 +1740,6 @@ function CompanyPanel({
   floor: WorkflowInfo
   onChange: (patch: Partial<WorkflowInfo>) => void
 }) {
-  const setCap = (at: number, patch: Partial<WorkflowInfo['capabilities'][number]>): void =>
-    onChange({ capabilities: floor.capabilities.map((c, i) => (i === at ? { ...c, ...patch } : c)) })
   const setCol = (at: number, patch: Partial<WorkflowInfo['columns'][number]>): void =>
     onChange({ columns: floor.columns.map((c, i) => (i === at ? { ...c, ...patch } : c)) })
 
@@ -1414,66 +1774,12 @@ function CompanyPanel({
         <span style={{ color: 'var(--faint)' }}>%</span>
       </div>
 
-      <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 14 }}>the work</div>
-      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
-        What the people here do, in your words. Say what each behaves like and the board moves on
-        its own — the lines only need a rule when you want something else.
-      </div>
-      {floor.capabilities.map((c, i) => (
-        <div key={i} style={S.line}>
-          <input
-            style={{ ...S.field, width: 130 }}
-            value={c.name}
-            placeholder="nghien-cuu"
-            onChange={(e) => setCap(i, { name: e.target.value.trim() })}
-          />
-          <select
-            style={{ ...S.field, width: 112 }}
-            value={c.kind ?? ''}
-            title="what the floor does with this word when no rule is written"
-            onChange={(e) => setCap(i, { kind: e.target.value || undefined })}
-          >
-            <option value="">just a word</option>
-            <option value="speaksToHuman">reports to you</option>
-            <option value="assigns">hands work out</option>
-            <option value="builds">does the work</option>
-            <option value="checks">decides it passes</option>
-          </select>
-          <input
-            style={{ ...S.field, flex: 1 }}
-            value={c.what}
-            placeholder="what somebody doing this is for"
-            onChange={(e) => setCap(i, { what: e.target.value })}
-          />
-          <button
-            style={S.linkBtn}
-            title="take this one off"
-            onClick={() =>
-              onChange({
-                capabilities: floor.capabilities.filter((_, at) => at !== i),
-                // A role holding a word that no longer exists lints as a broken
-                // floor, so it goes from the roles with it.
-                roles: Object.fromEntries(
-                  Object.entries(floor.roles).map(([id, def]) => [
-                    id,
-                    { ...def, can: def.can.filter((w) => w !== c.name) }
-                  ])
-                )
-              })
-            }
-          >
-            ×
-          </button>
-        </div>
-      ))}
-      <button
-        style={S.btn}
-        onClick={() =>
-          onChange({ capabilities: [...floor.capabilities, { name: freeName(floor), what: '' }] })
-        }
-      >
-        + a kind of work
-      </button>
+      {/* `the work` stood here: a list of words the floor names, each with a
+          sentence saying what somebody doing it is for. Both are said better
+          one screen over - the brief on the role is where you write what that
+          one is for, in the words you would say it in, and it is the thing the
+          agent actually reads. The words are still in the file for a card rule
+          to name; nothing here asks anybody to invent them first. */}
 
       <div style={{ ...LABEL, color: 'var(--accent-ink)', marginTop: 14 }}>the board</div>
       <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 6px' }}>
@@ -1586,110 +1892,117 @@ function Shape({ floor }: { floor?: WorkflowInfo }) {
   )
 }
 
-/** Whether a role answers to a word a card rule uses. */
-function matchesRole(floor: WorkflowInfo, role: string, word: string): boolean {
-  if (word === 'anyone') return true
-  if (word === role) return true
-  if (word === 'staff') return !(floor.talksTo[role] ?? []).includes(floor.human)
-  return (floor.roles[role]?.can ?? []).includes(word)
-}
-
 /**
- * How two of them talk, said where the line is.
+ * What a line is, said where the line is.
  *
- * A line means "may write to", which is half a sentence: it does not say when,
- * or what that does to the work. Both were in a table three screens away, so
- * nobody connected the arrow to the rule - and the arrow is the thing people
- * draw first.
+ * It carried the card rules for the pair - two boxes of `- from → to: opens a
+ * card · when work is handed over` - on the reasoning that the arrow is what
+ * people draw first, so the rule should live on it. But an arrow already says
+ * the whole of what it means: these two work together, either may write to the
+ * other, and whichever of them stands further from the person running the
+ * floor reports to the other. Everything else in those boxes was a sentence
+ * describing the arrow back to whoever had just drawn it.
  *
- * Two names and a box. The paragraph that stood here explained what a line is,
- * what happens to a message the router refuses, and the whole syntax of the box
- * below - four sentences to read every time, above the one field that does
- * anything. The placeholder says the same thing in the place it is needed.
+ * The rules themselves are not gone, they are where the rest of the floor's
+ * machinery is: in the file, under `## card rules`, which `read it` opens. A
+ * floor that writes none gets the ones `defaultCardRules` works out from who
+ * does what.
  */
 function TalkInspector({
   floor,
   from,
   to,
-  onChange
+  onDelete,
+  onClose
 }: {
   floor: WorkflowInfo
   from: string
   to: string
-  onChange: (patch: Partial<WorkflowInfo>) => void
+  onDelete: () => void
+  onClose: () => void
 }) {
   const name = (r: string): string => (r === floor.human ? 'you' : (floor.roles[r]?.label ?? r))
-  /** Whether that direction is a line on this floor at all. */
-  const drawn = (a: string, b: string): boolean =>
-    (floor.talksTo[a] ?? []).includes(b) || (a === floor.human && b === floor.dispatch)
+
+  // Who stands nearer the person running the floor. That one is reported to;
+  // level with each other, neither is.
+  const rank = ranks(floor)
+  const above =
+    (rank.get(from) ?? 99) === (rank.get(to) ?? 99)
+      ? null
+      : (rank.get(from) ?? 99) < (rank.get(to) ?? 99)
+        ? from
+        : to
+  const below = above === from ? to : from
+
+  /**
+   * Whether this pair is also where a task typed at the floor lands. It is
+   * drawn and not declared, so taking it off moves it to somebody else rather
+   * than leaving a floor nothing can be dispatched to.
+   */
+  const arriving =
+    (from === floor.human && to === floor.dispatch) ||
+    (to === floor.human && from === floor.dispatch)
+  const elsewhere = Object.keys(floor.roles).some((r) => r !== floor.dispatch)
 
   return (
     <div>
-      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>
-        {name(from)} ⇄ {name(to)}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ ...LABEL, color: 'var(--accent-ink)', flex: 1 }}>
+          {name(from)} ⇄ {name(to)}
+        </span>
+        <button style={S.close} title="close" onClick={onClose}>
+          ×
+        </button>
       </div>
-      <TalkBox floor={floor} from={from} to={to} onChange={onChange} />
-      {drawn(to, from) && <TalkBox floor={floor} from={to} to={from} onChange={onChange} />}
-      <div style={{ color: 'var(--faint)', marginTop: 6 }}>
-        <kbd>delete</kbd> takes the line away.
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, marginTop: 4 }}>
+        {above
+          ? `${name(below)} reports the work back to ${name(above)}.`
+          : 'Level with each other - neither reports to the other.'}
       </div>
+      {/* A line the board does not follow. Only worth saying on a floor that
+          wrote its own rules - one that wrote none is moved by the rules worked
+          out from the drawing, which is every line on it. */}
+      {floor.cardRules.length > 0 && !ruled(floor, from, to) && (
+        <div style={{ color: 'var(--muted)', lineHeight: 1.6, marginTop: 6 }}>
+          No rule moves a card between these two, so the board will not follow this line. Write one
+          under <b>the whole file</b>, or let the drawing write them all under <b>the company</b>.
+        </div>
+      )}
+      {arriving && (
+        <div style={{ color: 'var(--faint)', lineHeight: 1.6, marginTop: 6 }}>
+          {elsewhere
+            ? 'A task you type lands here. Taking the line off hands that to somebody else.'
+            : 'A task you type lands here, and there is nobody else to hand it to.'}
+        </div>
+      )}
+      {(!arriving || elsewhere) && (
+        <button style={{ ...S.btn, marginTop: 8, width: '100%' }} onClick={onDelete}>
+          take the line off · <kbd>backspace</kbd>
+        </button>
+      )}
     </div>
   )
 }
 
 /**
- * One direction of one line, as the file's own lines.
+ * Something turning while the window is on its way down.
  *
- * Both names are editable because a rule is often not about these two roles at
- * all: `builds → assigns` is every builder and every assigner, and typing that
- * over the pair's own names is the upgrade from one arrow to a floor's law.
+ * Drawn rather than animated in CSS: this file has no stylesheet to put a
+ * `@keyframes` in, and a rotating border is one element and one rule.
  */
-function TalkBox({
-  floor,
-  from,
-  to,
-  onChange
-}: {
-  floor: WorkflowInfo
-  from: string
-  to: string
-  onChange: (patch: Partial<WorkflowInfo>) => void
-}) {
-  const belongs = (r: (typeof floor.cardRules)[number]): boolean =>
-    matchesRole(floor, from, r.from) &&
-    (to === floor.human ? r.to === floor.human : matchesRole(floor, to, r.to))
-
-  const mine = floor.cardRules.filter(belongs)
-  const [text, setText] = useState(() => writeTalk(mine, floor.columns, floor.says))
-  const name = (r: string): string => (r === floor.human ? 'you' : (floor.roles[r]?.label ?? r))
-
+function Spinner() {
   return (
-    <div style={{ marginTop: 6 }}>
-      <div style={LABEL}>
-        {name(from)} → {name(to)}
-      </div>
-      <textarea
-        style={{ ...S.area, height: 84 }}
-        value={text}
-        spellCheck={false}
-        placeholder={`- ${from} → ${to === floor.human ? floor.human : to}: opens a card · when she puts somebody on it`}
-        onChange={(e) => {
-          setText(e.target.value)
-          // Everything that is not about this direction, worked out again
-          // rather than by index: the list moves under this with every
-          // keystroke, and the other box is writing to it too.
-          const kept = floor.cardRules.filter((r) => !belongs(r))
-          const mineNow = readTalk(
-            e.target.value,
-            floor.columns,
-            from,
-            to === floor.human ? floor.human : to,
-            floor.says
-          )
-          onChange({ cardRules: [...kept, ...mineNow] as typeof floor.cardRules })
-        }}
-      />
-    </div>
+    <span
+      style={{
+        display: 'inline-block',
+        width: 9,
+        height: 9,
+        border: '1px solid var(--line)',
+        borderTopColor: 'var(--accent-ink)',
+        borderRadius: '50%',
+        animation: 'bp-spin 0.7s linear infinite'
+      }}
+    />
   )
 }
 
@@ -1725,6 +2038,8 @@ const S: Record<string, React.CSSProperties> = {
     minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
+    // So what opens about the whole floor can cover it.
+    position: 'relative',
     // The header stays where it is and `sideBody` is what moves: a title that
     // scrolls away leaves a column of controls with nothing saying what they
     // are about.
@@ -1733,6 +2048,17 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--line)',
     background: 'var(--panel)'
   },
+  /** Who answers to whom, said in the order it is answered in. */
+  ladder: {
+    flex: '0 0 auto',
+    padding: '6px 8px',
+    marginBottom: 6,
+    border: '1px solid var(--line)',
+    background: 'var(--sunk)',
+    lineHeight: 1.7
+  },
+  /** So what is in the column can be as tall as it is, rather than 300px of it. */
+  sideTall: { display: 'flex', flexDirection: 'column' },
   board: {
     flex: 1,
     position: 'relative',
@@ -1748,14 +2074,6 @@ const S: Record<string, React.CSSProperties> = {
     backgroundSize: '16px 16px',
     backgroundPosition: '30px 30px'
   },
-  edgeLabel: {
-    position: 'absolute',
-    zIndex: 1,
-    color: 'var(--faint)',
-    font: `10px ${MONO}`,
-    pointerEvents: 'none',
-    whiteSpace: 'nowrap'
-  },
   handle: {
     position: 'absolute',
     zIndex: 1,
@@ -1766,6 +2084,31 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--line)',
     background: 'var(--panel)',
     cursor: 'pointer'
+  },
+  /** Over the file rather than beside it: same column, one at a time. */
+  over: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 3,
+    display: 'flex',
+    flexDirection: 'column',
+    padding: 10,
+    background: 'var(--panel)'
+  },
+  /** A panel at the thing it is about, rather than beside the drawing. */
+  pop: {
+    position: 'absolute',
+    zIndex: 5,
+    width: 260,
+    // The canvas does not scroll, so a panel taller than it would have its
+    // bottom clipped by the board and no way to reach it.
+    maxHeight: 460,
+    overflowY: 'auto',
+    transformOrigin: 'top left',
+    padding: 10,
+    border: '1px solid var(--line)',
+    background: 'var(--panel)',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.18)'
   },
   menu: {
     position: 'absolute',
@@ -1796,19 +2139,9 @@ const S: Record<string, React.CSSProperties> = {
   },
   line: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 },
   /** A word you can turn on, for the ones a floor names itself. */
-  choice: {
-    border: '1px solid var(--line)',
-    background: 'var(--sunk)',
-    color: 'var(--muted)',
-    padding: '2px 7px',
-    font: `11px ${MONO}`,
-    cursor: 'pointer',
-    userSelect: 'none'
-  },
-  choiceOn: { background: 'var(--accent)', borderColor: 'var(--accent)', color: '#241f1a' },
-  checkRow: { display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' },
   card: {
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     background: 'var(--sunk)',
     padding: '6px 8px',
     marginBottom: 6
@@ -1843,8 +2176,23 @@ const S: Record<string, React.CSSProperties> = {
   },
   colour: { width: 30, height: 22, padding: 0, border: '1px solid var(--line)', cursor: 'pointer' },
   chips: { display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 },
-  chip: { padding: '2px 7px', border: '1px solid var(--line)', color: 'var(--muted)', cursor: 'pointer' },
-  chipOn: { borderColor: 'var(--accent-ink)', color: 'var(--ink)', background: 'var(--panel)' },
+  /**
+   * `border` as longhands, not the shorthand.
+   *
+   * The `*On` beside every one of these overrides `borderColor`, and React
+   * clears a longhand it set last render without rewriting the shorthand that
+   * is still in the object - so switching a thing *off* left border-color at
+   * `currentcolor`, a white box around whatever had last been on. Base colour
+   * as a longhand too, and the two states overwrite each other cleanly.
+   */
+  chip: {
+    padding: '2px 7px',
+    border: '1px solid',
+    borderColor: 'var(--line)',
+    color: 'var(--muted)',
+    cursor: 'pointer'
+  },
+  chipOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)', background: 'var(--panel)' },
   x: { background: 'none', border: 0, color: 'var(--faint)', cursor: 'pointer', font: 'inherit' },
   mark: {
     fill: 'var(--muted)',
@@ -1859,16 +2207,26 @@ const S: Record<string, React.CSSProperties> = {
   },
   name: { fill: 'var(--ink)', font: `12px ${MONO}`, textAnchor: 'middle' as const },
   what: { fill: 'var(--faint)', font: `11px ${MONO}`, textAnchor: 'middle' as const },
+  /** The one that is open, so a pressed button looks pressed. */
+  btnOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
+  /**
+   * Off, and that is a look of its own.
+   *
+   * It was `--ink`, which is the colour of everything that is on: a row of
+   * buttons nobody had pressed read as a row of pressed buttons, and the one
+   * that *was* on had to be told apart from four that only looked it. Two
+   * states on this floor and nowhere else: quiet, or the app's own yellow.
+   */
   btn: {
     background: 'var(--panel)',
-    border: '1px solid var(--line)',
-    color: 'var(--ink)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
+    color: 'var(--muted)',
     font: 'inherit',
     padding: '3px 9px',
     cursor: 'pointer'
   },
   btnGo: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
-  btnOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
   btnOff: { opacity: 0.45, cursor: 'default' },
   linkBtn: {
     background: 'none',

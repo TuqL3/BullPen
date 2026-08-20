@@ -365,14 +365,23 @@ export const rolesWith = (w: Workflow, kind: CapabilityKind): string[] => {
    * with no rules could not be asked who assigns, and nothing it did reached
    * the board. The capability's own bracket is what it can be asked instead.
    */
-  const fromRules = (status: string): string[] =>
-    w.cardRules.length
+  const declared = (kind: CapabilityKind): string[] =>
+    names.filter((r) =>
+      (w.roles[r]?.can ?? []).some((c) => w.capabilities.find((d) => d.name === c)?.kind === kind)
+    )
+
+  // Both, not one or the other. The rules were taken as the whole answer
+  // whenever a floor had written any - and a floor can write rules and still
+  // never write a `closes` one, which said nobody here decides anything passes
+  // while its own file declared a capability `(checks)` and a role holding it.
+  // Nothing closed, and the file read as though something would.
+  const fromRules = (status: string): string[] => {
+    const kind: CapabilityKind = status === 'open' ? 'assigns' : 'checks'
+    const written = w.cardRules.length
       ? names.filter((r) => w.cardRules.some((rule) => rule.status === status && holds(w, r, rule.from)))
-      : names.filter((r) =>
-          (w.roles[r]?.can ?? []).some(
-            (c) => w.capabilities.find((d) => d.name === c)?.kind === (status === 'open' ? 'assigns' : 'checks')
-          )
-        )
+      : []
+    return [...new Set([...written, ...declared(kind)])]
+  }
 
   if (kind === 'speaksToHuman') {
     if (w.voice && w.roles[w.voice]) return [w.voice]
@@ -381,9 +390,19 @@ export const rolesWith = (w: Workflow, kind: CapabilityKind): string[] => {
   if (kind === 'assigns') return fromRules('open')
   if (kind === 'checks') return fromRules('closes')
 
-  // Whoever builds: what the floor hires by default, else everybody the other
-  // three questions did not claim. Not "anybody hireable" - a tester is hireable
-  // too, and calling it a builder made a pass read as a hand-in.
+  // Whoever builds. Said outright when a capability declares itself `(builds)`,
+  // which is the only one of the four that had no way to be said: the other
+  // three are read off the lines and the rules, and this was whatever they did
+  // not claim. So a floor whose analyst held a word of its own - one the rules
+  // never name, because analysis moves a card rather than opening one - counted
+  // the analyst as a builder: no tag on the roster, and the agent hired when
+  // somebody asked for build work.
+  const builders = declared('builds')
+  if (builders.length) return builders
+
+  // Nothing said it, so: what the floor hires by default, else everybody the
+  // other three questions did not claim. Not "anybody hireable" - a tester is
+  // hireable too, and calling it a builder made a pass read as a hand-in.
   if (w.hires && w.roles[w.hires]) return [w.hires]
   const taken = new Set([
     ...rolesWith(w, 'speaksToHuman'),
@@ -434,6 +453,69 @@ export function defaultCardRules(w: Workflow): CardRule[] {
   // And up, until somebody tells the human.
   for (const a of assigns) for (const v of voice) add(a, v, col('done'))
   for (const v of voice) add(v, w.human, col('done'))
+  return out
+}
+
+/**
+ * The rules the drawing itself says, one per line, by name.
+ *
+ * `defaultCardRules` answers "what does a floor that wrote nothing do", and it
+ * answers in words - `assigns → staff` - because it has to hold for whoever
+ * ends up holding those words. That is the right answer for a floor with no
+ * rules and the wrong one to *write down*: `staff` is everybody who does not
+ * answer the human, so it names pairs that have no line between them, and a
+ * floor edited afterwards drifts from it silently.
+ *
+ * This writes the same shape as rules about roles, and only where a line
+ * actually exists. What comes out is a `## card rules` section that matches the
+ * drawing exactly, and goes on matching it because the next edit rewrites it.
+ *
+ * One rule per direction, first one wins - which is also how the router reads
+ * them, so what is written is what will fire.
+ */
+export function drawnCardRules(w: Workflow): CardRule[] {
+  const talks = (a: string, b: string): boolean =>
+    (w.talksTo[a] ?? []).includes(b) || (a === w.human && b === w.dispatch)
+  const voice = rolesWith(w, 'speaksToHuman')
+  const assigns = rolesWith(w, 'assigns')
+  const builds = rolesWith(w, 'builds')
+  // Whoever only checks. A role that hands work out *and* decides work passed -
+  // an analyst who sizes a request and signs the result off - is the assigner
+  // towards everybody it hands to, and writing the checker's rules for it said
+  // the opposite: work sent down came back up as a card being returned.
+  const checks = rolesWith(w, 'checks').filter((r) => !assigns.includes(r))
+  const col = (kind: ColumnKind): string => columnFor(w, kind)
+  /** Whether the board has a column for this at all. */
+  const has = (kind: ColumnKind): boolean => w.columns.some((c) => c.kind === kind)
+
+  const out: CardRule[] = []
+  const taken = new Set<string>()
+  const add = (from: string, to: string, status: string, whose?: 'to'): void => {
+    if (!from || !to || !status || from === to) return
+    if (!talks(from, to)) return
+    const key = `${from}\u0000${to}`
+    if (taken.has(key)) return
+    taken.add(key)
+    out.push({ from, to, status, ...(whose ? { whose } : {}) })
+  }
+
+  // The order is the order the router reads them in, so the narrow ones go
+  // first: a role that both builds and checks would otherwise be caught by the
+  // hand-out rule before anything about checking ever ran.
+  for (const c of checks) for (const a of [...assigns, ...voice]) add(c, a, 'closes')
+  // Only where the board has somewhere to put it. `columnFor` falls back to the
+  // first column when a floor never said which one is which, and a rule that
+  // sends finished work to the column new work lands in is worse than no rule.
+  if (has('working')) for (const c of checks) for (const b of builds) add(c, b, col('working'), 'to')
+  if (has('waiting')) {
+    for (const b of builds) for (const c of checks) add(b, c, col('waiting'))
+    for (const b of builds) for (const a of assigns) add(b, a, col('waiting'))
+  }
+  if (has('done')) for (const a of assigns) for (const v of voice) add(a, v, col('done'))
+  // Handing work over opens a card, whoever hands it over and whoever to.
+  for (const a of [...assigns, ...voice]) for (const r of Object.keys(w.roles)) add(a, r, 'open')
+  // And the last step of anything here: the human is told.
+  if (has('done')) for (const v of voice) add(v, w.human, col('done'))
   return out
 }
 
@@ -717,7 +799,12 @@ export function lint(w: Workflow, rules?: Rules): string[] {
       bad.push(`No role, capability or crowd answers to "${rule.to}", so "${rule.from} → ${rule.to}" never fires.`)
     }
   }
-  if (on('must-open') && !w.cardRules.some((r) => r.status === 'open')) {
+  // The rules this floor will actually run under, which is not the same as the
+  // ones it wrote: a floor that writes none gets `defaultCardRules`, and since
+  // the canvas stopped editing card rules that is most floors drawn by hand.
+  // Asked of the written ones, this refused to save a drawing whose cards move
+  // perfectly well.
+  if (on('must-open') && !defaultCardRules(w).some((r) => r.status === 'open')) {
     bad.push('No card rule opens a card, so nothing this floor does will ever reach the board.')
   }
 
@@ -1315,6 +1402,9 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
     return { error: 'No role is marked `- dispatch`. That is who a task typed at the floor goes to.' }
   }
 
+  /** Whether a header field names a role this floor actually has. */
+  const named = (who: string | null | undefined): boolean => Boolean(who?.trim() && roles[who.trim()])
+
   return {
     workflow: {
       name,
@@ -1331,7 +1421,13 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
       words,
       human: field(header, 'human address')?.trim() || HUMAN_PARTY,
       hire: field(header, 'hire address')?.trim() || HIRE_PARTY,
-      ...(field(header, 'reports to you') ? { voice: field(header, 'reports to you')!.trim() } : {}),
+      // Only when it names somebody who is here. Both of these are read and
+      // then silently dropped by everything that asks - `rolesWith` checks
+      // `w.roles[w.voice]` before trusting it - so a floor carrying
+      // `- reports to you: boss` on a floor whose roles are `god`, `ba`, `dev`
+      // and `tester` looked answered and was not, and the line survived every
+      // save because nothing on the way through ever looked at it.
+      ...(named(field(header, 'reports to you')) ? { voice: field(header, 'reports to you')!.trim() } : {}),
       ...(OPENS !== 'opens a card' || CLOSES !== 'closes it' || THEIRS !== 'their card' || WHEN !== 'when'
         ? {
             says: {
@@ -1342,7 +1438,7 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
             }
           }
         : {}),
-      ...(field(header, 'hires') ? { hires: field(header, 'hires')!.trim() } : {})
+      ...(named(field(header, 'hires')) ? { hires: field(header, 'hires')!.trim() } : {})
     }
   }
 }
@@ -1354,6 +1450,14 @@ export function parseMarkdown(text: string): { workflow: Workflow } | { error: s
  * shows what this returns, so opening an old workflow is also how it gets
  * rewritten into the shape that can be read at a glance.
  */
+/** The opening sentence of a brief, which is what `- does:` was written from. */
+const firstLine = (brief: string): string =>
+  brief
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean)
+    ?.slice(0, 160) ?? ''
+
 export function toMarkdown(w: Workflow): string {
   const out: string[] = [`# ${w.name}`]
   if (w.description) out.push('', w.description)
@@ -1369,25 +1473,36 @@ export function toMarkdown(w: Workflow): string {
 
   // Capabilities first: a role's `- can:` line names them, and reading
   // `can: drafts` before anything says what drafting is is reading backwards.
-  out.push('', '## capabilities')
-  for (const c of w.capabilities) {
-    out.push(`- ${c.name}${c.kind ? ` (${c.kind})` : ''}${c.what ? ` — ${c.what}` : ''}`)
+  // Only when there are any. An empty heading is a section somebody has to
+  // decide whether they are supposed to fill in.
+  if (w.capabilities.length) {
+    out.push('', '## capabilities')
+    for (const c of w.capabilities) {
+      out.push(`- ${c.name}${c.kind ? ` (${c.kind})` : ''}${c.what ? ` — ${c.what}` : ''}`)
+    }
   }
 
   out.push('', '## roles')
   for (const [role, def] of Object.entries(w.roles)) {
     out.push('', `### ${role}${def.label && def.label !== role ? ` · ${def.label}` : ''}`)
     if (def.fixed) out.push(`- agent: ${def.fixed.id} · ${def.fixed.name}`)
-    out.push(`- can: ${def.can.join(', ')}`)
-    if (def.does) out.push(`- does: ${def.does}`)
+    // Only what this role actually says. Four of these were written whether or
+    // not they carried anything: an empty `- can:`, an empty `- talks to:`,
+    // `- does:` repeating the brief's own first line back at whoever had just
+    // written it, and `- entry` under the `- dispatch` it already defaults to.
+    // A file somebody opens to see what their floor is has to be the floor and
+    // not a form with blanks in it.
+    if (def.can.length) out.push(`- can: ${def.can.join(', ')}`)
+    if (def.does && def.does !== firstLine(def.brief)) out.push(`- does: ${def.does}`)
     if (def.cli) out.push(`- cli: ${def.cli}`)
     if (def.cwd) out.push(`- cwd: ${def.cwd}`)
     if (def.never?.length) out.push(`- never: ${def.never.join(', ')}`)
     for (const [key, value] of Object.entries(def.attrs ?? {})) out.push(`- ${key}: ${value}`)
-    out.push(`- talks to: ${(w.talksTo[role] ?? []).join(', ')}`)
+    const talksTo = w.talksTo[role] ?? []
+    if (talksTo.length) out.push(`- talks to: ${talksTo.join(', ')}`)
     if (def.hireable) out.push('- hireable')
     if (role === w.dispatch) out.push('- dispatch')
-    if (role === w.entry) out.push('- entry')
+    if (role === w.entry && role !== w.dispatch) out.push('- entry')
   }
 
   if (Object.keys(w.words).length) {
@@ -1400,7 +1515,10 @@ export function toMarkdown(w: Workflow): string {
     out.push(`- ${c.key}: ${c.label} ${c.bar}${c.kind ? ` (${c.kind})` : ''}`)
   }
 
-  out.push('', '## card rules')
+  // Only when the floor wrote some. None means it is moved by the ones worked
+  // out from who does what, and an empty heading reads as a floor whose cards
+  // do not move at all.
+  if (w.cardRules.length) out.push('', '## card rules')
   for (const r of w.cardRules) {
     const said =
       r.status === 'open'

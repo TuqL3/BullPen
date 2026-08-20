@@ -25,6 +25,7 @@ import {
   roleOfFixedId,
   rolesWith,
   saveWorkflow,
+  drawnCardRules,
   toMarkdown,
   type Workflow,
   workCwd,
@@ -233,6 +234,81 @@ test('markdown mistakes come back as a sentence, not a broken floor', () => {
  * The library on disk. Several workflows kept side by side is the point - a
  * floor that only ever holds one is a floor you cannot switch back from.
  */
+/**
+ * The file is what somebody opens to see what their floor is. It came out with
+ * an empty `- can:`, an empty `- talks to:`, `- does:` repeating the brief's
+ * own first line, and `- entry` under the `- dispatch` it already defaults to -
+ * four lines of form where the floor should be.
+ */
+/**
+ * The rules a drawing says, by name, and only where a line is.
+ *
+ * `defaultCardRules` answers in words - `assigns → staff` - which is right for
+ * a floor that wrote nothing and wrong to write down: `staff` names pairs with
+ * no line between them, so a file written from it drifts from the drawing the
+ * moment anybody edits either.
+ */
+test('the rules written from a drawing name only pairs that have a line', () => {
+  const w = DEFAULT_WORKFLOW as Workflow
+  const rules = drawnCardRules(w)
+  assert.ok(rules.length > 0)
+
+  const talks = (a: string, b: string): boolean =>
+    (w.talksTo[a] ?? []).includes(b) || (a === w.human && b === w.dispatch)
+  for (const r of rules) {
+    assert.ok(w.roles[r.from], `"${r.from}" is a role, not a word`)
+    assert.ok(r.to === w.human || w.roles[r.to], `"${r.to}" is a role or the human`)
+    assert.ok(talks(r.from, r.to), `${r.from} → ${r.to} is a line on this floor`)
+  }
+
+  // One per direction: the router takes the first that fits and never reads the
+  // second, so a second one written down is a line nobody can act on.
+  const pairs = rules.map((r) => `${r.from}→${r.to}`)
+  assert.deepEqual([...new Set(pairs)], pairs, 'no pair is written twice')
+
+  // Take a line off and the rule about it is not written.
+  const cut = { ...w, talksTo: { ...w.talksTo, tester: ['dev'] } } as Workflow
+  assert.ok(!drawnCardRules(cut).some((r) => r.from === 'tester' && r.to === 'ba'))
+})
+
+test('the file leaves out what a role did not say', () => {
+  const w = {
+    ...DEFAULT_WORKFLOW,
+    entry: DEFAULT_WORKFLOW.dispatch,
+    capabilities: [],
+    talksTo: { ...DEFAULT_WORKFLOW.talksTo, dev: [] },
+    roles: {
+      ...DEFAULT_WORKFLOW.roles,
+      dev: {
+        ...DEFAULT_WORKFLOW.roles.dev,
+        can: [],
+        brief: 'Does the work.\n\nAnd says so.',
+        does: 'Does the work.'
+      }
+    }
+  } as Workflow
+
+  const md = toMarkdown(w)
+  // The `### dev` block, which is where all four of them would have been.
+  const from = md.indexOf('### dev')
+  const block = md.slice(from, md.indexOf('\n###', from + 1))
+  assert.ok(!block.includes('- can:'), 'a role that holds no words does not say so')
+  assert.ok(!block.includes('- talks to:'), 'nor one that writes to nobody')
+  assert.ok(!block.includes('- does:'), 'the brief already opens with it')
+  assert.ok(!md.includes('- entry'), 'entry follows dispatch unless it was sent elsewhere')
+
+  // What is still said is still read back.
+  const back = parseMarkdown(md)
+  assert.ok(!('error' in back), 'error' in back ? back.error : '')
+  if ('error' in back) return
+  assert.equal(back.workflow.entry, w.dispatch, 'and entry comes back pointing at dispatch')
+  assert.deepEqual(back.workflow.roles.dev.can, [])
+
+  // A role that was sent somewhere else keeps its line.
+  const moved = toMarkdown({ ...w, entry: 'dev' } as Workflow)
+  assert.ok(moved.includes('- entry'))
+})
+
 test('a saved workflow comes back exactly as it was written', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bp-wf-'))
   try {

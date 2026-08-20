@@ -84,6 +84,49 @@ function reach(w: WorkflowInfo): Map<string, number> {
   return far
 }
 
+/**
+ * How far down the floor each one stands, counting from the person running it.
+ *
+ * Steps along the lines, and nothing else. It read the column `layout` puts a
+ * box in, which is a different question - that one asks what a role is *for*,
+ * and answers 4 for anybody who closes work, so a floor of two roles came out
+ * ranked 0, 1, 4. What somebody reading a rank wants is how many hands a task
+ * passes through to get here, which is the drawing counted rather than
+ * interpreted.
+ *
+ * The pair, not the arrow: a line means these two work together, so it is
+ * walked in both directions. Anybody no line reaches stands below everybody
+ * a line does.
+ */
+export function ranks(w: WorkflowInfo | null): Map<string, number> {
+  if (!w) return new Map()
+  const beside = new Map<string, string[]>()
+  for (const { from, to } of edges(w)) {
+    beside.set(from, [...(beside.get(from) ?? []), to])
+    beside.set(to, [...(beside.get(to) ?? []), from])
+  }
+
+  const out = new Map<string, number>([[w.human, 0]])
+  let edge = [w.human]
+  while (edge.length) {
+    const next: string[] = []
+    for (const from of edge) {
+      for (const to of beside.get(from) ?? []) {
+        if (!w.roles[to] || out.has(to)) continue
+        out.set(to, (out.get(from) ?? 0) + 1)
+        next.push(to)
+      }
+    }
+    edge = next
+  }
+
+  // Nobody wrote a line to these. They are on the floor and answer to no one on
+  // it, which is the bottom rather than the top: the human is the top.
+  const below = Math.max(...out.values()) + 1
+  for (const r of Object.keys(w.roles)) if (!out.has(r)) out.set(r, below)
+  return out
+}
+
 /** Every node, laid out in columns, with the human in front and hiring behind. */
 export function layout(w: WorkflowInfo | null): ChartNode[] {
   if (!w) return []
@@ -153,6 +196,73 @@ export function connect(
   const list = talksTo[from] ?? []
   if (list.includes(to)) return talksTo
   return { ...talksTo, [from]: [...list, to] }
+}
+
+/**
+ * Draw a line, both ways.
+ *
+ * `connect` writes one direction, and the drawing has never had one: two roles
+ * that write to each other are one dot on one line, and the panel on it talks
+ * about the pair. So deleting a line and drawing it again - which is what
+ * anybody does after moving a box - left a role able to write to somebody who
+ * could not write back, and the picture said nothing about it. Every card rule
+ * about the missing direction went quiet with it.
+ *
+ * The human is the exception: `talks to` is written by roles about roles, and
+ * an entry under `you` names a role that does not exist. They are refused by
+ * nobody anyway.
+ */
+export function link(
+  w: Pick<WorkflowInfo, 'talksTo' | 'human' | 'hire'>,
+  from: string,
+  to: string
+): Record<string, string[]> {
+  const party = (r: string): boolean => r === w.human || r === w.hire
+  let out = party(from) ? w.talksTo : connect(w.talksTo, from, to)
+  if (!party(to)) out = connect(out, to, from)
+  return out
+}
+
+/**
+ * Take a line off, both ways, and say what that does to the floor.
+ *
+ * The dot is the pair rather than one arrow, so removing one direction and
+ * leaving the other is not what anybody clicking it meant. Work arriving is the
+ * exception: no role declares it, so there is nothing to remove and `edges`
+ * draws it again on the next render - which is how the line between you and
+ * dispatch came to look like a key that did nothing. A floor has to be
+ * dispatched to somebody, so that arrow moves instead: to whoever else answers
+ * the human, and failing that to anybody else at all.
+ */
+export function takeLineOff(
+  w: WorkflowInfo,
+  from: string,
+  to: string
+): Partial<WorkflowInfo> {
+  let talksTo = w.talksTo
+  if (from !== w.human) talksTo = disconnect(talksTo, from, to)
+  if (to !== w.human) talksTo = disconnect(talksTo, to, from)
+
+  const arriving =
+    (from === w.human && to === w.dispatch) || (to === w.human && from === w.dispatch)
+  const others = Object.keys(w.roles).filter((r) => r !== w.dispatch)
+  const next = arriving
+    ? (others.find((r) => (talksTo[r] ?? []).includes(w.human)) ?? others[0])
+    : undefined
+
+  const moved = {
+    ...w,
+    talksTo,
+    ...(next ? { dispatch: next } : {})
+  }
+  return {
+    talksTo,
+    // The rules about this pair go with the line. Left behind, they are a rule
+    // the router walks past forever on a pair that cannot exchange a message.
+    cardRules: firing(moved),
+    ...(next ? { dispatch: next } : {}),
+    ...(next && w.entry === w.dispatch ? { entry: next } : {})
+  }
 }
 
 export function disconnect(
@@ -308,13 +418,103 @@ export function freeRoleId(roles: Record<string, unknown>, stem = 'role'): strin
  * other role, so a floor that named a second agent to stand from launch had
  * that stripped the moment somebody opened the drawing and pressed save.
  */
+/**
+ * Whether any written rule moves a card between these two.
+ *
+ * A line drawn on a floor that has written its own rules gets none: the format
+ * cannot guess what a new arrow is for, and a pair with no rule is a pair whose
+ * messages leave the board exactly where it was. Said on the line rather than
+ * found out later.
+ */
+export function ruled(floor: WorkflowInfo, a: string, b: string): boolean {
+  const side = (role: string, word: string): boolean => sideOf(floor, role, word)
+  return (floor.cardRules ?? []).some(
+    (r) => (side(a, r.from) && side(b, r.to)) || (side(b, r.from) && side(a, r.to))
+  )
+}
+
+/**
+ * The rules a floor is missing for the lines it has just grown.
+ *
+ * Deleting takes the rules with it and always has; drawing did not put any
+ * back, so a floor edited after it was written ended up with arrows the board
+ * does not follow - a line drawn between two roles, and a card that sits where
+ * it was. Whatever is already written stays and keeps its place, because the
+ * router takes the first rule that fits and a hand-written one is the answer
+ * somebody meant.
+ */
+export function fillRules(
+  floor: WorkflowInfo,
+  drawn: WorkflowInfo['cardRules']
+): WorkflowInfo['cardRules'] {
+  const covers = (a: string, b: string): boolean =>
+    (floor.cardRules ?? []).some((r) => sideOf(floor, a, r.from) && sideOf(floor, b, r.to))
+  return [...(floor.cardRules ?? []), ...drawn.filter((r) => !covers(r.from, r.to))]
+}
+
+/** Whether a role answers to a word one side of a rule uses. */
+const sideOf = (floor: WorkflowInfo, role: string, word: string): boolean => {
+  if (role === floor.human) return word === floor.human
+  return (
+    word === 'anyone' ||
+    word === role ||
+    (word === 'staff' && !(floor.talksTo[role] ?? []).includes(floor.human)) ||
+    (floor.roles[role]?.can ?? []).includes(word)
+  )
+}
+
+/**
+ * The rules that can still fire, given the floor as it is now drawn.
+ *
+ * A floor is drawn and redrawn - a line comes off, a box is deleted, an arrow
+ * is drawn again somewhere else - and the rules stay exactly as they were
+ * written. What that leaves is a rule the router walks past forever: `tester →
+ * manager: closes it` on a floor where the tester cannot write to the manager
+ * is not a rule that fires late, it is a task that never finishes, and nothing
+ * anywhere says so.
+ *
+ * Two ways to be dead, and they took different shapes:
+ *
+ * A rule naming something this floor no longer has - a role that was deleted -
+ * goes. This used to keep anything that was not a role, to protect rules
+ * written about words (`builds → assigns`, `anyone → staff`), which meant a
+ * deleted role read as a word and survived every save.
+ *
+ * A rule between two roles that no longer have a line goes too. Rules about
+ * words are left alone: the drawing has nothing to say about which roles a word
+ * will match tomorrow.
+ */
+export function firing(floor: WorkflowInfo): WorkflowInfo['cardRules'] {
+  const crowds = new Set(['anyone', 'staff'])
+  /** Whether anything on this floor answers to a word a rule uses. */
+  const answers = (word: string): boolean =>
+    crowds.has(word) ||
+    word === floor.human ||
+    word === floor.hire ||
+    Boolean(floor.roles[word]) ||
+    (floor.capabilities ?? []).some((c) => c.name === word)
+
+  const talks = (a: string, b: string): boolean =>
+    (floor.talksTo?.[a] ?? []).includes(b) || (a === floor.human && b === floor.dispatch)
+
+  return (floor.cardRules ?? []).filter((r) => {
+    if (!answers(r.from) || !answers(r.to)) return false
+    if (!floor.roles[r.from] || !floor.roles[r.to]) return true
+    return talks(r.from, r.to)
+  })
+}
+
 export function staffed(floor: WorkflowInfo): WorkflowInfo {
   const roles = Object.fromEntries(
     Object.entries(floor.roles).map(([id, def]) => {
       // Dispatch is the one role that cannot be hired into: it is who the
       // operator types at, and there has to be somebody there at launch.
       if (id === floor.dispatch) {
-        return [id, { ...def, hireable: undefined, fixed: def.fixed ?? { id, name: def.label || id } }]
+        // And it is Michael unless the file named somebody else. The fallback
+        // was the role's own id and label, so a floor drawn from scratch stood
+        // up an agent called `boss` - a different person on every floor, with a
+        // different face, for a desk that is always the same one.
+        return [id, { ...def, hireable: undefined, fixed: def.fixed ?? { id: 'michael', name: 'Michael' } }]
       }
       // Filled in, never overwritten. This used to force `fixed: undefined,
       // hireable: true` on everyone else - so a floor that said it wanted a
@@ -325,5 +525,5 @@ export function staffed(floor: WorkflowInfo): WorkflowInfo {
       return [id, { ...def, hireable: true }]
     })
   )
-  return { ...floor, roles }
+  return { ...floor, roles, cardRules: firing(floor) }
 }

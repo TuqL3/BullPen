@@ -84,10 +84,26 @@ export function generatorBrief(rules: string, example = ''): string {
       'The rules above say what may be written, not what has to be. These do:',
       '- Every role names at least one capability on `- can:` and at least one address on `- talks to:`. A role that writes to nobody cannot be part of anything.',
       '- `## capabilities` names each capability used, with what it is for.',
+      '  Two of them are the same on every floor and keep their names: `speaksToHuman` for whoever answers the person running it, and `assigns` for whoever hands work out. Every other one is named for the work *this* floor does - `dieu-tra`, `viet-kich-ban`, `reads-the-diff` - and never `builds` or `checks`, which say nothing about what anybody here actually does. Two floors that do different work should not come out holding the same four words.',
+      '  Every one of them says in brackets which of the four it behaves like: `- viet-code (builds) — writes the code that ships`. The name is yours and the bracket is the machine\'s - the app asks "who hands work out", "who does it", "who decides it passed" and "who answers the human" of every floor there is, and a capability that answers none of them leaves the role holding it classified as whatever is left over. That is not a small thing: a floor whose analyst had no bracket came out with the analyst treated as a builder, hired for build work, and shown on the roster with no idea what they were for.',
+      '  `speaksToHuman` is `(speaksToHuman)` and `assigns` is `(assigns)`. Whoever turns a request into work for somebody else is `(assigns)` too, whatever the floor calls them. Whoever decides work passed is `(checks)`. Everything left is `(builds)`.',
+      '  `(checks)` is *decides the finished work passed*, and nothing else. Sizing a request, judging whether it can be built, deciding whether to start at all - those happen before anybody works, and they are `(assigns)`. A floor that marked its analyst `(checks)` for judging feasibility gave the analyst the power to close cards, and the card rules written from it sent work handed *down* back *up*.',
+      '  `(builds)` is *makes the thing that ships*. Writing up a failure, logging what broke, reporting - those are part of whatever the role already does, not a capability of their own. A tester given a `(builds)` word counts as somebody to hand build work to.',
       '- `## board` has at least a starting column, a working column and a finished one.',
+      '- Every column has a card rule that reaches it. A column nothing can move a card into is a stage this floor does not have; either write the rule or take the column out.',
+      '- One column per stage, and each `(kind)` used once. Three columns marked `(working)` are three names for one answer, and everything that asks "where does work in progress go" takes the first - so the other two are stages no card ever reaches.',
+      '- A floor with a `(checks)` capability has a `(waiting)` column. That is where work sits between being built and being passed, and without one there is nowhere to put a build that is waiting on a check.',
+      '- Every address a brief writes to is on that role\'s `- talks to:`. A brief telling somebody to report to the manager, on a role whose lines do not reach the manager, is a report the router refuses and hands back - the work finishes and nobody upstairs hears.',
+      '- The role that is `- dispatch` does not close its own cards. It hands work out and reports up; whoever did the work, or whoever checked it, is what closes it.',
+      '- The `- agent:` on the dispatch role is exactly `michael · Michael`. That desk is the same one on every floor.',
       '- `## card rules` has at least one line that opens a card when work is handed over, and one that reports to `you` when it is finished. Without them nothing this floor does ever reaches the board.',
+      '- At most one rule for any pair. The router matches on who wrote to whom and nothing else, in the order the rules are written, and the first one that fits is the answer - so a second rule about the same two roles never runs. If a card should move two different ways between the same pair, this format cannot say it: pick the one that matters and leave the other out.',
+      '  The ` · when <why>` at the end is a note for whoever reads the file. It is not a condition, and the router never reads it - two rules that differ only in their `when` are one rule and one dead line.',
+      '  Name the pairs. `anyone → anyone` fires on every message this floor has no other rule for, which on a floor of three roles is most of them.',
       '  Every rule is exactly `- <who> → <whom>: <what happens>`, and may end with ` · when <why>`. What happens is `opens a card`, `closes it`, or the key of a column on this board - nothing else. Two examples, copy the shape: `- assigns → builds: opens a card · when work is handed over` and `- builds → assigns: done · when it is finished`.',
       '- Exactly one role is `- dispatch` and has `- agent: <id> · <Name>`; every other role is `- hireable`, so it is hired when there is work for it.',
+      '- `- reports to you:` and `- hires:` name a role on this floor, by the id in its `### heading`, or they are left out. A line naming a role that does not exist is read and dropped, and nothing anywhere says so.',
+      '- A role that a card rule writes to `you` from must have `you` on its own `- talks to:`. The rules say what a message does to the board; `talks to` says whether the message is delivered at all, and a rule about a message the router refuses is a rule that never fires.',
       'An empty `- can:`, an empty `- talks to:`, or an empty section is not a floor. Fill them.'
     ].join('\n'),
     ...(example
@@ -102,6 +118,8 @@ export function generatorBrief(rules: string, example = ''): string {
     [
       'WRITING THE BRIEFS',
       'Write them the way you would brief a new hire: what they are for, what they must not do, and the exact JSON to send when they report. Say what finishes a task and who decides it. Tell them to report when blocked as well as when done - silence is the one answer nobody can act on.',
+      'Whoever dispatch is: they read the request before they spend anybody on it. Say so in their brief - work out whether it can be done here at all, and whether this floor is the place for it, and take it back to the human when it is not. Assigning work nobody can finish, or hiring somebody to find that out, costs an agent and a window and answers nothing.',
+      'Everybody else reports to whoever sent them the task, by name, taken from the message they were sent - not to a fixed address. `{{reportTo}}` is who to write to when nothing was sent, and it is only the first one: a floor can be three deep, an agent can be handed work by somebody other than whoever first hired it, and a report that always goes to the same name arrives above the person waiting for it.',
       'The briefs are the longest part of the file and the part that decides how the floor behaves. Do not leave them thin.'
     ].join('\n')
   ].join('\n\n')

@@ -1443,7 +1443,11 @@ const S: Record<string, React.CSSProperties> = {
   tab: {
     background: 'transparent',
     border: 'none',
-    borderBottom: '2px solid transparent',
+    // Longhand, because `tabOn` sets `borderBottomColor`: React clears that
+    // on the way out without rewriting the shorthand still in the object, and
+    // the tab nobody was on kept an underline in `currentcolor`.
+    borderBottom: '2px solid',
+    borderBottomColor: 'transparent',
     color: 'var(--faint)',
     cursor: 'pointer',
     padding: '2px 4px',
@@ -1451,7 +1455,7 @@ const S: Record<string, React.CSSProperties> = {
     letterSpacing: '0.09em',
     textTransform: 'uppercase'
   },
-  tabOn: { color: 'var(--ink)', borderBottomColor: 'var(--accent)' },
+  tabOn: { color: 'var(--accent-ink)', borderBottomColor: 'var(--accent-ink)' },
   // display:flex, not a percentage height: the CodeMirror scroller is sized by
   // this box, and a box that shrank to its content put the horizontal scrollbar
   // directly under the last line with empty panel below it.

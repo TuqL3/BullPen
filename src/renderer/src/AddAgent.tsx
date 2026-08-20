@@ -400,13 +400,14 @@ const S: Record<string, React.CSSProperties> = {
   swatch: { width: 26, height: 22, cursor: 'pointer' },
   roleChip: {
     padding: '4px 12px',
-    border: '1px solid var(--line)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
     background: 'var(--sunk)',
     color: 'var(--muted)',
     cursor: 'pointer',
     font: `11px ${MONO}`
   },
-  roleChipOn: { borderColor: 'var(--accent)', color: 'var(--accent-ink)' },
+  roleChipOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
   roleRow: {
     display: 'flex',
     alignItems: 'flex-start',
@@ -431,7 +432,7 @@ const S: Record<string, React.CSSProperties> = {
   btn: {
     padding: '6px 12px',
     background: 'var(--sunk)',
-    color: 'var(--ink)',
+    color: 'var(--muted)',
     border: '1px solid',
     borderColor: 'var(--line)',
     cursor: 'pointer',

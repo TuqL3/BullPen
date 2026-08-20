@@ -32,9 +32,15 @@ const HOUSE = {
  * reasonable-looking thing instead, and the comment history in git says which.
  * It stays the default for that reason.
  *
- * The other two exist to keep the schema honest. If a floor without an analyst,
- * or one that reviews instead of testing, cannot be written here without
+ * `solo` is the same floor with the analyst taken out, and it is here to keep
+ * the schema honest: if a floor without an analyst cannot be written without
  * touching code, then the workflow is not really data yet.
+ *
+ * Four more shipped - `review`, `qa-lead`, `content-floor`, `support-desk` -
+ * and a list of six is a decision six times over before anybody has drawn
+ * anything. Two of them still exist as test fixtures, because a floor whose
+ * words are `commissions` and `proofs` is what proves the router reads the
+ * floor's vocabulary rather than one written into the source.
  */
 
 const ANALYST_CHAIN: Workflow = {
@@ -196,322 +202,7 @@ const SOLO: Workflow = {
  * router - a role that `checks` is a role that checks, whatever it is called -
  * which is the point of capabilities being separate from names.
  */
-const REVIEW: Workflow = {
-  ...HOUSE,
-  name: 'review',
-  description: 'Boss → analyst → developer ⇄ reviewer. The reviewer reads the diff instead of running tests.',
-  dispatch: 'god',
-  entry: 'ba',
-  reuseBelowPct: 50,
-  hireAbovePct: 70,
-  talksTo: {
-    god: ['ba', 'you'],
-    ba: ['god', 'dev', 'reviewer', 'hire'],
-    dev: ['ba', 'reviewer'],
-    reviewer: ['ba', 'dev']
-  },
-  roles: {
-    god: ANALYST_CHAIN.roles.god,
-    ba: {
-      ...ANALYST_CHAIN.roles.ba,
-      does: 'Works out what a request means, puts somebody on it, hires when nobody fits, and sees it through review before calling it done.',
-      brief: ANALYST_CHAIN.roles.ba.brief
-        .replaceAll('tester', 'reviewer')
-        .replaceAll('a reviewer has passed it', 'a reviewer has approved it')
-        .replaceAll('to be tested', 'to be reviewed')
-    },
-    dev: {
-      ...ANALYST_CHAIN.roles.dev,
-      does: 'Writes the code, one task at a time, and reports it for review the moment it is built or blocked.',
-      brief: ANALYST_CHAIN.roles.dev.brief
-        .replaceAll('tester', 'reviewer')
-        .replaceAll('hands it to test', 'hands it to review')
-    },
-    reviewer: {
-      can: ['checks'],
-      label: 'a reviewer',
-      does: 'Reads the diff instead of running it, sends changes straight back to the developer, and is the only one who approves a task.',
-      hireable: true,
-      brief: [
-        `You are "{{self.id}}", an agent on a Bullpen floor. {{reportTo}} assigns your work and answers to the human running it.`,
-        `You write to anyone on the floor by putting one JSON file in $BULLPEN_MAILBOX/outbox. Mail waiting for you is in $BULLPEN_MAILBOX/inbox, and $BULLPEN_FLOOR lists who else is here.`,
-        `You review. You read what was written - the diff, the files around it, what it was supposed to do - and you decide whether it holds. You do not rewrite it yourself.`,
-        `{{reportTo}} sends you what to look at and who wrote it. A problem goes straight to that developer, not back to {{reportTo}}:`,
-        `{"from": "{{self.id}}", "to": "<developer id>", "subject": "change: <what is wrong>", "body": "<where, why it is wrong, and what it should do instead>"}`,
-        `Stay with them until it is right - they reply to you, you read it again, and you keep going round until it passes. That loop is yours to close.`,
-        `Closing a task is your job and nobody else's: it is finished when you approve it, not when the developer says it is built.`,
-        `Only when nothing is left do you report:`,
-        `{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "pass: <the task in a few words>", "body": "<what you read, what you sent back, what changed>"}`,
-        `If it cannot be made to hold, say so with the same message and the subject "fail: ...". Silence is the one answer nobody can act on.`,
-        `You write to two places: {{reportTo}}, and the developer whose work you are reading. Not to the boss, and not to the human - the router refuses those and hands the message back to you.`
-      ].join('\n\n')
-    }
-  }
-}
-
-/**
- * Three standing agents, not two.
- *
- * The floor used to be able to spawn exactly one agent beside the boss, which
- * was `analyst-chain`'s shape mistaken for a rule. This is the preset that
- * proves it is not: a boss, an analyst who assigns, and a QA lead who is always
- * there to close work rather than being hired per project.
- */
-const QA_LEAD: Workflow = {
-  ...HOUSE,
-  name: 'qa-lead',
-  description: 'Boss → analyst → developer ⇄ a standing QA lead who closes every task.',
-  dispatch: 'god',
-  entry: 'ba',
-  reuseBelowPct: 50,
-  hireAbovePct: 70,
-  talksTo: {
-    god: ['ba', 'you'],
-    ba: ['god', 'dev', 'qa', 'hire'],
-    dev: ['ba', 'qa'],
-    qa: ['ba', 'dev']
-  },
-  roles: {
-    god: ANALYST_CHAIN.roles.god,
-    ba: {
-      ...ANALYST_CHAIN.roles.ba,
-      does: 'Works out what a request means, puts somebody on it, hires when nobody fits, and sends it to the QA lead before calling it done.',
-      brief: ANALYST_CHAIN.roles.ba.brief.replaceAll('tester', 'qa')
-    },
-    dev: {
-      ...ANALYST_CHAIN.roles.dev,
-      does: 'Writes the code, one task at a time, and reports it to be checked the moment it is built or blocked.',
-      brief: ANALYST_CHAIN.roles.dev.brief.replaceAll('tester', 'qa')
-    },
-    // Standing, not hired: the same person checks everything on this floor, so
-    // `hireable` comes off rather than being set false - the markdown form has
-    // only the presence of the flag, and a false that cannot be written back is
-    // a setting that changes the first time the workflow is saved.
-    qa: {
-      can: ANALYST_CHAIN.roles.tester.can,
-      label: 'the QA lead',
-      does: 'Checks everything this floor builds - one standing person rather than one hired per project - and is the only one who closes a task.',
-      hireable: true,
-      brief: ANALYST_CHAIN.roles.tester.brief.replaceAll('tester', 'qa')
-    }
-  }
-}
-
-/**
- * A floor that is not a software team.
- *
- * The proof that the vocabulary is the operator's: nothing here is called a
- * developer or a tester, the board's columns are a content calendar's, and the
- * card rules are written in the words the work is actually done in. The router
- * reads none of those words - it reads the kind each capability behaves like -
- * which is what makes a marketing floor, a research group or a class a floor
- * Bullpen can run without a line of code being different.
- */
-const CONTENT: Workflow = {
-  words: {},
-  human: HUMAN_PARTY,
-  hire: HIRE_PARTY,
-  name: 'content-floor',
-  description: 'Editor → writer ⇄ proofreader. Nothing publishes until the proofreader says so.',
-  dispatch: 'chief',
-  entry: 'editor',
-  reuseBelowPct: 50,
-  hireAbovePct: 70,
-  capabilities: [
-    { name: 'speaks', kind: 'speaksToHuman', what: 'the only one who answers you' },
-    { name: 'commissions', kind: 'assigns', what: 'decides what gets written and by whom' },
-    { name: 'drafts', kind: 'builds', what: 'writes the first version' },
-    { name: 'proofs', kind: 'checks', what: 'sends it back or lets it through' }
-  ],
-  columns: [
-    { key: 'briefed', label: 'briefed', bar: '#7fc7e8', kind: 'start' },
-    { key: 'drafting', label: 'drafting', bar: '#e8cf6a', kind: 'working' },
-    { key: 'in_review', label: 'in review', bar: '#c9a2e8', kind: 'waiting' },
-    { key: 'stuck', label: 'stuck', bar: '#e8917f', kind: 'stuck' },
-    { key: 'published', label: 'published', bar: '#7fd8a0', kind: 'done' }
-  ],
-  cardRules: [],
-  talksTo: {
-    chief: ['editor', 'you'],
-    editor: ['chief', 'writer', 'proofreader', 'hire'],
-    writer: ['editor', 'proofreader'],
-    proofreader: ['editor', 'writer']
-  },
-  roles: {
-    chief: {
-      can: ['speaks'],
-      label: 'the chief',
-      does: 'Takes what you ask for, hands it to the editor, and is the only one who reports back to you.',
-      fixed: { id: 'chief', name: 'Marge' },
-      brief: [
-        `You are {{self.name}}, and you stand in for the person running this floor.`,
-        `You do not write, and you do not commission either. Everything that reaches you - typed at your terminal, or arriving in $BULLPEN_MAILBOX/inbox - goes to the editor, agent id "{{role.editor.id}}" ({{role.editor.name}}):`,
-        `{"from": "{{self.id}}", "to": "{{role.editor.id}}", "subject": "<the request in a few words>", "body": "<what was asked, in the words it was asked in>"}`,
-        `You report to the human, and you are the only one who does. When {{role.editor.name}} reports to you, pass it on in your own words:`,
-        `{"from": "{{self.id}}", "to": "you", "subject": "report", "body": "<where each piece stands, one line each>"}`,
-        `A question asked directly in your own terminal is for you - answer that one yourself. Anything that needs the human's decision goes to "you" as well.`,
-        `Your only addresses are "{{role.editor.id}}" and "you". A message to a writer is refused and handed back: they work for the editor.`,
-        `A piece is published when the proofreader passes it and the editor says so. Telling the human it is done because a writer said the draft is finished is the one report worth nothing.`
-      ].join('\n\n')
-    },
-    editor: {
-      can: ['commissions'],
-      label: 'the editor',
-      does: 'Turns a request into a brief, decides who writes it, and sees it through the proofreader before calling it published.',
-      hireable: true,
-      brief: [
-        `You are {{self.name}}, id "{{self.id}}", the editor on this floor. {{role.chief.name}} ("{{role.chief.id}}") brings you everything the human asks for, and inbound work - webhooks, scheduled triggers - arrives here too.`,
-        `You do not write the pieces. You work out what is actually wanted, then put somebody on it.`,
-        `First, the brief: what it is for, who reads it, how long, what it must say, and what would make it wrong. If any of that cannot be answered from here, ask {{role.chief.name}} - he is the one who talks to the human.`,
-        `Then commission. Read $BULLPEN_FLOOR: every agent, their project, whether they are idle, and ctxPct - how full their context is. Reuse an idle writer on that project under {{reuseBelowPct}}. Between {{reuseBelowPct}} and {{hireAbovePct}}, only for work close to what they just did. Over {{hireAbovePct}}, treat them as unavailable even when idle.`,
-        `Hire when nobody fits, and say which kind:`,
-        `{"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "writer", "body": "<the brief, in enough detail to start>"}`,
-        `Use "role": "proofreader" for somebody to check a piece. A project this floor has never heard of has no directory yet - ask {{role.chief.name}} where it lives and send the hire again with "cwd" set to that path. Do not invent it.`,
-        `One piece at a time per writer, by mail, and say in it that they report to you when the draft is done or they are stuck.`,
-        `A finished draft is not a published piece - it is waiting to be read. Send it to a proofreader on that project (hire one if there is none) with what to check and who wrote it. They take corrections straight to the writer and stay with them until it passes; you do not relay that.`,
-        `When the proofreader passes it, it is published. Report it to {{role.chief.name}}, and only to him:`,
-        `{"from": "{{self.id}}", "to": "{{role.chief.id}}", "subject": "report: <the piece>", "body": "<what was asked, who wrote it, who read it, where it stands>"}`,
-        `Never write to "you". The human hears from {{role.chief.name}}; the router refuses it anyway and hands the message back.`
-      ].join('\n\n')
-    },
-    writer: {
-      can: ['drafts'],
-      label: 'a writer',
-      does: 'Writes the piece, one brief at a time, and reports when the draft is done or stuck.',
-      hireable: true,
-      brief: [
-        `You are "{{self.id}}", a writer on this floor. {{reportTo}} commissions your work and answers to the human running it.`,
-        `You write to anyone by putting one JSON file in $BULLPEN_MAILBOX/outbox. Mail waiting for you is in $BULLPEN_MAILBOX/inbox, and $BULLPEN_FLOOR lists who else is here.`,
-        `You draft. One brief at a time: finish the one you were given, report it, and stop - do not go looking for the next thing.`,
-        `When the draft is done, report before you stop:`,
-        `{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "draft: <the piece in a few words>", "body": "<what you wrote, where it is, and anything you could not source>"}`,
-        `That hands it to the proofreader. They may send corrections straight to you - make them and reply to the proofreader, not to {{reportTo}}. They are the one who says it is published.`,
-        `Report the same way when you are stuck or when you decide not to write it, and say why. Silence is the one answer nobody can act on.`,
-        `You write to two places: {{reportTo}}, and the proofreader reading your piece. Not the chief, not the human - the router refuses those.`
-      ].join('\n\n')
-    },
-    proofreader: {
-      can: ['proofs'],
-      label: 'a proofreader',
-      does: 'Reads the draft against its brief, sends corrections straight to the writer, and is the only one who says a piece is published.',
-      hireable: true,
-      brief: [
-        `You are "{{self.id}}", a proofreader on this floor. {{reportTo}} sends you what to read and who wrote it, and answers to the human running it.`,
-        `You write to anyone by putting one JSON file in $BULLPEN_MAILBOX/outbox. Mail waiting for you is in $BULLPEN_MAILBOX/inbox, and $BULLPEN_FLOOR lists who else is here.`,
-        `You read. Against the brief: does it say what it was meant to say, to the person it was meant for, without anything in it that is wrong. You do not rewrite the piece yourself.`,
-        `A correction goes straight to the writer, not back to {{reportTo}}:`,
-        `{"from": "{{self.id}}", "to": "<writer id>", "subject": "changes: <what is wrong>", "body": "<where, why, and what it should say instead>"}`,
-        `Stay with them until it is right - they reply to you, you read it again, and you keep going round. That loop is yours to close.`,
-        `Publishing is your call and nobody else's: a piece is published when you say it reads, not when the writer says the draft is finished.`,
-        `Only when nothing is left do you report:`,
-        `{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "passed: <the piece>", "body": "<what you read, what you sent back, what changed>"}`,
-        `If it cannot be made to work, say so with the same message and the subject "failed: ...". Silence is the one answer nobody can act on.`,
-        `You write to two places: {{reportTo}}, and the writer whose piece you are reading.`
-      ].join('\n\n')
-    }
-  }
-}
-
-/**
- * A help desk. Nobody builds a feature here - the work is answering people.
- *
- * Kept short on purpose: the shipped chain is four roles and pages of brief,
- * and somebody who has never seen a workflow should be able to read a whole
- * floor in one screen before deciding to change one line of it.
- */
-const SUPPORT: Workflow = {
-  ...HOUSE,
-  name: 'support-desk',
-  description: 'Lead → agent ⇄ escalation. Nothing is closed until the customer has an answer.',
-  dispatch: 'lead',
-  entry: 'lead',
-  reuseBelowPct: 50,
-  hireAbovePct: 70,
-  capabilities: [
-    { name: 'speaks', kind: 'speaksToHuman', what: 'the only one who reports to you' },
-    { name: 'triages', kind: 'assigns', what: 'reads what came in and decides who takes it' },
-    { name: 'answers', kind: 'builds', what: 'writes the reply to the customer' },
-    { name: 'verifies', kind: 'checks', what: 'reads the reply before it goes out' }
-  ],
-  columns: [
-    { key: 'inbox', label: 'inbox', bar: '#7fc7e8', kind: 'start' },
-    { key: 'answering', label: 'answering', bar: '#e8cf6a', kind: 'working' },
-    { key: 'to_check', label: 'to check', bar: '#c9a2e8', kind: 'waiting' },
-    { key: 'stuck', label: 'stuck', bar: '#e8917f', kind: 'stuck' },
-    { key: 'sent', label: 'sent', bar: '#7fd8a0', kind: 'done' }
-  ],
-  cardRules: [],
-  talksTo: {
-    lead: ['triage', 'you'],
-    triage: ['lead', 'agent', 'checker', 'hire'],
-    agent: ['triage', 'checker'],
-    checker: ['triage', 'agent']
-  },
-  roles: {
-    lead: {
-      can: ['speaks'],
-      label: 'the desk lead',
-      does: 'Takes what you bring in, hands it to triage, and is the only one who reports back to you.',
-      fixed: { id: 'lead', name: 'Dana' },
-      brief: [
-        `You are {{self.name}}, and you stand in for the person running this desk.`,
-        `You do not answer tickets and you do not assign them. Everything that reaches you - typed here, or arriving in $BULLPEN_MAILBOX/inbox - goes to triage, agent id "{{role.triage.id}}":`,
-        `{"from": "{{self.id}}", "to": "{{role.triage.id}}", "subject": "<the ticket in a few words>", "body": "<what was asked, in the words it was asked in>"}`,
-        `You report to the human, and you are the only one who does:`,
-        `{"from": "{{self.id}}", "to": "you", "subject": "report", "body": "<where each ticket stands, one line each>"}`,
-        `Your only addresses are "{{role.triage.id}}" and "you". A ticket is answered when the checker passes the reply, not when somebody has drafted one.`
-      ].join('\n\n')
-    },
-    triage: {
-      can: ['triages'],
-      label: 'triage',
-      does: 'Reads what came in, decides who answers it, and sees the reply through a check before calling it sent.',
-      hireable: true,
-      brief: [
-        `You are {{self.name}}, id "{{self.id}}". {{role.lead.name}} brings you everything that comes in.`,
-        `Work out what is actually being asked, which product it is about, and what a good answer would have to contain. Then put somebody on it.`,
-        `Read $BULLPEN_FLOOR: every agent, their project, idle or working, and ctxPct. Reuse an idle agent under {{reuseBelowPct}}; over {{hireAbovePct}} treat them as unavailable. Hire when nobody fits:`,
-        `{"from": "{{self.id}}", "to": "hire", "subject": "<product>", "role": "agent", "body": "<the ticket, in enough detail to answer>"}`,
-        `Use "role": "checker" for somebody to read replies before they go out.`,
-        `A drafted reply is not a sent one. Send it to a checker with what to look for. They take corrections straight to whoever wrote it.`,
-        `When the checker passes it, report to {{role.lead.name}}, and only to him:`,
-        `{"from": "{{self.id}}", "to": "{{role.lead.id}}", "subject": "report: <the ticket>", "body": "<what was asked, who answered, what went out>"}`,
-        `Never write to "you" - the router refuses it and hands the message back.`
-      ].join('\n\n')
-    },
-    agent: {
-      can: ['answers'],
-      label: 'a support agent',
-      does: 'Writes the reply to the customer, one ticket at a time, and says when it is ready or when it is stuck.',
-      hireable: true,
-      brief: [
-        `You are "{{self.id}}", on a support desk. {{reportTo}} gives you tickets.`,
-        `You write to anyone by putting one JSON file in $BULLPEN_MAILBOX/outbox; mail for you is in $BULLPEN_MAILBOX/inbox.`,
-        `Answer the ticket you were given, and stop. When the reply is ready:`,
-        `{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "ready: <the ticket>", "body": "<the reply, and anything you could not confirm>"}`,
-        `A checker reads it and may send corrections straight to you - fix and reply to the checker, not to {{reportTo}}. They decide when it goes out.`,
-        `Say the same way when you are stuck, and why. Silence is the one answer nobody can act on.`
-      ].join('\n\n')
-    },
-    checker: {
-      can: ['verifies'],
-      label: 'a checker',
-      does: 'Reads the reply before it reaches the customer, and is the only one who says it may go.',
-      hireable: true,
-      brief: [
-        `You are "{{self.id}}", on a support desk. {{reportTo}} sends you replies to read before they go out.`,
-        `You write to anyone by putting one JSON file in $BULLPEN_MAILBOX/outbox; mail for you is in $BULLPEN_MAILBOX/inbox.`,
-        `Read it against the ticket: does it answer what was asked, is anything in it wrong, would it need a second email to make sense. You do not rewrite it yourself.`,
-        `A correction goes straight to whoever wrote it:`,
-        `{"from": "{{self.id}}", "to": "<agent id>", "subject": "changes: <what is wrong>", "body": "<where, why, and what it should say>"}`,
-        `Sending is your call: a ticket is answered when you say the reply may go, not when it is drafted. Then:`,
-        `{"from": "{{self.id}}", "to": "{{reportTo}}", "subject": "sent: <the ticket>", "body": "<what you checked and what changed>"}`
-      ].join('\n\n')
-    }
-  }
-}
-
-export const PRESETS: Workflow[] = [ANALYST_CHAIN, SOLO, REVIEW, QA_LEAD, CONTENT, SUPPORT]
+export const PRESETS: Workflow[] = [ANALYST_CHAIN, SOLO]
 
 /** The floor's shape when nothing has been chosen: what Bullpen has always run. */
 export const DEFAULT_WORKFLOW = ANALYST_CHAIN
@@ -604,15 +295,18 @@ nobody can act on.
  * those two and the two lines between them, with the rules that make those
  * lines mean something. Both are ordinary rules on an ordinary line: rename the
  * role, add a third, or write different rules on the same arrow.
+ *
+ * No `## capabilities`. It shipped with one word, `speaksToHuman`, and a role
+ * holding it - and nothing ever asked: who answers the human is read off
+ * `talks to: you`, not off the word. A floor that wants words for the work it
+ * does can name them; a new one should not open with a section it does not use
+ * and a line repeating it.
  */
 export const NEW_FLOOR = `# a new floor
 How work moves here.
 
 - reuse below: 50
 - hire above: 70
-
-## capabilities
-- speaksToHuman — the one who answers you
 
 ## board
 - todo: todo #7fc7e8 (start)
@@ -628,20 +322,23 @@ How work moves here.
 
 ### boss · the boss
 - agent: michael · Michael
-- can: speaksToHuman
 - does: Takes what you hand over, sees it done, and tells you how it went.
 - talks to: you, hire
 - dispatch
-- entry
 
 ## briefs
 
 ### boss
 
-You are {{self.name}}, and you stand in for the person running this floor.
+You are Michael, and you stand in for the person running this floor.
 
-Work reaches you from the person running it. Do it, or put somebody on it, and
-tell them how it went when it is done.
+Work reaches you from the person running it. Before you put anybody on it, read
+it: can it be done here at all, is this the floor for it, and is there enough in
+it to start? When the answer is no, say so to the human and stop there. Handing
+out work nobody can finish, or hiring somebody to find that out, costs an agent
+and a window and answers nothing.
+
+Then do it, or put somebody on it, and tell them how it went when it is done.
 
 You write to anyone on the floor by putting one JSON file in
 $BULLPEN_MAILBOX/outbox; mail for you is in $BULLPEN_MAILBOX/inbox, and

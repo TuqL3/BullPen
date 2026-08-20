@@ -8,6 +8,11 @@ import {
   freeRoleId,
   staffed,
   layout,
+  firing,
+  fillRules,
+  link,
+  ranks,
+  takeLineOff,
   NODE_W,
   readTalk,
   writeTalk
@@ -40,6 +45,171 @@ test('a floor in its own words stands up the same way', () => {
   // kinds, so `drafts` still stands where a builder stands.
   assert.ok(at('editor') < at('writer'))
   assert.ok(at('writer') < at('proofreader'))
+})
+
+/**
+ * Left to right on the drawing is who answers to whom, and the panels say it
+ * out loud. `you` is the top of every floor: the role work is dispatched to
+ * reports to the human, and nothing stands above them.
+ */
+test('the floor is ranked from the person running it', () => {
+  const r = ranks(chain)
+  // Hands a task passes through, not what the role is for: the tester closes
+  // the work and still stands beside the developer, because the analyst is who
+  // both of them hear from.
+  assert.deepEqual(
+    Object.fromEntries(r),
+    { you: 0, god: 1, ba: 2, dev: 3, tester: 3 },
+    'counted in steps from the person running the floor'
+  )
+  assert.equal(ranks(null).size, 0)
+
+  // A role nobody drew a line to is at the bottom, not level with the human.
+  const stray = { ...chain, roles: { ...chain.roles, intern: chain.roles.dev } } as WorkflowInfo
+  assert.equal(ranks(stray).get('intern'), 4)
+})
+
+/**
+ * Deleting the line work arrives on looked like a key that did nothing: no role
+ * declares it, so there was nothing to remove and the drawing put it straight
+ * back. It has to land somewhere, so it moves.
+ */
+/**
+ * A line is the pair. Drawing one wrote a single direction while taking one off
+ * removed both - so deleting a line and drawing it again, which is what anybody
+ * does after moving a box, left one role unable to answer the other and the
+ * picture looked exactly the same.
+ */
+test('drawing a line writes both directions', () => {
+  const w = {
+    human: 'you',
+    hire: 'hire',
+    talksTo: { boss: ['you'], dev: [] }
+  } as unknown as WorkflowInfo
+
+  const both = link(w, 'boss', 'dev')
+  assert.deepEqual(both.boss, ['you', 'dev'])
+  assert.deepEqual(both.dev, ['boss'], 'and the other one can answer')
+
+  // The human and hiring are addresses, not roles: an entry under either names
+  // something `talksTo` has no key for.
+  const up = link(w, 'dev', 'you')
+  assert.deepEqual(up.dev, ['you'])
+  assert.equal(up.you, undefined)
+  assert.equal(link(w, 'boss', 'hire').hire, undefined)
+
+  // Drawn twice is drawn once.
+  assert.deepEqual(link({ ...w, talksTo: both }, 'dev', 'boss'), both)
+})
+
+/**
+ * A rule about two roles that no longer talk is not a rule that fires late, it
+ * is a task that never finishes. `tester → manager: closes it` on a floor where
+ * the tester cannot write to the manager was exactly that, and nothing anywhere
+ * said so.
+ */
+test('saving drops the rules about pairs that no longer talk', () => {
+  const floor = {
+    human: 'you',
+    hire: 'hire',
+    dispatch: 'boss',
+    talksTo: { boss: ['ba', 'you'], ba: ['boss', 'dev'], dev: ['ba'], tester: ['dev'] },
+    capabilities: [{ name: 'builds' }, { name: 'assigns' }],
+    roles: {
+      boss: { label: 'the boss', can: [], brief: 'x' },
+      ba: { label: 'the analyst', can: [], brief: 'y' },
+      dev: { label: 'a developer', can: [], brief: 'z' },
+      tester: { label: 'a tester', can: [], brief: 'w' }
+    },
+    cardRules: [
+      { from: 'ba', to: 'dev', status: 'building' },
+      { from: 'tester', to: 'boss', status: 'closes' },
+      { from: 'boss', to: 'you', status: 'closes' },
+      { from: 'builds', to: 'assigns', status: 'open' }
+    ]
+  } as unknown as WorkflowInfo
+
+  const kept = staffed(floor).cardRules
+  assert.deepEqual(
+    kept.map((r) => `${r.from}→${r.to}`),
+    ['ba→dev', 'boss→you', 'builds→assigns'],
+    'the tester cannot write to the boss, so that rule was never going to fire'
+  )
+
+  // A rule naming something the floor no longer has goes as well. It used to
+  // survive: anything that was not a role read as a word, and a deleted role is
+  // not a role.
+  const gone = { ...floor, roles: { ...floor.roles } } as WorkflowInfo
+  delete gone.roles.dev
+  assert.deepEqual(
+    firing(gone).map((r) => `${r.from}→${r.to}`),
+    ['boss→you', 'builds→assigns'],
+    'the developer is off the floor, and so is the rule about them'
+  )
+})
+
+/**
+ * Deleting a line took its rules with it from the start; drawing one put none
+ * back. A floor written once and then redrawn by hand ended up with arrows the
+ * board does not follow.
+ */
+test('a new line gets the rule it is missing, and the written ones keep their place', () => {
+  const floor = {
+    human: 'you',
+    hire: 'hire',
+    dispatch: 'boss',
+    talksTo: { boss: ['ba', 'you'], ba: ['boss', 'dev'], dev: ['ba'] },
+    capabilities: [{ name: 'builds' }],
+    roles: {
+      boss: { label: 'the boss', can: [], brief: 'x' },
+      ba: { label: 'the analyst', can: [], brief: 'y' },
+      dev: { label: 'a developer', can: ['builds'], brief: 'z' }
+    },
+    cardRules: [{ from: 'boss', to: 'ba', status: 'open' }]
+  } as unknown as WorkflowInfo
+
+  const drawn = [
+    { from: 'boss', to: 'ba', status: 'doing' },
+    { from: 'ba', to: 'dev', status: 'open' }
+  ] as WorkflowInfo['cardRules']
+
+  const filled = fillRules(floor, drawn)
+  assert.deepEqual(
+    filled.map((r) => `${r.from}→${r.to}:${r.status}`),
+    ['boss→ba:open', 'ba→dev:open'],
+    'the pair that already had a rule keeps the one it had, and keeps it first'
+  )
+
+  // A rule written about a word covers every role that holds it, so nothing is
+  // added beside it.
+  const worded = { ...floor, cardRules: [{ from: 'ba', to: 'builds', status: 'open' }] } as WorkflowInfo
+  assert.equal(fillRules(worded, drawn).length, 2, 'only the boss→ba rule is new')
+})
+
+test('taking a line off removes both directions, and moves the one that cannot go', () => {
+  const w = {
+    ...chain,
+    dispatch: 'dev',
+    entry: 'dev',
+    talksTo: { god: ['ba', 'you'], ba: ['god', 'dev'], dev: ['ba', 'you'], tester: ['ba'] }
+  } as unknown as WorkflowInfo
+
+  // An ordinary pair goes, both ways, and nothing else moves.
+  const gone = takeLineOff(w, 'ba', 'dev')
+  assert.deepEqual(gone.talksTo?.ba, ['god'])
+  assert.deepEqual(gone.talksTo?.dev, ['you'])
+  assert.equal(gone.dispatch, undefined, 'nothing about dispatch changed')
+
+  // Work arriving cannot be removed, so it is handed to whoever else answers
+  // the human - and inbound work follows it, because it was pointed there too.
+  const moved = takeLineOff(w, 'dev', 'you')
+  assert.equal(moved.dispatch, 'god')
+  assert.equal(moved.entry, 'god')
+  assert.deepEqual(moved.talksTo?.dev, ['ba'], 'the written half still goes')
+
+  // Nobody else on the floor: it stays where it is rather than going nowhere.
+  const alone = { ...w, roles: { dev: w.roles.dev } } as unknown as WorkflowInfo
+  assert.equal(takeLineOff(alone, 'dev', 'you').dispatch, undefined)
 })
 
 test('an arrow is a talks-to line, and dragging one cannot invent a role', () => {
@@ -211,7 +381,10 @@ test('saving the drawing fills in who stands, and never takes it away', () => {
   } as unknown as WorkflowInfo
 
   const out = staffed(floor)
-  assert.deepEqual(out.roles.boss.fixed, { id: 'boss', name: 'the boss' }, 'dispatch always stands')
+  // Michael, not `boss · the boss`: the desk work is dispatched to is the same
+  // desk on every floor, and naming its agent after whatever the role was
+  // called stood up a different person, with a different face, for each one.
+  assert.deepEqual(out.roles.boss.fixed, { id: 'michael', name: 'Michael' }, 'dispatch always stands')
   assert.equal(out.roles.boss.hireable, undefined)
   assert.deepEqual(out.roles.writer.fixed, { id: 'writer', name: 'Iris' }, 'and so does whoever was named')
   assert.equal(out.roles.writer.hireable, undefined)
