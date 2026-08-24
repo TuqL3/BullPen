@@ -464,6 +464,45 @@ const sideOf = (floor: WorkflowInfo, role: string, word: string): boolean => {
 }
 
 /**
+ * The part of a floor its card rules are about: who is on it, and who writes to
+ * whom. Sorted, because a line drawn and drawn again arrives in a different
+ * order and means the same thing.
+ */
+export const shapeKey = (w: WorkflowInfo | null): string =>
+  !w
+    ? ''
+    : JSON.stringify({
+        // What each one is called and what it may do, not only who it writes
+        // to. A role given a capability it did not have is a role whose brief
+        // is now about the wrong job, and the file was left saying the old one
+        // because nothing here had moved.
+        roles: Object.entries(w.roles)
+          .map(([id, def]) => [id, def.label, [...(def.can ?? [])].sort().join(',')].join('·'))
+          .sort(),
+        dispatch: w.dispatch,
+        entry: w.entry,
+        talksTo: Object.fromEntries(
+          Object.entries(w.talksTo)
+            .map(([from, tos]) => [from, [...tos].sort()] as const)
+            .sort(([a], [b]) => a.localeCompare(b))
+        ),
+        // The rules themselves, so that typing one into the file counts the
+        // same as moving a line does. The drawing and the rules are one thing
+        // described two ways, and editing either leaves the other saying
+        // something else - `write it` is what makes them agree again, and it
+        // makes them agree by writing the rules the drawing says.
+        rules: [...w.cardRules]
+          .map((r) => [r.from, r.to, r.status, r.whose ?? ''].join('\u0000'))
+          .sort(),
+        // The board by key and by kind, which is what a rule names and what
+        // decides where work goes. Not the label and not the colour: renaming a
+        // column or picking another shade says nothing about how the floor
+        // works, and stopping a save over it would be a rule with nothing
+        // behind it.
+        board: w.columns.map((c) => [c.key, c.kind ?? ''].join('\u0000'))
+      })
+
+/**
  * The rules that can still fire, given the floor as it is now drawn.
  *
  * A floor is drawn and redrawn - a line comes off, a box is deleted, an arrow
@@ -497,7 +536,12 @@ export function firing(floor: WorkflowInfo): WorkflowInfo['cardRules'] {
   const talks = (a: string, b: string): boolean =>
     (floor.talksTo?.[a] ?? []).includes(b) || (a === floor.human && b === floor.dispatch)
 
+  // A column can be renamed or taken off the board under a rule that sends
+  // cards to it, and the file that names a stage the board does not have will
+  // not read back at all.
+  const keys = new Set((floor.columns ?? []).map((c) => c.key))
   return (floor.cardRules ?? []).filter((r) => {
+    if (r.status !== 'open' && r.status !== 'closes' && !keys.has(r.status)) return false
     if (!answers(r.from) || !answers(r.to)) return false
     if (!floor.roles[r.from] || !floor.roles[r.to]) return true
     return talks(r.from, r.to)
@@ -510,11 +554,16 @@ export function staffed(floor: WorkflowInfo): WorkflowInfo {
       // Dispatch is the one role that cannot be hired into: it is who the
       // operator types at, and there has to be somebody there at launch.
       if (id === floor.dispatch) {
-        // And it is Michael unless the file named somebody else. The fallback
-        // was the role's own id and label, so a floor drawn from scratch stood
-        // up an agent called `boss` - a different person on every floor, with a
+        // And it is Michael, whatever the file says. The fallback was the
+        // role's own id and label, so a floor drawn from scratch stood up an
+        // agent called `boss` - a different person on every floor, with a
         // different face, for a desk that is always the same one.
-        return [id, { ...def, hireable: undefined, fixed: def.fixed ?? { id: 'michael', name: 'Michael' } }]
+        //
+        // Taken rather than defaulted, because `??` only filled the gap: the
+        // generator forces this desk on the way out of the model, the blank
+        // floor writes it in, and a floor typed by hand in the file column was
+        // the one way left to end up with somebody else sitting at it.
+        return [id, { ...def, hireable: undefined, fixed: { id: 'michael', name: 'Michael' } }]
       }
       // Filled in, never overwritten. This used to force `fixed: undefined,
       // hireable: true` on everyone else - so a floor that said it wanted a

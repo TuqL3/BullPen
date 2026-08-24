@@ -204,3 +204,70 @@ test('a card waiting for a tester survives a restart in that column', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+/**
+ * A name is only taken while its agent is running, so firing the developer
+ * called `morgan` frees `morgan` for the next hire on the next project - and
+ * the board is keyed by id. That agent opened onto eight cards from a project
+ * it had never been near, in columns the floor no longer had.
+ */
+test('an id handed to somebody new starts with an empty board', () => {
+  const { board, root } = fresh()
+  board.addTask('morgan', 'the old project')
+  board.addTask('morgan', 'also the old project')
+  board.addTrigger('morgan', 'check the queue', 30)
+  board.setRule('morgan', 80, 'compact')
+  board.addTask('avery', 'somebody else entirely')
+
+  assert.equal(board.forget('morgan'), 4, 'cards, the schedule and the rule')
+  assert.deepEqual(board.tasks('morgan'), [])
+  assert.deepEqual(board.triggers('morgan'), [])
+  assert.deepEqual(board.rules('morgan'), [])
+  assert.equal(board.tasks('avery').length, 1, 'and nobody else is touched')
+
+  // Written through, not only dropped in memory: the next boot reads the file.
+  assert.equal(new Board(boardPath(root)).tasks().length, 1)
+
+  // Nothing under that id is not an error, and does not rewrite the file.
+  assert.equal(board.forget('nobody'), 0)
+  rmSync(root, { recursive: true, force: true })
+})
+
+/**
+ * A card carries the key of a column on the floor it was opened on. Apply a
+ * different floor and those keys are not its columns - so the card is not
+ * stale, it is in no column at all: shown nowhere, and still on the board.
+ */
+test('applying a floor clears the cards and keeps the operator’s own setup', () => {
+  const { board, root } = fresh()
+  board.addTask('morgan', 'built against the old columns', 'wait_test')
+  board.addTask('avery', 'the same')
+  board.addTrigger('morgan', 'check the queue', 30)
+  board.setRule('morgan', 80, 'compact')
+
+  assert.equal(board.clearTasks(), 2)
+  assert.deepEqual(board.tasks(), [])
+  assert.equal(board.triggers().length, 1, 'a schedule is the operator’s, not the floor’s')
+  assert.equal(board.rules().length, 1)
+  assert.equal(new Board(boardPath(root)).tasks().length, 0)
+
+  // An empty board clears to an empty board without touching the file.
+  assert.equal(board.clearTasks(), 0)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('a card can be looked up by id, and only claimed once', () => {
+  const { board, root } = fresh()
+  const open = board.addTask('', 'reformat the export', 'todo', { role: 'dev' })!
+  assert.equal(open.agentId, '', 'unassigned is a card nobody holds yet')
+  assert.equal(open.role, 'dev', 'and it says who it is work for')
+  assert.equal(board.task(open.id)?.text, 'reformat the export')
+
+  assert.equal(board.claim(open.id, 'morgan'), true)
+  assert.equal(board.task(open.id)?.agentId, 'morgan')
+  // Two agents reading the same list both saw it free. Only one comes away.
+  assert.equal(board.claim(open.id, 'avery'), false, 'a card already held is not free')
+  assert.equal(board.task(open.id)?.agentId, 'morgan')
+  assert.equal(board.claim('no-such-id', 'avery'), false)
+  rmSync(root, { recursive: true, force: true })
+})

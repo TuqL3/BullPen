@@ -31,6 +31,25 @@ export type AgentState = {
   exitCode?: number
 }
 
+/** How much of each agent's output is kept to fill a fresh window back in. */
+const TAIL = 200_000
+
+/**
+ * Keep the last `max` characters, cut at a line boundary.
+ *
+ * A blind `slice(-max)` can land inside an escape sequence, and half a sequence
+ * replayed into a terminal is a pane painted in whatever colour the other half
+ * would have ended. Cutting at the first newline past the limit costs at most
+ * one line and hands back something a terminal can read from the top.
+ */
+export function trimTail(past: string, chunk: string, max = TAIL): string {
+  const all = past + chunk
+  if (all.length <= max) return all
+  const cut = all.length - max
+  const nl = all.indexOf('\n', cut)
+  return all.slice(nl >= 0 ? nl + 1 : cut)
+}
+
 /**
  * One real pseudo-terminal per agent. Nothing is simulated: every agent is the
  * same `claude` process you would run by hand, just parented by Bullpen.
@@ -38,6 +57,20 @@ export type AgentState = {
 export class PtyManager extends EventEmitter {
   private ptys = new Map<string, IPty>()
   private states = new Map<string, AgentState>()
+  /**
+   * What each agent has printed, bounded.
+   *
+   * The window reloads whenever a floor is applied, and an agent whose role
+   * survives the switch is not restarted - so the renderer came back with an
+   * empty xterm attached to a pty that had already said everything it was
+   * going to say. An idle agent prints nothing, and the pane stayed black for
+   * as long as it stayed idle: the floor was running, the agent was up, and
+   * the one screen that shows it was blank.
+   *
+   * Kept past exit as well. The last thing a dead agent printed is the reason
+   * it died, and that is exactly when somebody goes looking for it.
+   */
+  private tail = new Map<string, string>()
   private trust = new Map<string, TrustWatch>()
 
   spawn(spec: AgentSpec): AgentState {
@@ -72,8 +105,12 @@ export class PtyManager extends EventEmitter {
     this.ptys.set(spec.id, pty)
     this.states.set(spec.id, state)
     this.trust.set(spec.id, newWatch(spec.cwd, state.startedAt))
+    // A respawn under the same id is a new conversation, not a continuation of
+    // whatever the last one printed.
+    this.tail.set(spec.id, '')
 
     pty.onData((chunk) => {
+      this.tail.set(spec.id, trimTail(this.tail.get(spec.id) ?? '', chunk))
       this.emit('data', spec.id, chunk)
 
       // Answer Claude Code's workspace-trust prompt, once, only for the
@@ -100,6 +137,11 @@ export class PtyManager extends EventEmitter {
 
   write(id: string, data: string): void {
     this.ptys.get(id)?.write(data)
+  }
+
+  /** What this agent has printed lately, for a terminal that has just opened. */
+  backlog(id: string): string {
+    return this.tail.get(id) ?? ''
   }
 
   resize(id: string, cols: number, rows: number): void {

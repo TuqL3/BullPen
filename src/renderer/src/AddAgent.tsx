@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Avatar } from './Avatar'
 import { PRESETS, projectOf, SHIRT_CHOICES, slug } from './roster'
+import { modelOf, withModel } from '../../models'
+import { ENGINES, engineFor, retune } from '../../engines'
 import { LABEL, MONO } from './theme'
 import type { WorkflowInfo } from '../../preload/index'
 
@@ -92,6 +94,12 @@ export function AddAgent({
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  /** What Bullpen can do to the CLI that was chosen, and which models it has. */
+  const engine = engineFor(d.cmd)
+  /** Which model the arguments currently ask for. Read off them, not stored twice. */
+  const picked = modelOf(d.args, engine.modelFlag)
+  /** Whether the pinned ids are unfolded. Folded is the answer nearly every time. */
+  const [more, setMore] = useState(false)
 
   // Whoever assigns and is allowed to write to the role being hired. Read off
   // talksTo rather than assumed, because a floor can have two who assign and
@@ -175,9 +183,13 @@ export function AddAgent({
                   id: {id} · becomes their mailbox and settings directory
                 </div>
 
-                {hireable.length > 1 && <div style={{ ...LABEL, marginTop: 4 }}>Role</div>}
-                <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-                  {(hireable.length > 1 ? hireable : []).map(([role, what]) => (
+                {/* Every role this floor may be hired into, including when
+                    there is only one. Hiding the single case saved a line and
+                    cost the answer to "what roles does this floor have" - which
+                    is the question somebody opening this dialog is asking. */}
+                {hireable.length > 0 && <div style={{ ...LABEL, marginTop: 4 }}>Role</div>}
+                <div style={{ display: 'flex', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                  {hireable.map(([role, what]) => (
                     <div
                       key={role}
                       onClick={() => set('role', role)}
@@ -280,25 +292,146 @@ export function AddAgent({
 
             {step === 2 && (
               <>
-                <div style={LABEL}>Command</div>
-                <input
-                  style={S.input}
-                  value={d.cmd}
-                  spellCheck={false}
-                  onChange={(e) => set('cmd', e.target.value)}
-                />
-                <div style={LABEL}>Extra arguments</div>
+                {/* A press, not a command to remember. The engine decides what
+                    Bullpen may add to the spawn and what it can see afterwards,
+                    which is too much to hang on somebody spelling `codex`. */}
+                <div style={LABEL}>Engine</div>
+                <div style={S.roleRow}>
+                  {ENGINES.map((e) => (
+                    <button
+                      key={e.cmd}
+                      title={e.caveat || 'everything Bullpen does works with this one'}
+                      onClick={() =>
+                        setD((prev) => ({
+                          ...prev,
+                          cmd: e.cmd,
+                          args: retune(prev.args, engineFor(prev.cmd), e)
+                        }))
+                      }
+                      style={{ ...S.roleChip, ...(engine.cmd === e.cmd ? S.roleChipOn : null) }}
+                    >
+                      {e.label}
+                      {e.beta && <span style={S.beta}>beta</span>}
+                    </button>
+                  ))}
+                  {/* A command typed by hand - out of a floor file's `- cli:`,
+                      which is still the place to say one. Shown rather than
+                      silently replaced by a chip that is not what is running. */}
+                  {!ENGINES.some((e) => e.cmd === d.cmd) && d.cmd.trim() && (
+                    <span style={{ ...S.roleChip, ...S.roleChipOn, cursor: 'default' }}>
+                      {d.cmd.trim()}
+                    </span>
+                  )}
+                </div>
+                {/* What this one costs, in the words it costs them. An agent
+                    nothing checks is the single most important thing this
+                    dialog can say, and it used to be the last line of a
+                    paragraph about `--settings`. */}
+                <div
+                  style={{
+                    ...S.note,
+                    marginTop: 0,
+                    marginBottom: 12,
+                    color: engine.supervised ? 'var(--ok)' : 'var(--warn)'
+                  }}
+                >
+                  {engine.supervised
+                    ? 'Approvals, context meter and cost all work with this one. Its brief is written to ' +
+                      engine.briefFile +
+                      ' in its workspace as well, so you can read what it was told.'
+                    : engine.caveat}
+                </div>
+                {/* Three words answer this almost every time. The pinned ids
+                    are for somebody who came looking to hold a version still,
+                    which is not a thing anybody picks in passing - so they are
+                    behind `more` rather than nine chips deep on the way past.
+
+                    There is no model field on an agent: the CLI takes a flag
+                    and Bullpen passes these arguments through verbatim, so this
+                    rewrites that one flag and leaves the rest alone. */}
+                <div style={LABEL}>Model</div>
+                {engine.models.length === 0 ? (
+                  <div style={{ ...S.note, marginTop: 2, marginBottom: 10 }}>
+                    Bullpen ships no model list for {engine.label} &mdash; type{' '}
+                    <code>{engine.modelFlag} &lt;name&gt;</code> below and it is passed through.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ ...S.roleRow, marginBottom: more ? 6 : 10 }}>
+                      {engine.models
+                        .filter((m) => m.common)
+                        .map((m) => (
+                          <button
+                            key={m.id}
+                            title={m.note || m.id}
+                            onClick={() => set('args', withModel(d.args, m.id, engine.modelFlag))}
+                            style={{ ...S.roleChip, ...(picked === m.id ? S.roleChipOn : null) }}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      <button
+                        title="let the CLI use whatever it is configured for"
+                        onClick={() => set('args', withModel(d.args, null, engine.modelFlag))}
+                        style={{ ...S.roleChip, ...(picked === null ? S.roleChipOn : null) }}
+                      >
+                        its default
+                      </button>
+                      <button
+                        onClick={() => setMore((v) => !v)}
+                        style={{ ...S.roleChip, borderColor: 'transparent' }}
+                      >
+                        {more ? '\u25be' : '\u25b8'} pin a version
+                      </button>
+                      {/* A model typed by hand, or one pinned and then folded
+                          away: shown either way, because a chip row that says
+                          nothing is selected while an argument says otherwise
+                          is the dialog disagreeing with itself. */}
+                      {picked && !engine.models.some((m) => m.common && m.id === picked) && (
+                        <span style={{ ...S.roleChip, ...S.roleChipOn, cursor: 'default' }}>
+                          {engine.models.find((m) => m.id === picked)?.label ?? picked}
+                        </span>
+                      )}
+                    </div>
+                    {more && (
+                      <div style={S.roleRow}>
+                        {engine.models
+                          .filter((m) => !m.common)
+                          .map((m) => (
+                            <button
+                              key={m.id}
+                              title={m.note || m.id}
+                              onClick={() => set('args', withModel(d.args, m.id, engine.modelFlag))}
+                              style={{ ...S.roleChip, ...(picked === m.id ? S.roleChipOn : null) }}
+                            >
+                              {m.label}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div style={{ ...LABEL, marginTop: 14 }}>Extra arguments</div>
                 <input
                   style={S.input}
                   value={d.args}
-                  placeholder="--model opus"
+                  // Not a model: the chips above are what sets one, and naming
+                  // an example here left `--model opus` sitting under a Codex
+                  // agent as a suggestion it cannot take.
+                  placeholder="anything else this CLI takes"
                   spellCheck={false}
                   onChange={(e) => set('args', e.target.value)}
                 />
+
                 <p style={S.note}>
-                  Bullpen appends <code>--settings</code> pointing at this agent&apos;s generated hook
-                  config, which is what makes the approvals layer work. Only <code>claude</code> is
-                  wired up and tested; another CLI will spawn, but its tool calls will not be checked.
+                  The chips rewrite the <code>{engine.modelFlag}</code> flag; anything else here is
+                  passed through, so a model released after this list was written still works.
+                </p>
+                <p style={S.note}>
+                  The brief always lands as <code>{engine.briefFile}</code> in the workspace &mdash; a file
+                  you can open and edit, and the only copy of it an unsupervised engine ever gets.
+                  Bullpen writes it once and never over your edits.
                 </p>
               </>
             )}
@@ -364,9 +497,15 @@ const S: Record<string, React.CSSProperties> = {
     zIndex: 50
   },
   modal: {
-    width: 720,
+    // A ceiling, not a width. Fixed at 720 it could not shrink, so a narrow
+    // window scrolled the dialog sideways and cut the step list off the left
+    // edge - the one column that says where you are in it.
+    width: '100%',
+    maxWidth: 720,
+    boxSizing: 'border-box',
     maxHeight: '86vh',
     overflowY: 'auto',
+    overflowX: 'hidden',
     background: 'var(--panel)',
     border: '1px solid var(--line)',
     padding: 20,
@@ -405,14 +544,31 @@ const S: Record<string, React.CSSProperties> = {
     background: 'var(--sunk)',
     color: 'var(--muted)',
     cursor: 'pointer',
+    // A chip is a name and reads as one line. Left to wrap, "Opus 5 · 1M" came
+    // out three rows tall and the row of them looked like a table.
+    whiteSpace: 'nowrap',
     font: `11px ${MONO}`
   },
   roleChipOn: { borderColor: 'var(--accent-ink)', color: 'var(--accent-ink)' },
+  // Reads as part of the chip rather than a second control: no border, no
+  // press, and small enough that the engine's name is still what you see.
+  beta: {
+    marginLeft: 5,
+    fontSize: 8,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    color: 'var(--warn)',
+    verticalAlign: 'top'
+  } as React.CSSProperties,
   roleRow: {
     display: 'flex',
+    // Wraps, because this row now holds nine models rather than three roles.
+    // A flex row that cannot wrap and cannot shrink pushes its container wider
+    // than the window, which is what put a horizontal scrollbar under a dialog.
+    flexWrap: 'wrap',
     alignItems: 'flex-start',
-    gap: 8,
-    marginBottom: 14,
+    gap: 6,
+    marginBottom: 10,
     fontSize: 11,
     color: 'var(--muted)',
     lineHeight: 1.5,

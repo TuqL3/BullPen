@@ -8,6 +8,7 @@ import {
   freeRoleId,
   staffed,
   layout,
+  shapeKey,
   firing,
   fillRules,
   link,
@@ -115,6 +116,11 @@ test('saving drops the rules about pairs that no longer talk', () => {
     dispatch: 'boss',
     talksTo: { boss: ['ba', 'you'], ba: ['boss', 'dev'], dev: ['ba'], tester: ['dev'] },
     capabilities: [{ name: 'builds' }, { name: 'assigns' }],
+    columns: [
+      { key: 'todo', label: 'todo', bar: '#a3e3ff', kind: 'start' },
+      { key: 'building', label: 'building', bar: '#e8cf6a', kind: 'working' },
+      { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' }
+    ],
     roles: {
       boss: { label: 'the boss', can: [], brief: 'x' },
       ba: { label: 'the analyst', can: [], brief: 'y' },
@@ -184,6 +190,68 @@ test('a new line gets the rule it is missing, and the written ones keep their pl
   // added beside it.
   const worded = { ...floor, cardRules: [{ from: 'ba', to: 'builds', status: 'open' }] } as WorkflowInfo
   assert.equal(fillRules(worded, drawn).length, 2, 'only the boss→ba rule is new')
+})
+
+/**
+ * What has to be reconciled before a floor is written, and what does not.
+ *
+ * The drawing and the rules are one thing described two ways, so editing either
+ * leaves the other saying something else and `write it` is what makes them
+ * agree. A threshold or a colour says nothing about how the floor works, and
+ * standing in front of the save for one would be a rule with nothing behind it.
+ */
+test('what needs the floor written again, and what does not', () => {
+  const floor = {
+    human: 'you',
+    hire: 'hire',
+    dispatch: 'boss',
+    entry: 'boss',
+    reuseBelowPct: 50,
+    hireAbovePct: 70,
+    capabilities: [{ name: 'builds' }],
+    columns: [
+      { key: 'todo', label: 'todo', bar: '#a3e3ff', kind: 'start' },
+      { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' }
+    ],
+    talksTo: { boss: ['dev', 'you'], dev: ['boss'] },
+    roles: {
+      boss: { label: 'the boss', can: [], brief: 'x' },
+      dev: { label: 'a developer', can: ['builds'], brief: 'y', hireable: true }
+    },
+    cardRules: [{ from: 'boss', to: 'dev', status: 'open' }]
+  } as unknown as WorkflowInfo
+
+  const was = shapeKey(floor)
+  const moved = (patch: Partial<WorkflowInfo>): boolean => shapeKey({ ...floor, ...patch }) !== was
+
+  // Everything the router acts on.
+  assert.ok(moved({ talksTo: { boss: ['you'], dev: ['boss'] } }), 'a line taken off')
+  assert.ok(moved({ cardRules: [{ from: 'boss', to: 'dev', status: 'done' }] }), 'a rule typed')
+  assert.ok(moved({ cardRules: [] }), 'a rule deleted')
+  assert.ok(
+    moved({ columns: [{ ...floor.columns[0], key: 'briefed' }, floor.columns[1]] }),
+    'a column renamed - a rule names it by key'
+  )
+  assert.ok(
+    moved({ roles: { ...floor.roles, dev: { ...floor.roles.dev, can: [] } } }),
+    'a role given different work'
+  )
+
+  // And what says nothing about how it works.
+  assert.ok(!moved({ reuseBelowPct: 40 }), 'a threshold')
+  assert.ok(!moved({ hireAbovePct: 90 }), 'the other threshold')
+  assert.ok(
+    !moved({ columns: [{ ...floor.columns[0], bar: '#123456' }, floor.columns[1]] }),
+    'a colour'
+  )
+  assert.ok(
+    !moved({ columns: [{ ...floor.columns[0], label: 'the question' }, floor.columns[1]] }),
+    "a column's label - the key is what a rule names"
+  )
+  assert.ok(
+    !moved({ roles: { ...floor.roles, dev: { ...floor.roles.dev, brief: 'z' } } }),
+    'a brief rewritten by hand'
+  )
 })
 
 test('taking a line off removes both directions, and moves the one that cannot go', () => {
@@ -385,6 +453,15 @@ test('saving the drawing fills in who stands, and never takes it away', () => {
   // desk on every floor, and naming its agent after whatever the role was
   // called stood up a different person, with a different face, for each one.
   assert.deepEqual(out.roles.boss.fixed, { id: 'michael', name: 'Michael' }, 'dispatch always stands')
+
+  // And it is that desk however the file was typed. This used to only fill a
+  // gap, so a floor whose dispatch role named somebody else - by hand in the
+  // file column, the one path the generator does not pass through - kept them.
+  const renamed = {
+    ...floor,
+    roles: { ...floor.roles, boss: { ...floor.roles.boss, fixed: { id: 'bob', name: 'Bob' } } }
+  } as unknown as WorkflowInfo
+  assert.deepEqual(staffed(renamed).roles.boss.fixed, { id: 'michael', name: 'Michael' })
   assert.equal(out.roles.boss.hireable, undefined)
   assert.deepEqual(out.roles.writer.fixed, { id: 'writer', name: 'Iris' }, 'and so does whoever was named')
   assert.equal(out.roles.writer.hireable, undefined)

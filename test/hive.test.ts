@@ -223,3 +223,73 @@ test('a request the gate refuses never reaches hiring or the human', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+/**
+ * Delivered mail is not consumed - every brief tells its agent that its mail is
+ * in `$BULLPEN_MAILBOX/inbox`, so it stays there to be read. A name is free the
+ * moment its agent stops, though, and the next hire on the next project gets
+ * that name: it came up in front of nine messages about work it had never done,
+ * and its own brief told it to go and read them.
+ */
+test('an id handed to somebody new starts with an empty mailbox', () => {
+  const { hive, root } = fresh()
+  hive.register('morgan')
+  hive.register('avery')
+  hive.send({ from: 'avery', to: 'morgan', subject: 'the old project', body: 'x' })
+  hive.send({ from: 'avery', to: 'morgan', subject: 'the old project again', body: 'y' })
+  hive.route()
+  // One still on its way out, so both directions are covered.
+  hive.send({ from: 'morgan', to: 'avery', subject: 'half-written', body: 'z' })
+
+  assert.equal(hive.peekInbox('morgan').length, 2)
+  assert.equal(hive.forget('morgan'), 3, 'two delivered and one unsent')
+  assert.deepEqual(hive.peekInbox('morgan'), [])
+
+  // The directory stays: `list` is what the router walks, and an id it cannot
+  // see is an id nothing can be addressed to.
+  assert.ok(hive.list().includes('morgan'), 'still an address')
+  hive.send({ from: 'avery', to: 'morgan', subject: 'the new project', body: 'a' })
+  hive.route()
+  assert.deepEqual(
+    hive.peekInbox('morgan').map((m) => m.subject),
+    ['the new project']
+  )
+
+  // Nobody else is touched, and an empty mailbox clears to an empty mailbox.
+  assert.equal(hive.peekInbox('avery').length, 0, 'its own outbox went, so nothing arrived')
+  assert.equal(hive.forget('nobody-here'), 0)
+  rmSync(root, { recursive: true, force: true })
+})
+
+/**
+ * `staff` is allowed to hire, so the name it returns is the one name the sweep
+ * cannot already know about.
+ *
+ * `route()` opens with one `list()` and matched the staffed name against it,
+ * which is a snapshot taken before the hire existed. So the message that
+ * caused a hire was the message the hire never got: somebody was put on the
+ * floor, given a card, and told nothing - indistinguishable, from outside,
+ * from an agent that is simply slow to start.
+ */
+test('the message that causes a hire reaches the agent it hired', () => {
+  const { hive, root } = fresh()
+  hive.register('michael')
+
+  hive.staff = (to, _from, _msg) => {
+    if (to !== 'dev') return null
+    // Exactly what main does: bring somebody up, then name them.
+    hive.register('morgan')
+    return 'morgan'
+  }
+
+  hive.send({ from: 'michael', to: 'dev', subject: 'the task', body: 'ship it' })
+  const made = hive.route()
+
+  assert.equal(made.length, 1, 'one delivery, not a dead letter')
+  const got = hive.drainInbox('morgan')
+  assert.equal(got.length, 1, 'the new hire is told what the work is')
+  assert.equal(got[0].body, 'ship it')
+  assert.equal(got[0].to, 'morgan', 'addressed to the person, not the role')
+  assert.equal(readdirSync(join(root, 'dead')).length, 0, 'and nothing is dead')
+  rmSync(root, { recursive: true, force: true })
+})

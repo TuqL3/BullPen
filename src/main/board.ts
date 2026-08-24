@@ -27,6 +27,33 @@ export type Task = {
   /** Kept so boards written before statuses existed still load. */
   done: boolean
   createdAt: number
+  /**
+   * Who handed it over, when somebody did.
+   *
+   * Absent on a card typed in by hand, which nobody handed over. It is here
+   * rather than only in the activity log because a card is the thing an agent
+   * reads back later, and "who is waiting on this" is the first question it
+   * has - the log answers that for a person watching, not for an agent.
+   */
+  by?: string
+  /**
+   * The role this is work for.
+   *
+   * Set when the card was opened for a role rather than for a person, which is
+   * how anything unassigned can be found by somebody able to do it. A card
+   * opened by name does not need one: the name already says who.
+   */
+  role?: string
+  /**
+   * The card this one is a check of.
+   *
+   * A checker's card is not work of its own - it is somebody else's build,
+   * being looked at. Without the link the only way to find that build was
+   * "every card waiting, on this project", so one pass closed every feature
+   * under test at once. The link is set where the check is handed over,
+   * because that is the one moment both cards are in hand.
+   */
+  checks?: string
 }
 
 export type Trigger = {
@@ -109,11 +136,32 @@ export class Board extends EventEmitter {
     renameSync(tmp, this.file)
   }
 
+  /**
+   * Every card, or one agent's.
+   *
+   * `undefined` means all of them; `''` means the ones nobody holds. That used
+   * to be one answer - `!agentId` is true for both - which was harmless while
+   * an unheld card could not exist, and a trap the moment one could: asking for
+   * the unclaimed pile handed back the whole board, and `openCard('')` would
+   * have picked the newest card on the floor and called it somebody's.
+   */
   tasks(agentId?: string): Task[] {
-    return this.data.tasks.filter((t) => !agentId || t.agentId === agentId)
+    if (agentId === undefined) return [...this.data.tasks]
+    return this.data.tasks.filter((t) => t.agentId === agentId)
   }
 
-  addTask(agentId: string, text: string, status: TaskStatus = 'todo'): Task | null {
+  /**
+   * `status` defaults to `todo` for callers with no floor in hand - the tests,
+   * and nothing else. Anything in main knows which floor is running and must
+   * pass its starting column: `todo` is one board's word, not every board's,
+   * and storing it on a floor without that column loses the card.
+   */
+  addTask(
+    agentId: string,
+    text: string,
+    status: TaskStatus = 'todo',
+    meta: { by?: string; role?: string; checks?: string } = {}
+  ): Task | null {
     const clean = text.trim()
     if (!clean) return null
     const task: Task = {
@@ -122,11 +170,34 @@ export class Board extends EventEmitter {
       text: clean,
       status,
       done: status === 'done',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      ...(meta.by ? { by: meta.by } : {}),
+      ...(meta.role ? { role: meta.role } : {}),
+      ...(meta.checks ? { checks: meta.checks } : {})
     }
     this.data.tasks.push(task)
     this.save()
     return task
+  }
+
+  /** One card by id, or undefined. The lookup a message carrying an id needs. */
+  task(id: string): Task | undefined {
+    return this.data.tasks.find((t) => t.id === id)
+  }
+
+  /**
+   * Put a name on a card that has none.
+   *
+   * Refused when somebody already holds it, and that refusal is the whole
+   * point: two agents reading the same list at the same moment both see it
+   * free, and only one of them may come away with it.
+   */
+  claim(id: string, agentId: string): boolean {
+    const t = this.task(id)
+    if (!t || !agentId.trim() || t.agentId) return false
+    t.agentId = agentId
+    this.save()
+    return true
   }
 
   setTaskStatus(id: string, status: TaskStatus): void {
@@ -146,6 +217,46 @@ export class Board extends EventEmitter {
   removeTask(id: string): void {
     this.data.tasks = this.data.tasks.filter((t) => t.id !== id)
     this.save()
+  }
+
+  /**
+   * Everything this board holds under one agent id, gone.
+   *
+   * A name is only taken while its agent is running: fire the developer called
+   * `morgan` and the next hire on any project can be called `morgan` too. The
+   * board is keyed by id, so that new agent opened onto eight cards from a
+   * project it had never been near - work it had not been given, in columns the
+   * floor no longer had. The schedules and the context rule go with them for
+   * the same reason: both fire at an id, and neither was meant for whoever is
+   * standing under that name now.
+   */
+  forget(agentId: string): number {
+    const held = (d: Data): number => d.tasks.length + d.triggers.length + d.rules.length
+    const before = held(this.data)
+    this.data.tasks = this.data.tasks.filter((t) => t.agentId !== agentId)
+    this.data.triggers = this.data.triggers.filter((t) => t.agentId !== agentId)
+    this.data.rules = this.data.rules.filter((r) => r.agentId !== agentId)
+    const gone = before - held(this.data)
+    if (gone) this.save()
+    return gone
+  }
+
+  /**
+   * Every card, gone. The schedules and rules stay.
+   *
+   * Applying a floor replaces the columns a card can be in, and a card carries
+   * the key of a column that may not exist on the new one - so what was on the
+   * board is not merely stale, it is unreachable: not in any column, and not
+   * shown anywhere. Schedules and context rules are the operator's own setup
+   * rather than the floor's work, and an agent that survives the switch keeps
+   * both.
+   */
+  clearTasks(): number {
+    const gone = this.data.tasks.length
+    if (!gone) return 0
+    this.data.tasks = []
+    this.save()
+    return gone
   }
 
   triggers(agentId?: string): Trigger[] {

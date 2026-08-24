@@ -15,6 +15,8 @@ import { Tasks } from './tabs/Tasks'
 import { Triggers } from './tabs/Triggers'
 import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './roster'
+import { labelForModel, matchModel, modelOf, withModel } from '../../models'
+import { engineFor } from '../../engines'
 import type { Dispatch, Question, Report, WorkflowInfo } from '../../preload/index'
 import {
   paneSize,
@@ -141,6 +143,24 @@ export default function App() {
   const [adding, setAdding] = useState<Partial<Draft> | null>(null)
   const [steerText, setSteerText] = useState('')
   const [moveError, setMoveError] = useState('')
+  /**
+   * The row the pointer was right-clicked on, and where.
+   *
+   * Two things an agent has that the roster showed and could not change: what
+   * it runs on and where it works. Both were decided once, in the wizard, and
+   * a wrong answer meant firing it and hiring somebody else.
+   */
+  const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  /**
+   * What the CLI's own config says that agent starts on, while its menu is open.
+   *
+   * The model it answered on is read off the transcript and does not exist
+   * until it has taken a turn, so a floor just brought up had nothing under
+   * "its default" at all. This is the same files the CLI reads, asked for when
+   * the menu opens rather than held: somebody may edit them between one
+   * opening and the next.
+   */
+  const [menuModel, setMenuModel] = useState<string | null>(null)
   // Set on first run only: the suggested workspace, awaiting an answer.
   const [setupCwd, setSetupCwd] = useState<string | null>(null)
   // The work tree opens files and the editor shows them; they are separate
@@ -163,8 +183,8 @@ export default function App() {
   // Held here rather than in the tab that shows them: the tab badge has to
   // count them while that tab is unmounted, which is exactly when it matters.
   const [questions, setQuestions] = useState<Question[]>([])
-  /** The god agent's last word on where the work stands. Monitor's, not ask me's. */
-  const [report, setReport] = useState<Report | null>(null)
+  /** Where the work stands, every round of it, newest first. Monitor's, not ask me's. */
+  const [reports, setReports] = useState<Report[]>([])
   /** The brief the operator last handed over, shown back to them on the monitor. */
   const [dispatched, setDispatched] = useState<Dispatch | null>(null)
   /** Desktop notifications, mirrored here so the title bar can show which it is. */
@@ -177,7 +197,7 @@ export default function App() {
 
   useEffect(() => {
     window.bullpen.askList().then(setQuestions)
-    window.bullpen.lastReport().then(setReport)
+    window.bullpen.reports().then(setReports)
     window.bullpen.lastDispatch().then(setDispatched)
     window.bullpen.notify().then(setNotifyOn)
     window.bullpen.uiPrefs().then((p) => {
@@ -186,7 +206,9 @@ export default function App() {
       setTerminalFontSize(p.fontSize)
     })
     const offAsk = window.bullpen.onAsk(setQuestions)
-    const offReport = window.bullpen.onReport(setReport)
+    // Prepended rather than replacing: main keeps the history, and this keeps
+    // the copy on screen in step without a round trip per report.
+    const offReport = window.bullpen.onReport((r) => setReports((was) => [r, ...was]))
     const offDispatch = window.bullpen.onDispatch(setDispatched)
     return () => {
       offAsk()
@@ -387,6 +409,22 @@ export default function App() {
     )
   }, [agents])
 
+  // Only while a row menu is open, and dropped the moment it closes: this is a
+  // read of somebody else's config file, not a fact about the agent.
+  useEffect(() => {
+    setMenuModel(null)
+    const a = rowMenu ? agents.find((x) => x.id === rowMenu.id) : null
+    if (!a) return
+    let live = true
+    void window.bullpen.configModel(a.id, a.cli ?? 'claude', a.cwd).then((m) => {
+      if (live) setMenuModel(m)
+    })
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowMenu])
+
   useEffect(() => {
     window.bullpen.layout().then((raw) => setLayout(normalise(raw)))
   }, [])
@@ -433,6 +471,7 @@ export default function App() {
         color: d.color,
         cwd: state.cwd,
         cli: d.cmd.trim() || 'claude',
+        args: d.args.trim() ? d.args.trim().split(/\s+/) : [],
         pid: state.pid,
         startedAt: state.startedAt,
         cols: state.cols,
@@ -601,6 +640,10 @@ export default function App() {
       if (!window.confirm(`Fire ${a.name}? It stops now and leaves the roster.${note}`)) return
       await window.bullpen.kill(a.id)
     }
+    // Before the row goes, so the id is still the one being fired. A name is
+    // free the moment its agent stops, and the next hire on the next project
+    // gets it - along with every card, schedule and context rule left under it.
+    await window.bullpen.forget(a.id)
     store().removeAgent(a.id)
     // The row is gone, so nothing will ever mount this host again. Without
     // this the xterm instance and its 10k lines of scrollback stay alive for
@@ -617,19 +660,28 @@ export default function App() {
    * agent comes back as itself; `setRole` re-states it for a worker whose role
    * only the roster knows.
    */
-  const restart = async (a: Agent): Promise<void> => {
+  const restart = async (a: Agent, change?: { cwd?: string; args?: string[] }): Promise<void> => {
     const { cols, rows } = paneSize(document.querySelector('section'))
+    const cwd = change?.cwd?.trim() || a.cwd
+    // Its own arguments unless it is being changed onto others. They used to be
+    // dropped here: an agent hired on `--model haiku` came back on whatever the
+    // CLI defaults to, which is an agent whose answers changed for a reason
+    // nobody could see from the roster.
+    const args = change?.args ?? a.args ?? []
     try {
       const state = await window.bullpen.spawn({
         id: a.id,
-        cwd: a.cwd,
+        cwd,
         cmd: a.cli ?? 'claude',
+        args,
         cols,
         rows,
         role: a.role
       })
       store().upsertAgent({
         id: a.id,
+        cwd: state.cwd,
+        args,
         pid: state.pid,
         startedAt: state.startedAt,
         cols: state.cols,
@@ -638,6 +690,57 @@ export default function App() {
         exitCode: undefined,
         // Same reason as a fresh hire: it is sitting at a prompt having
         // submitted nothing, and no Stop hook is coming to correct 'working'.
+        activity: 'idle',
+        asked: null,
+        doing: undefined
+      })
+      window.bullpen.setRole(a.id, a.role)
+      select(a.id)
+      setTab('terminal')
+    } catch (e) {
+      setMoveError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Put an agent on a different model, or in a different directory.
+   *
+   * Both are read once by the CLI at startup, so both are a restart and there
+   * is no version of this that keeps the conversation - which is why it says so
+   * before it does anything. Main does the stop and the spawn in one call: a
+   * renderer that killed and then spawned would be racing the exit it caused.
+   */
+  const reconfigure = async (a: Agent, change: { cwd?: string; args?: string[] }): Promise<void> => {
+    const cwd = change.cwd?.trim() || a.cwd
+    const args = change.args ?? a.args ?? []
+    const model = modelOf(args.join(' ')) ?? "the CLI's default"
+    const what = change.cwd ? `Move ${a.name} to ${cwd}?` : `Restart ${a.name} on ${model}?`
+    if (!window.confirm(`${what}\n\nThe CLI reads both of these once, at startup, so this restarts it. What it has said so far stays in the terminal; what it remembers does not.`)) {
+      return
+    }
+    const { cols, rows } = paneSize(document.querySelector('section'))
+    try {
+      const state = await window.bullpen.restart({
+        id: a.id,
+        cwd,
+        cmd: a.cli ?? 'claude',
+        args,
+        cols,
+        rows,
+        role: a.role
+      })
+      if ('error' in state) return setMoveError(state.error)
+      store().upsertAgent({
+        id: a.id,
+        cwd: state.cwd,
+        args,
+        project: isCore(a.role) ? '' : a.project || projectOf(state.cwd),
+        pid: state.pid,
+        startedAt: state.startedAt,
+        cols: state.cols,
+        rows: state.rows,
+        status: 'running',
+        exitCode: undefined,
         activity: 'idle',
         asked: null,
         doing: undefined
@@ -678,6 +781,7 @@ export default function App() {
                 onSelect={() => select(a.id)}
                 onFire={() => fire(a)}
                 onRestart={() => restart(a)}
+                onMenu={(x, y) => setRowMenu({ id: a.id, x, y })}
                 tag={roleTag(a.role)}
               />
             ))}
@@ -707,6 +811,7 @@ export default function App() {
                     onSelect={() => select(a.id)}
                     onFire={() => fire(a)}
                     onRestart={() => restart(a)}
+                    onMenu={(x, y) => setRowMenu({ id: a.id, x, y })}
                     tag={roleTag(a.role)}
                   />
                 ))}
@@ -737,18 +842,23 @@ export default function App() {
                   </button>
                 )}
                 {/* Sat next to `queue` before, one button away from the thing
-                    you press all day, and it kills a process without asking. */}
-                {current?.status === 'running' && (
+                    you press all day, and it kills a process without asking.
+
+                    Stopping and keeping the row was a state nobody wanted from
+                    here: an agent halted at this desk was done being talked to,
+                    and the row it left behind was one more thing to dismiss. So
+                    this is the same act as the roster's `×`. The restart on an
+                    exited row is still there for one that died on its own.
+
+                    Not for dispatch: the floor has no boss without it, and
+                    nothing on this screen brings it back. */}
+                {current?.status === 'running' && current.role !== dispatchRole() && (
                   <button
                     style={{ ...S.linkBtn, color: 'var(--danger)' }}
-                    title="stop this agent, keep it on the roster"
-                    onClick={() => {
-                      const queued = steers[current.id]?.length ?? 0
-                      const note = queued > 0 ? ` ${queued} queued note${queued === 1 ? '' : 's'} will be dropped.` : ''
-                      if (window.confirm(`Halt ${current.name}?${note}`)) window.bullpen.kill(current.id)
-                    }}
+                    title={`stop ${current.name} and take it off the roster`}
+                    onClick={() => fire(current)}
                   >
-                    halt
+                    close
                   </button>
                 )}
               </div>
@@ -825,7 +935,7 @@ export default function App() {
               <Monitor
                 agents={agents}
                 lastSeen={lastSeen}
-                report={report}
+                reports={reports}
                 dispatched={dispatched}
                 // Ask me is where everything waiting on a human is collected,
                 // so that is where a waiting agent leads - not the terminal.
@@ -956,6 +1066,76 @@ export default function App() {
 
       <Dock agents={agents} selected={selected} approvals={approvals} onSelect={select} />
 
+      {/* Right-click on a row: the two things an agent was stuck with.
+          Both are read once by the CLI at startup, so both are a restart, and
+          `reconfigure` says so before it does anything. */}
+      {rowMenu &&
+        (() => {
+          const a = agents.find((x) => x.id === rowMenu.id)
+          if (!a) return null
+          const args = a.args ?? []
+          // The engine decides which models exist. A menu of Claude models over
+          // a codex agent is a menu of things it cannot run.
+          const engine = engineFor(a.cli)
+          const picked = modelOf(args.join(' '), engine.modelFlag)
+          // What it is actually on, which is not always what was asked for: an
+          // agent started with no flag still answers on something, and the tick
+          // belongs against that row rather than against a line saying the
+          // question was never answered. The turn it took beats the config file,
+          // because one is what happened and the other is what was intended.
+          const inUse = picked ?? a.ctx?.model ?? menuModel
+          const ticked = inUse ? matchModel(inUse, engine.models)?.id : undefined
+          const close = (): void => setRowMenu(null)
+          return (
+            <>
+              <div style={S.menuBackdrop} onClick={close} onContextMenu={close} />
+              <div style={{ ...S.rowMenu, left: rowMenu.x, top: rowMenu.y }}>
+                <div style={{ ...LABEL, color: 'var(--faint)', padding: '2px 8px' }}>
+                  {a.name} · {inUse ? labelForModel(inUse, engine.models) : "the CLI's default"}
+                </div>
+                {engine.models.length === 0 && (
+                  <div style={{ ...S.menuItem, color: 'var(--faint)', cursor: 'default' }}>
+                    no model list for {engine.label}
+                  </div>
+                )}
+                {engine.models.map((m) => (
+                  <div
+                    key={m.id}
+                    title={m.note || m.id}
+                    style={{
+                      ...S.menuItem,
+                      ...(m.common ? null : S.menuItemPinned),
+                      ...(ticked === m.id ? S.menuItemOn : null)
+                    }}
+                    onClick={() => {
+                      close()
+                      // Picking what it is already running would be a restart
+                      // that changes nothing and costs the conversation.
+                      if (ticked === m.id) return
+                      const next = withModel(args.join(' '), m.id, engine.modelFlag)
+                      void reconfigure(a, { args: next ? next.split(/\s+/) : [] })
+                    }}
+                  >
+                    <span style={S.tick}>{ticked === m.id ? '✓' : ''}</span>
+                    {m.label}
+                  </div>
+                ))}
+                <div style={S.menuRule} />
+                <div
+                  style={S.menuItem}
+                  onClick={async () => {
+                    close()
+                    const dir = await window.bullpen.pickDir()
+                    if (dir) void reconfigure(a, { cwd: dir })
+                  }}
+                >
+                  change directory…
+                </div>
+              </div>
+            </>
+          )
+        })()}
+
       {adding && (
         <AddAgent
           taken={agents.map((a) => a.id)}
@@ -1066,8 +1246,8 @@ function Icon({
   if (name === 'roster')
     return (
       <svg {...common} aria-hidden>
-        <path d="M2 4h3v3H2zM2 10.5h3v3H2z" />
-        <path d="M7.5 5.5h6.5M7.5 12h6.5" />
+        <path d="M2 2.5h3v3H2zM2 10.5h3v3H2z" />
+        <path d="M7.5 4h6.5M7.5 12h6.5" />
       </svg>
     )
   if (name === 'review')
@@ -1435,11 +1615,15 @@ const SIDE_PANELS: Switchable[] = ['tree', 'floor']
 function PanelToggle({
   id,
   layout,
-  onToggle
+  onToggle,
+  size
 }: {
   id: Switchable
   layout: Layout
   onToggle: (id: PanelId) => void
+  /** Bigger than the default where the glyph has to hold its own beside
+   *  something that is not one of ours - the native traffic lights. */
+  size?: number
 }) {
   const on = !layout.hidden.includes(id)
   return (
@@ -1458,7 +1642,7 @@ function PanelToggle({
       }
       onClick={() => onToggle(id)}
     >
-      <Icon name={id} />
+      <Icon name={id} size={size} />
     </button>
   )
 }
@@ -1482,12 +1666,17 @@ function TitleBar({
 }) {
   return (
     <div style={S.titlebar}>
-      {/* Leaves room for the macOS traffic lights, which stay native. */}
-      <div style={{ width: window.bullpen.isMac ? 72 : 14 }} />
+      {/* Leaves room for the macOS traffic lights, which stay native. Wide
+          enough to clear the last light and no wider: the lights end 66px in
+          (14px inset, three 12px dots, 20px apart), the bar already pads 10 and
+          gaps 8, so 52 puts the first switch right beside them. */}
+      <div style={{ width: window.bullpen.isMac ? 52 : 14 }} />
       {/* The roster sits on the left of the window, so its switch sits on the
           left of the bar - where the wordmark used to be. A title bar that
           spells out the name of the app you are looking at is decoration. */}
-      <PanelToggle id="roster" layout={layout} onToggle={onTogglePanel} />
+      {/* 15, not the default 13: the glyph only fills 11/16 of its box, so at
+          13 it read as smaller than the 12px traffic lights it sits against. */}
+      <PanelToggle id="roster" layout={layout} onToggle={onTogglePanel} size={15} />
       <div style={{ flex: 1 }} />
       {/* Fixed order, so a toggle does not move when the panels are rearranged
           and the button under the cursor stays the one you meant. The command
@@ -1575,6 +1764,7 @@ function RosterRow({
   onSelect,
   onFire,
   onRestart,
+  onMenu,
   tag
 }: {
   agent: Agent
@@ -1584,6 +1774,8 @@ function RosterRow({
   onSelect: () => void
   onFire: () => void
   onRestart: () => void
+  /** Right-clicked, in window coordinates: what it runs on and where it works. */
+  onMenu: (x: number, y: number) => void
   /** What this role is called here, or null for whoever does the building. */
   tag: string | null
 }) {
@@ -1592,6 +1784,11 @@ function RosterRow({
     <div
       data-agent={agent.id}
       onClick={onSelect}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onSelect()
+        onMenu(e.clientX, e.clientY)
+      }}
       style={{ ...S.row, ...(god ? S.rowGod : null), ...(active ? S.rowActive : null) }}
     >
       <Avatar id={agent.face} shirt={agent.color} size={god ? 34 : 28} />
@@ -1711,7 +1908,10 @@ const S: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '0 10px',
+    // The 1px bottom border is inside the 34px row, so centring lands at 16.5
+    // while the native traffic lights - inset 11, 12px across - centre at 17.
+    // The padding puts the content box back on their line.
+    padding: '1px 10px 0',
     borderBottom: '1px solid var(--line)',
     background: 'var(--panel)',
     WebkitAppRegion: 'drag'
@@ -1723,7 +1923,7 @@ const S: Record<string, React.CSSProperties> = {
     border: 'none',
     color: 'var(--muted)',
     cursor: 'pointer',
-    padding: '4px 6px'
+    padding: '3px 6px'
   },
   // Closing is the one titlebar action with no undo, so it does not look like
   // the toggles beside it.
@@ -1876,7 +2076,7 @@ const S: Record<string, React.CSSProperties> = {
   },
   paneGripHeld: { opacity: 0.5, cursor: 'grabbing' },
   paneBody: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
-  reviewBtn: { gap: 5, padding: '0 6px', font: `10px ${MONO}`, color: 'var(--muted)' },
+  reviewBtn: { gap: 5, padding: '3px 6px', font: `10px ${MONO}`, color: 'var(--muted)' },
   panelToggle: {
     display: 'flex',
     alignItems: 'center',
@@ -1887,7 +2087,7 @@ const S: Record<string, React.CSSProperties> = {
     // `currentcolor` - a white box on the panel you had just switched away from.
     border: 'none',
     cursor: 'pointer',
-    padding: '3px 5px'
+    padding: '3px 6px'
   },
   groupHead: {
     display: 'flex',
@@ -1962,6 +2162,28 @@ const S: Record<string, React.CSSProperties> = {
     margin: '0 0 10px',
     font: `12px ${MONO}`
   },
+  menuBackdrop: { position: 'fixed', inset: 0, zIndex: 60 },
+  rowMenu: {
+    position: 'fixed',
+    zIndex: 61,
+    minWidth: 190,
+    maxHeight: '70vh',
+    overflowY: 'auto',
+    padding: '6px 0',
+    background: 'var(--panel)',
+    border: '1px solid var(--line)',
+    borderRadius: 8,
+    boxShadow: '0 8px 24px rgba(0,0,0,.45)',
+    font: `12px ${MONO}`
+  },
+  menuItem: { padding: '4px 10px', cursor: 'pointer', color: 'var(--ink)' },
+  // A column of its own, so every label starts at the same place whether or not
+  // it is the one in use - a tick that pushes one line across reads as a typo.
+  tick: { display: 'inline-block', width: 12, color: 'var(--accent-ink)' },
+  menuItemOn: { color: 'var(--accent-ink)' },
+  // The pinned ids, set back from the three words that answer this usually.
+  menuItemPinned: { paddingLeft: 20, color: 'var(--muted)' },
+  menuRule: { height: 1, background: 'var(--line)', margin: '6px 0' },
   mailRow: {
     display: 'flex',
     alignItems: 'center',

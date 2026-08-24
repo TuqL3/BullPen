@@ -8,7 +8,18 @@ import { columns as boardColumns } from '../shape'
 
 /** A column key. Which keys exist is the workflow's answer, not this file's. */
 type Status = string
-type Task = { id: string; agentId: string; text: string; status: Status; createdAt: number }
+type Task = {
+  id: string
+  /** Empty means nobody has taken it: a card posted for a role, not a person. */
+  agentId: string
+  text: string
+  status: Status
+  createdAt: number
+  /** What kind of agent it is work for, on a card nobody holds yet. */
+  role?: string
+  /** Who handed it over, and who is waiting on it. */
+  by?: string
+}
 
 /**
  * One agent's board: the cards belonging to whoever is selected.
@@ -66,12 +77,43 @@ export function Tasks({
     refresh()
   }
 
+  // Where a card lands when it is typed. The floor's word for it, not `todo`:
+  // one board's first column is another's second.
+  const startKey = columns.find((c) => c.kind === 'start')?.key ?? columns[0]?.key
+  const waiting = tasks.filter((t) => t.status === startKey)
+
+  /**
+   * Say yes to the list, once.
+   *
+   * The confirm sat on `add` and asked per card, which is a dialog between you
+   * and the keyboard while you are still writing the list. Adding is free;
+   * this is the press that spends, so it is its own press - and it covers
+   * everything queued rather than the one card you happened to finish typing.
+   */
+  const start = async (): Promise<void> => {
+    if (!agent || waiting.length === 0) return
+    const list = waiting.map((t) => `- ${t.text}`).join('\n')
+    if (
+      !window.confirm(
+        `Start ${agent.name} on ${waiting.length} card${waiting.length === 1 ? '' : 's'}?\n\n${list}\n\n` +
+          'They are worked one at a time, the next going out as the last one closes.'
+      )
+    ) {
+      return
+    }
+    for (const t of waiting) await window.bullpen.releaseTask(t.id)
+    refresh()
+  }
+
   const move = async (id: string, status: Status): Promise<void> => {
     await window.bullpen.setTaskStatus(id, status)
     refresh()
   }
 
-  const nameOf = (id: string): string => agents.find((a) => a.id === id)?.name ?? id ?? 'unassigned'
+  // `?? 'unassigned'` never fired: an unheld card carries an empty string, which
+  // is not nullish, so the foot of every posted card rendered blank.
+  const nameOf = (id: string): string =>
+    id ? (agents.find((a) => a.id === id)?.name ?? id) : 'unclaimed'
 
   return (
     <div style={S.wrap}>
@@ -85,6 +127,14 @@ export function Tasks({
         />
         <button style={S.btn} onClick={add}>
           add
+        </button>
+        <button
+          style={{ ...S.btn, ...(waiting.length ? null : S.btnOff) }}
+          disabled={waiting.length === 0}
+          title="hand every card in the first column to this agent"
+          onClick={start}
+        >
+          start {waiting.length || ''}
         </button>
         <span style={{ ...LABEL, color: 'var(--faint)', marginLeft: 'auto' }}>
           {agent ? `${agent.name} · ` : ''}
@@ -171,6 +221,14 @@ export function Tasks({
                     </div>
                     <div style={S.cardFoot}>
                       <span style={{ ...LABEL, color: 'var(--accent-ink)' }}>{nameOf(t.agentId)}</span>
+                      {/* An unheld card is only actionable if it says who it is
+                          for: "unclaimed" alone is a card nobody can act on. */}
+                      {!t.agentId && t.role && (
+                        <span style={{ ...LABEL, opacity: 0.7 }}>for {t.role}</span>
+                      )}
+                      {t.by && t.by !== t.agentId && (
+                        <span style={{ ...LABEL, opacity: 0.7 }}>from {nameOf(t.by)}</span>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -183,8 +241,9 @@ export function Tasks({
 
       <p style={S.note}>
         A card appears here on its own when this agent is given something, and moves as it works -
-        drag one to move it by hand. Adding or moving a card does not tell the agent anything: to
-        make it act, message it, dispatch through your clone, or set a trigger.
+        drag one to move it by hand. Writing the list costs nothing and says nothing to the agent:
+        press start when it is ready, and the cards go out one at a time until the list is empty.
+        Moving a card by hand still tells the agent nothing.
       </p>
     </div>
   )
@@ -312,6 +371,7 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--line)',
     font: `11px ${MONO}`
   },
+  btnOff: { opacity: 0.4, cursor: 'default' },
   btn: {
     padding: '6px 12px',
     background: 'var(--accent)',

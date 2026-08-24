@@ -1,3 +1,8 @@
+import { CLIENT_ID, awaitToken, deviceCode, type DeviceCode } from './github.ts'
+import { hostname } from 'node:os'
+import { createGist, findGist, readGist, whoAmI, writeGist } from './gist.ts'
+import { keyringWorks, readToken, writeToken } from './secret.ts'
+import { adopt, bundle, newer, readFloors, type Bundle } from './sync.ts'
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -12,15 +17,21 @@ import {
   stats as gitStats
 } from './git.ts'
 import { ActivityLog } from './activity.ts'
-import { Board, boardPath, type TaskStatus } from './board.ts'
+import { Board, boardPath, type Task, type TaskStatus } from './board.ts'
+import { Asks, asksPath, REPORTING, type Ask } from './asks.ts'
+import { engineArgs, engineFor } from '../engines.ts'
+import { bannerModel, configuredModel } from './climodel.ts'
 import { newToken, Webhooks } from './webhook.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
 import {
   floorPath,
+  publishTasks,
+  tasksPath,
   godCwd,
   publishFloor,
   writeBriefing,
+  dropBrief,
   type FloorAgent
 } from './god.ts'
 import { execFile } from 'node:child_process'
@@ -37,6 +48,8 @@ import {
   formatDoc,
   hasPlaceFor,
   drawnCardRules,
+  isBoard,
+  hasColumn,
   lint,
   listWorkflows,
   parseMarkdown,
@@ -49,12 +62,15 @@ import {
   saveWorkflow,
   pctOr,
   toMarkdown,
+  trimmed,
+  withoutCardRules,
+  withWork,
   type Candidate,
   type ColumnKind,
   type Workflow,
   workCwd
 } from './workflow.ts'
-import { generatorBrief } from '../workflow-spec.ts'
+import { BOARD_PARTY, generatorBrief } from '../workflow-spec.ts'
 // The format, as one document rather than a table in a source file. Bundled
 // into main because the model that writes workflows is briefed with it, and
 // read off disk by the tests that check it still describes what the parser does.
@@ -105,9 +121,16 @@ const activity = new ActivityLog()
 /** agentId -> the question it is stopped on in its own terminal, if any. */
 const waiting = new Map<string, string>()
 
-/** Questions agents have addressed to the human, newest last. */
-const questions = new Map<string, Message & { id: string }>()
-let questionSeq = 0
+/**
+ * Questions agents have addressed to the human, and what was said back.
+ *
+ * On disk rather than in a `Map`: answering used to delete the entry, so the
+ * question and the answer both went the moment they were dealt with, and what
+ * had already been decided was unknowable an hour later.
+ */
+const asks = new Asks(asksPath(BULLPEN_HOME))
+let questionSeq = Date.now()
+
 
 /**
  * The shape of this floor: who exists, who writes to whom, what they are told.
@@ -229,25 +252,30 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
   // that only reads, or a different CLI entirely on the one that writes.
   const cli = wf.roles[role]?.cli?.trim()
   const said = cli ? cli.split(/\s+/) : []
-  const cmd = said[0] ?? spec.cmd
+  const cmd = said[0] ?? spec.cmd ?? 'claude'
   const cliArgs = said.slice(1)
+
+  // What Bullpen may add, and what it may not. `--append-system-prompt` and
+  // `--settings` are claude's own flags: appended to every spawn regardless,
+  // they were what stopped a floor from running `codex` at all - the CLI was
+  // handed two arguments it did not know and refused to start.
+  const engine = engineFor(cmd)
+  // So the brief goes where that CLI already looks: a real file in its own
+  // workspace, which is also the only form of it anybody can read or correct.
+  // claude gets one too - the flag is what it acts on, the file is what a
+  // person opens when they want to know what this agent was told.
+  dropBrief(spec.cwd, engine.briefFile, wf.roles[role]?.fixed?.name ?? spec.id, brief)
 
   const state = ptys.spawn({
     ...spec,
     cmd,
-    args: [
-      ...cliArgs,
-      ...(spec.args ?? []),
-      '--append-system-prompt',
-      brief,
-      '--settings',
-      settingsPath
-    ],
+    args: [...cliArgs, ...(spec.args ?? []), ...engineArgs(engine, brief, settingsPath)],
     env: {
       ...spec.env,
       BULLPEN_AGENT_ID: spec.id,
       BULLPEN_MAILBOX: hive.agentDir(spec.id),
-      BULLPEN_FLOOR: floorPath(BULLPEN_HOME)
+      BULLPEN_FLOOR: floorPath(BULLPEN_HOME),
+      BULLPEN_TASKS: tasksPath(BULLPEN_HOME)
     }
   })
 
@@ -273,19 +301,80 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
  */
 function houseRules(w: Workflow, role: string, id: string): string {
   const down = (w.talksTo[role] ?? []).filter((to) => w.roles[to])
-  if (!down.length) return ''
-  const list = down.map((r) => `"${r}"`).join(', ')
-  return [
-    `Handing work over: address the message to the role, not to a person - ${list}.`,
-    `Bullpen puts it in front of whoever is free, hires somebody when nobody is,`,
-    `and puts the task on the board under their name. You do not have to know who`,
-    `is on the floor or how full their context is.`,
-    ``,
-    `{"from": "${id}", "to": "${down[0]}", "subject": "<the task in a few words>", "body": "<what is needed>"}`,
-    ``,
-    `Start a report with "done: " when a task is finished and "fail: " when it is`,
-    `not. That is what moves the card off the board.`
-  ].join('\n')
+  const said: string[] = []
+
+  // Only worth saying to somebody who has anybody to hand to.
+  if (down.length) {
+    const list = down.map((r) => `"${r}"`).join(', ')
+    said.push(
+      [
+        `Handing work over: address the message to the role, not to a person - ${list}.`,
+        `Bullpen puts it in front of whoever is free, hires somebody when nobody is,`,
+        `and puts the task on the board under their name. You do not have to know who`,
+        `is on the floor or how full their context is.`,
+        ``,
+        `{"from": "${id}", "to": "${down[0]}", "subject": "<the task in a few words>", "body": "<what is needed>"}`
+      ].join('\n')
+    )
+  }
+
+  /**
+   * The two words, said to everybody.
+   *
+   * These used to sit under the guard above, which is about handing work *out*
+   * - so a role that writes to nobody but the human was never told them. That
+   * is the one role whose report is the last thing that happens to a task: it
+   * reported in whatever words it chose, the board read "fail: ..." as work
+   * delivered, and the card closed green on the one hand-off the operator
+   * actually reads.
+   *
+   * English on purpose, in a brief that may be in any language: they are
+   * matched as text the way a column key is, and `stuckInstead` in `cards.ts`
+   * is what reads them. The sentence around them is the floor's; the two words
+   * are not.
+   */
+  said.push(
+    [
+      `Start a report with "done: " when a task is finished and "fail: " when it is`,
+      `not - those two words exactly, whatever language the rest of your report is`,
+      `in. That is what moves the card off the board.`
+    ].join('\n')
+  )
+
+  /**
+   * The board, said to everybody, because everybody is on it.
+   *
+   * Read from a file and changed by message, which is the same split the floor
+   * roster already uses and for a harder reason: two agents reading one list at
+   * the same moment both see a card free, and only one of them may come away
+   * with it. Main is the only writer, so a claim is a request.
+   */
+  said.push(
+    [
+      `The task list is $BULLPEN_TASKS - every card on this floor, who holds it, and`,
+      `where it stands. Read it; do not write to it. Work handed to you arrives with`,
+      `a "task" id, and quoting that id back on your report is what closes that card`,
+      `rather than whichever of yours is newest:`,
+      ``,
+      `{"from": "${id}", "to": "<whoever gave it to you>", "subject": "done: <the task>", "body": "<what you did>", "task": "<the id you were given>"}`,
+      ``,
+      `To change the list itself, write to "board":`,
+      `  claim   - take a card nobody holds:  {"to": "board", "subject": "claim", "task": "<id>"}`,
+      `  done    - mark yours finished:       {"to": "board", "subject": "done", "task": "<id>"}`,
+      `  blocked - mark yours stuck, say why: {"to": "board", "subject": "blocked", "task": "<id>", "body": "<why>"}`,
+      ...(down.length
+        ? [
+            `  post    - put work up for a role, for whoever is free to take:`,
+            `            {"to": "board", "subject": "post", "role": "${down[0]}", "body": "<the task>"}`
+          ]
+        : []),
+      ``,
+      `The board is where work stands, not what was said about it. Anything that`,
+      `needs an answer is still a message to a person.`
+    ].join('\n')
+  )
+
+  return said.join('\n\n')
 }
 
 /** See PtyManager.submit for why the Enter cannot ride along with the text. */
@@ -384,8 +473,25 @@ function nextHireName(project: string): string {
 /** The roster as the renderer last published it - what Michael reads too. */
 let lastFloor: FloorAgent[] = []
 
-/** Agents seen working, so a Stop hook can be told from a turn that mattered. */
-const working = new Set<string>()
+/**
+ * Agents seen working, and when that turn started.
+ *
+ * A set once, which was enough to tell a Stop hook that mattered from one that
+ * did not. What it could not say is how long somebody has been in there, and
+ * that is the difference between an agent doing a long piece of work and one
+ * that is never coming back: a turn that never ends sends no Stop hook, so the
+ * id stays in here for the rest of the run. `reportWhenQuiet` waits for this to
+ * empty, so one agent hung mid-turn silently ends every progress report after
+ * it - the same failure a killed pty used to cause, and that one is guarded on
+ * the way out of `exit`. This is the case where nothing exits.
+ */
+const working = new Map<string, number>()
+
+/** Who is working and has not been in there long enough to be presumed hung. */
+const busy = (): string[] => {
+  const now = Date.now()
+  return [...working].filter(([, since]) => now - since < HUNG_MS).map(([id]) => id)
+}
 
 /**
  * Whether a round of dispatched work still owes the operator a report.
@@ -406,7 +512,19 @@ let reportDue = false
  * same thing for any that arrive late, after the flag has been spent.
  */
 let reportWanted = false
-let lastReport: (Message & { ts: number }) | null = null
+/**
+ * Every report, newest first.
+ *
+ * One was kept, and the monitor showed that one - so the round before this one
+ * left no trace anywhere except a line in the activity log saying a report had
+ * happened, without what it said. A floor that reports three times an hour is a
+ * floor whose history was being thrown away as fast as it was written.
+ *
+ * In memory and capped: this is the record of a session, not an archive, and
+ * fifty is more than anybody scrolls back through.
+ */
+const reports: (Message & { ts: number })[] = []
+const REPORTS_KEPT = 50
 
 /**
  * The last thing the operator dispatched, verbatim.
@@ -420,6 +538,66 @@ let lastDispatch: { text: string; owner: string; project: string; ts: number } |
 /** Push the board out whenever it changes, so the tasks tab is not a snapshot. */
 function pushTasks(): void {
   send('board:tasks', board.tasks())
+  // And to the floor itself. The renderer's copy is a panel; this one is what
+  // an agent reads when it wants to know what else is going on, and it is the
+  // only view of the work that exists outside main.
+  publishTasks(BULLPEN_HOME, {
+    updated: Date.now(),
+    columns: wf.columns.map((c) => c.key),
+    tasks: board.tasks().map((t) => ({
+      id: t.id,
+      text: t.text,
+      status: t.status,
+      agent: t.agentId,
+      ...(t.role ? { role: t.role } : {}),
+      ...(t.by ? { by: t.by } : {}),
+      ...(t.checks ? { checks: t.checks } : {}),
+      createdAt: t.createdAt
+    }))
+  })
+}
+
+/**
+ * Take everything left under an id off the floor, and say so.
+ *
+ * Called at both ends of a name's life: when somebody is hired under it, and
+ * when whoever held it is taken off the roster. A name is only claimed while
+ * its agent is running, so the two are the same event seen twice - the id that
+ * a fired developer left behind is the id the next hire on the next project is
+ * given, and none of this was about either of them: not the cards, not the
+ * schedules, not the context rule, and not the mail still sitting in the inbox
+ * its own brief tells it to go and read.
+ */
+function forgetAgent(id: string): void {
+  /**
+   * The builds this one was checking, before its cards go with it.
+   *
+   * `checks` points one way: a check names the build, and the build names
+   * nobody. So taking a checker off the roster deleted the only record that
+   * anything was being checked, and left the build sitting in the waiting
+   * column with nobody looking at it and nothing that would ever move it -
+   * work that reads as in progress forever, which is the one thing the board
+   * must not say.
+   *
+   * Put back as stuck rather than finished or re-queued: nobody checked it, and
+   * saying so is the honest answer. Whoever picks it up decides the rest.
+   */
+  for (const card of board.tasks(id)) {
+    const built = card.checks ? board.task(card.checks) : undefined
+    if (!built || built.status === column('done')) continue
+    board.setTaskStatus(built.id, column('stuck'))
+    activity.push('task', 'bullpen', `${id} was checking "${built.text.slice(0, 60)}" - nobody is now`)
+  }
+  const cards = board.forget(id)
+  if (cards) {
+    pushTasks()
+    pushTriggers()
+    pushRules()
+  }
+  const mail = hive.forget(id)
+  if (cards || mail) {
+    activity.push('task', 'bullpen', `${id}: ${cards} card(s) and ${mail} message(s) cleared`)
+  }
 }
 
 /** The same for schedules: firing one moves its clock, and the row says when. */
@@ -471,11 +649,15 @@ const relayRules = (): string => {
 const assignRules = (): string =>
   'Do not do the work yourself. Read $BULLPEN_FLOOR and pick an agent on ' +
   'that project whose status is running and whose activity is idle - a ' +
-  'stopped agent cannot be given anything. ' +
-  `Reuse one whose ctxPct is under ${wf.reuseBelowPct}; over ${wf.hireAbovePct} ` +
-  'treat them as not free even if idle, because what is left of their window ' +
-  'is not enough to work in and everything they still carry is charged again ' +
-  'every turn. Missing ctxPct means a fresh agent, not a full one. ' +
+  'stopped agent cannot be given anything, and neither can one mid-turn: ' +
+  'a second task handed to a working agent lands as an interruption, and the ' +
+  'task it is already on is what pays for it. Never wait for one to finish ' +
+  'either - hire instead. ' +
+  `Of those, take one whose ctxPct is under ${wf.reuseBelowPct}; at or over ` +
+  `that, treat them as not free even when idle, because what is left of ` +
+  'their window is not enough to work in and everything they still carry is ' +
+  'charged again every turn. Missing ctxPct means a fresh agent, not a full ' +
+  'one. ' +
   'Send them the task through $BULLPEN_MAILBOX/outbox, and say in it that ' +
   'they must mail you a report when they are done or blocked. ' +
   'If the project has nobody free by that rule, hire one: write a message to ' +
@@ -565,12 +747,179 @@ async function applyWebhook(): Promise<{ enabled: boolean; port: number; token: 
 const column = (kind: ColumnKind): string => columnFor(wf, kind)
 
 /** The card an agent is on: its newest that is neither done nor abandoned. */
-function openCard(agentId: string): { id: string; text: string; status: TaskStatus } | undefined {
+function openCard(agentId: string): Task | undefined {
   const finished = column('done')
   return board
     .tasks(agentId)
     .filter((t) => t.status !== finished)
     .at(-1)
+}
+
+/**
+ * How long an agent may sit idle holding live work before it is chased.
+ *
+ * From the environment so it can be turned down to something a test can wait
+ * for, and up by anybody whose floor does work in longer strides than this.
+ *
+ * Floored well above one sweep of the router, and that is not tidiness: a
+ * report is written to the outbox during the turn and moves the card only once
+ * the router has picked it up, which is up to 500ms after the Stop hook says
+ * the turn ended. Anything shorter chases every agent that did report, on the
+ * strength of having looked a fraction of a second too early.
+ */
+const STALL_MS = Math.max(Number(process.env.BULLPEN_STALL_MS) || 5 * 60_000, 2_000)
+
+/** Cards already chased once, by card id: a second silence is not a third ask. */
+const chased = new Set<string>()
+
+/**
+ * How long a turn may run before it is presumed hung rather than thorough.
+ *
+ * Long on purpose. A real turn can read a codebase, and writing off work that
+ * was merely slow is worse than a late report - so nothing here stops, kills or
+ * interrupts anything. It says so on the board, tells Michael, and stops one
+ * stuck turn from muting the floor.
+ *
+ * Never below twice the stall window: an agent chased for a report takes a turn
+ * to answer, and a ceiling under that would call that answer a hang.
+ */
+const HUNG_MS = Math.max(Number(process.env.BULLPEN_HUNG_MS) || 30 * 60_000, STALL_MS * 2)
+
+/** Turns already given up on, so the floor is told once rather than every tick. */
+const hung = new Set<string>()
+
+/**
+ * Posted cards already given back, by card id.
+ *
+ * Its own set rather than sharing `hung`, which holds agent ids. A uuid cannot
+ * collide with a slug so nothing was broken, but one set answering two
+ * questions is a set whose `delete` is right for one caller and silently wrong
+ * for the other - `hung` is cleared when an agent's turn ends, and a card has
+ * no turn to end.
+ */
+const dropped = new Set<string>()
+
+/**
+ * A turn that has run past `HUNG_MS`.
+ *
+ * Nothing is killed. The agent may still come back, and if it does its Stop
+ * hook clears it from both sets and the floor carries on - what this undoes is
+ * only the silence: a card that reads as live work when nobody is doing it, and
+ * a progress report that can never fire again while this id sits in `working`.
+ */
+function sweepHung(): void {
+  const now = Date.now()
+
+  for (const [id, since] of working) {
+    if (now - since < HUNG_MS || hung.has(id)) continue
+    if (!ptys.isRunning(id)) continue
+    hung.add(id)
+    const card = openCard(id)
+    const mins = Math.round((now - since) / 60_000)
+    if (card && card.status !== column('stuck')) cardTo(id, column('stuck'))
+    activity.push('dead', id, `${id} has been mid-turn for ${mins}m with no end to it`)
+    // Said to the human as well, because the one agent this cannot be reported
+    // through is the one who does the reporting: Michael hung is Michael not
+    // passing anything on, and the floor would have gone quiet with nobody
+    // anywhere saying why.
+    notify('stuck', `${id} has not finished`, `${mins} minutes mid-turn, still going`, {
+      tab: 'monitor',
+      id
+    })
+    if (ptys.isRunning(dispatchId()) && id !== dispatchId()) {
+      hive.send({
+        from: 'bullpen',
+        to: dispatchId(),
+        subject: `no end to a turn: ${id}`,
+        body:
+          `${id} started a turn ${mins} minutes ago and has not finished it. ` +
+          (card ? `It was given "${card.text}", and that card is on the board as stuck. ` : '') +
+          'Nothing has been killed - it may still come back. Ask it where it got to, ' +
+          'and put somebody else on the work if it cannot say.'
+      })
+    }
+    reportDue = true
+  }
+}
+
+/**
+ * An agent that finished its turn and told nobody.
+ *
+ * Everything on this floor moves because somebody sent a message. That is the
+ * whole design and it is also its one open end: an agent that simply does not
+ * write one is indistinguishable, from outside, from an agent still thinking.
+ * The card sits in the working column, the assigner waits for a report that is
+ * not coming, and the floor reads as busy forever - `reportWhenQuiet` only
+ * fires when work was handed over, and asks a model to go and find out, which
+ * is the same unreliable step one level up.
+ *
+ * So: the turn ended, the card did not move, and the app knows both. Wait long
+ * enough that a message still in the outbox has been routed - the router
+ * sweeps every 500ms and this is minutes - then ask once. If the next silence
+ * is the same card in the same column, stop asking and say so: the card goes
+ * to the floor's stuck column and Michael is told, because a board that goes
+ * on calling this live work is the board lying about the floor.
+ *
+ * Re-armed by the Stop hook rather than by itself. The chase is a prompt, that
+ * prompt is a turn, and the end of that turn comes back through here.
+ */
+function watchForStall(id: string): void {
+  const card = openCard(id)
+  if (!card) return
+  // Not work that is meant to be sitting. `waiting` is a build parked for a
+  // checker and `stuck` is somebody who already said so - both are cards whose
+  // silence is the point.
+  //
+  // Asked of the floor before the column is named, never `column(kind)` alone:
+  // that falls back to the first column for a kind the floor does not have, so
+  // on a board with no `waiting` the test read as "is this card in `asked`" -
+  // which is where every card starts, and nothing was ever watched.
+  const parked = (['waiting', 'stuck'] as const)
+    .filter((kind) => hasColumn(wf, kind))
+    .map((kind) => column(kind))
+  if (parked.includes(card.status)) return
+
+  setTimeout(() => {
+    const now = openCard(id)
+    // Moved, closed, or replaced by the next task: whatever happened, the
+    // agent is not silent about this one.
+    if (!now || now.id !== card.id || now.status !== card.status) return
+    // Working again, or gone. A dead pty already sends its card to `stuck` on
+    // the way out, and one mid-turn is not silent yet.
+    if (!ptys.isRunning(id) || working.has(id)) return
+
+    const what = card.text.slice(0, 80)
+    if (chased.has(card.id)) {
+      cardTo(id, column('stuck'))
+      activity.push('dead', id, `${id} went quiet holding "${what}" - the card is stuck`)
+      // Michael, because he is the one who reports to the human, and this is
+      // the report nobody else is going to make.
+      if (ptys.isRunning(dispatchId())) {
+        hive.send({
+          from: 'bullpen',
+          to: dispatchId(),
+          subject: `no report: ${what}`,
+          body:
+            `${id} was given this and has been idle since without telling anyone where it ` +
+            `stands. It was asked once and said nothing. The card is on the board as stuck. ` +
+            `Find out where it got to, or put somebody else on it.`
+        })
+      }
+      reportDue = true
+      return
+    }
+
+    chased.add(card.id)
+    activity.push('trigger', id, `chased ${id} for a report on "${what}"`)
+    submitPrompt(
+      id,
+      `[bullpen] Your turn ended and you are still holding this task: "${card.text}". ` +
+        'Nobody has been told where it stands. Report it now: one message to whoever handed ' +
+        'it to you, with the subject starting "done: " if it is finished and "fail: " if it ' +
+        'is not - those two words exactly. If you are waiting on somebody, say so and say who. ' +
+        'Silence is the one answer nobody can act on.'
+    )
+  }, STALL_MS).unref?.()
 }
 
 /**
@@ -580,18 +929,24 @@ function openCard(agentId: string): { id: string; text: string; status: TaskStat
  * click - so the board was a list only the operator ever wrote to, describing
  * work nobody was doing. A card per assignment makes it the floor's list.
  */
-function cardFor(agentId: string, text: string, by = agentId): void {
+function cardFor(
+  agentId: string,
+  text: string,
+  by = agentId,
+  meta: { role?: string; checks?: string } = {}
+): string | null {
   const clean = text.replace(/\s+/g, ' ').trim().slice(0, 300)
-  if (!clean) return
+  if (!clean) return null
   // Not a second card for the same instruction: Michael re-sends a task when he
   // chases it, and a chase is not a new job.
   const open = openCard(agentId)
-  if (open && open.text === clean) return
-  board.addTask(agentId, clean, column('start'))
+  if (open && open.text === clean) return open.id
+  const made = board.addTask(agentId, clean, column('start'), { by, ...meta })
   // Logged against whoever handed it over, not whoever received it: this line
   // is what the assigner's own page is made of.
   activity.push('task', by, `${by === agentId ? agentId : `${by} → ${agentId}`}: ${clean.slice(0, 80)}`)
   pushTasks()
+  return made?.id ?? null
 }
 
 /**
@@ -602,10 +957,28 @@ function cardFor(agentId: string, text: string, by = agentId): void {
  * the tester's card in blocked and leaves the work where it is, because the
  * developer is being mailed about it directly and is not finished.
  */
-function testerReported(testerId: string, subject: string): void {
+function testerReported(testerId: string, subject: string, taskId?: string): void {
   const failed = /^\s*(fail|bug|broken)\b/i.test(subject)
-  cardTo(testerId, failed ? column('stuck') : column('done'))
+  // The checker's own card, by name where the message said which.
+  const own = cardOf(testerId, taskId)
+  cardTo(testerId, failed ? column('stuck') : column('done'), taskId)
   if (failed) return
+
+  /**
+   * The build this check was of, where the board knows.
+   *
+   * `checks` is written when the check is handed over, and it is the whole
+   * answer: one build closes, and two features under test at once stop being
+   * able to close each other. Only the sweep below is left for cards opened
+   * before the link existed, or handed over without one.
+   */
+  const built = own?.checks ? board.task(own.checks) : undefined
+  if (built) {
+    board.setTaskStatus(built.id, column('done'))
+    pushTasks()
+    return
+  }
+
   const project = projectOf(testerId)
   const waiting = column('waiting')
   for (const t of board.tasks()) {
@@ -628,17 +1001,107 @@ function testerReported(testerId: string, subject: string): void {
  * "done: ..." when it is finished, "fail: ..." when it is not - so that is what
  * this reads. Any rule the operator writes runs first and this never sees it.
  */
-function said(from: string, subject: string): void {
-  if (/^\s*(done|pass|finished|shipped|ok)\b/i.test(subject)) cardTo(from, column('done'))
-  else if (/^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(subject)) cardTo(from, column('stuck'))
+function said(from: string, subject: string, taskId?: string): void {
+  if (/^\s*(done|pass|finished|shipped|ok)\b/i.test(subject)) cardTo(from, column('done'), taskId)
+  else if (/^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(subject)) {
+    cardTo(from, column('stuck'), taskId)
+  }
 }
 
 /** Move an agent's open card, if it has one. */
-function cardTo(agentId: string, status: TaskStatus): void {
-  const open = openCard(agentId)
+/**
+ * The card a message is about, for one agent.
+ *
+ * `taskId` is what the message quoted, and it is honoured only when that card
+ * belongs to this agent. Two reasons, both of them real failures: a rule may
+ * move the *receiver's* card - "checks → builds: doing (their card)" is a bug
+ * going back - and the id on that message is the sender's. And a message
+ * handed to a role is stamped with the card just opened for whoever took it,
+ * so a tester reporting a pass carried the analyst's card id, not its own.
+ *
+ * Falling back to the newest open card is what everything did before any of
+ * this, and is still right for a message that quoted nothing.
+ */
+const cardOf = (agentId: string, taskId?: string): Task | undefined => {
+  const named = taskId ? board.task(taskId) : undefined
+  return named && named.agentId === agentId ? named : openCard(agentId)
+}
+
+/**
+ * Move a card, by name where the message said which one.
+ *
+ * `taskId` is what the message quoted back. Only honoured when that card is
+ * this agent's: a rule may move the *receiver's* card - "checks → builds: doing
+ * (their card)" is a bug going back - and the id on that message belongs to the
+ * sender. Falling back to the newest open card is what this always did, and is
+ * still right for a message that quoted nothing.
+ */
+function cardTo(agentId: string, status: TaskStatus, taskId?: string): void {
+  const open = cardOf(agentId, taskId)
   if (!open || open.status === status) return
   board.setTaskStatus(open.id, status)
   pushTasks()
+}
+
+/**
+ * Cards the operator has released to the agent they were typed for.
+ *
+ * A card added by hand told the agent nothing, and telling it about every card
+ * as it was typed would spend a turn on a list still being written. So adding
+ * a card and starting the work are two acts: this is what the second one
+ * wrote, and `pump` is what reads it.
+ *
+ * In memory on purpose. Opening the app again is not a decision to spend
+ * tokens, and a queue that resumed itself on launch would be one.
+ */
+const released = new Set<string>()
+
+/** How many times one card may be handed over before it is called stuck. */
+const HANDOVERS = 3
+const handovers = new Map<string, number>()
+
+/**
+ * Hand an agent the next card it has been released to work on.
+ *
+ * Called when a turn ends as well as when the operator confirms one, so a
+ * queue is worked to the end rather than one card per press. An agent whose
+ * card is still live is left alone: a second task typed into a terminal
+ * mid-turn is one of the two being forgotten.
+ */
+function pump(id: string): void {
+  if (!ptys.isRunning(id) || working.has(id) || waiting.has(id)) return
+  // Asked of the floor before the column is named: `column(kind)` alone falls
+  // back to the first column for a kind this floor does not have, which is
+  // where every card starts - and every queued card would read as live work.
+  const live = (['working', 'waiting'] as const)
+    .filter((kind) => hasColumn(wf, kind))
+    .map((kind) => column(kind))
+  const mine = board.tasks(id)
+  if (mine.some((t) => live.includes(t.status))) return
+  const next = mine.find((t) => released.has(t.id) && t.status === column('start'))
+  if (!next) return
+
+  const what = next.text.slice(0, 80)
+  // A card that keeps coming back is a card this agent cannot do, and a queue
+  // that re-sends it forever is a bill with nothing at the end of it.
+  const tries = (handovers.get(next.id) ?? 0) + 1
+  if (tries > HANDOVERS) {
+    released.delete(next.id)
+    board.setTaskStatus(next.id, column('stuck'))
+    pushTasks()
+    activity.push('dead', id, `${id} was given "${what}" ${HANDOVERS} times and it is still open - the card is stuck`)
+    return
+  }
+  handovers.set(next.id, tries)
+  board.setTaskStatus(next.id, column('working'))
+  pushTasks()
+  submitPrompt(
+    id,
+    `[bullpen] From your board: ${next.text}. Work it now. When it is finished, mail a report ` +
+      'with the subject starting "done: " - "fail: " if it is not - to whoever is waiting on it. ' +
+      'That report is what closes the card.'
+  )
+  activity.push('task', id, `started "${what}" from the board`)
 }
 
 
@@ -651,7 +1114,7 @@ function cardTo(agentId: string, status: TaskStatus): void {
  * turn, and re-arming on its own idle would loop forever.
  */
 function reportWhenQuiet(): void {
-  if (!reportDue || working.size > 0) return
+  if (!reportDue || busy().length > 0) return
   // The analyst is who knows where a task stands: she assigned it, and she is
   // the one waiting on a tester. Michael only ever reported what he was told.
   const target = assignerId()
@@ -1023,6 +1486,7 @@ function wire(): void {
     // again, and floor.json went on calling a dead agent busy. Halting one busy
     // agent used to cost every progress report after it.
     working.delete(id)
+    hung.delete(id)
     // Same reason: `waiting` is cleared by the Stop hook a killed pty never
     // sends, and it is what stops the same question being announced twice - a
     // stale entry would swallow the first question of whatever runs under that
@@ -1068,10 +1532,20 @@ function wire(): void {
     // One place decides what a message does to the board, and it is testable:
     // see cards.ts for why every branch in it exists.
     const move = routeCard(wf, { ...msg, to }, roleOf, wf.human)
-    if (move?.kind === 'open') cardFor(move.agent, move.text, move.by)
-    else if (move?.kind === 'move') cardTo(move.agent, move.status)
-    else if (move?.kind === 'checked') testerReported(move.agent, move.subject)
-    else said(msg.from, msg.subject)
+    if (move?.kind === 'open') {
+      cardFor(move.agent, move.text, move.by, { role: roleOf(move.agent) })
+      // And the one who handed it over is now waiting on it. Nothing else ever
+      // wrote the working column on a floor with nobody to check work - a card
+      // opened in `todo` and jumped to `done`, and the column in between was a
+      // stage the board could not reach. Only where the floor has one:
+      // `columnFor` falls back to the first column, which would send the card
+      // it was about to advance back to the start. No-ops for the human, who
+      // has no card, and for anybody who has not been given one.
+      if (hasColumn(wf, 'working')) cardTo(msg.from, column('working'), msg.task)
+    }
+    else if (move?.kind === 'move') cardTo(move.agent, move.status, msg.task)
+    else if (move?.kind === 'checked') testerReported(move.agent, move.subject, msg.task)
+    else said(msg.from, msg.subject, msg.task)
 
     send('hive:deliver', { to, msg })
   })
@@ -1085,23 +1559,18 @@ function wire(): void {
    * to see it first, and the floor stops meaning anything.
    */
   /**
-   * A message addressed to a role, put in front of somebody.
+   * Somebody able to take work in this role, hiring when nobody is free.
    *
-   * The floor says who work goes to; who is actually free to take it is a fact
-   * about right now, and every brief that asked an agent to work it out - read
-   * the floor file, check who is idle, check how full they are, hire if nobody
-   * fits - was asking a model to do bookkeeping it does badly and silently. So
-   * the app does it: reuse whoever is free under the threshold, hire when
-   * nobody is, and open the card either way.
+   * The pick-or-hire half of `assignTo`, on its own because it has a second
+   * caller now: a card posted for a role has to reach somebody too, and it does
+   * not open a card - the card already exists, unheld, waiting to be claimed.
+   * Written twice it would have been two answers to "who staffs this floor",
+   * and the hire is the expensive half to get wrong.
+   *
+   * No card, no message, no side effect on the board. Just a name, or null.
    */
-  const assignTo = (role: string, from: string, msg: Message): string | null => {
-    if (!wf.roles[role] || role === roleOf(from)) return null
-    // Asked before anybody is chosen or hired: the chain refuses this message
-    // a moment later anyway, and hiring somebody for work that will not be
-    // delivered leaves an agent standing on the floor with nothing to do.
-    if (from !== 'bullpen' && from !== wf.human && from !== 'webhook') {
-      if (refuseMail(wf, roleOf(from), role)) return null
-    }
+  const staffFor = (role: string, from: string, brief = ''): string | null => {
+    if (!wf.roles[role]) return null
     const staff: Candidate[] = ptys
       .list()
       .filter((a) => a.status === 'running' && a.id !== from)
@@ -1112,23 +1581,34 @@ function wire(): void {
         ctxPct: currentCtx(a.id)?.pct
       }))
 
-    // What the work is, for the board. Written here rather than left to a card
-    // rule: a floor with no rules still has work being handed over, and a board
-    // that shows none of it is the app lying about what the floor is doing.
-    const what = [msg.subject, msg.body].filter(Boolean).join(' — ')
-
     const free = pickForRole(wf, role, staff)
-    if (free) {
-      cardFor(free, what, from)
-      return free
-    }
+    if (free) return free
     if (wf.roles[role].hireable !== true) return null
 
-    // Nobody free, so somebody new. The project is whoever asked for the work -
-    // a hire onto a project nobody is on has no directory to work in.
+    /**
+     * Nobody free, so somebody new - and hiring is Michael's, wherever the ask
+     * came from.
+     *
+     * The chain already worked: an analyst asking for a developer falls through
+     * to the analyst's own workspace, so the hire happened. What it did not do
+     * was say whose hire it was. Every step of a floor three deep read as that
+     * step staffing the floor itself, which is four people each appearing to do
+     * the one job that belongs to one desk.
+     *
+     * Michael is that desk, and his workspace is the one directory on the floor
+     * that is always there. So it is the last resort rather than giving up: the
+     * only way to reach the old `null` was an asker whose pty had exited
+     * between writing the message and the router picking it up, and losing a
+     * hire to that is losing it to a race.
+     *
+     * Michael has no project to borrow either - the roster publishes an empty
+     * one for anybody core, and he is never in `hires` - so there is nothing to
+     * fall back to between the asker and the floor's own name.
+     */
     const project = projectOf(from) || slug(wf.name)
-    const cwd = projectCwd(project) ?? ptys.list().find((a) => a.id === from)?.cwd
-    if (!cwd) return null
+    const cwd =
+      projectCwd(project) ?? ptys.list().find((a) => a.id === from)?.cwd ?? currentGodCwd()
+    mkdirSync(cwd, { recursive: true })
     const name = nextHireName(project)
     try {
       const state = spawnAgent({
@@ -1139,18 +1619,173 @@ function wire(): void {
         cols: 100,
         rows: 30,
         role,
+        // Whoever asked is still who the work reports to. Being hired by
+        // Michael and answering to Michael are not the same thing.
         reportTo: from
       })
       hires.set(state.id, { name, project })
+      forgetAgent(state.id)
       reportDue = true
-      activity.push('spawn', from, `${from} needed a ${role} and none was free - hired ${name}`)
-      send('agent:hired', { ...state, name, project, role, brief: what })
-      cardFor(state.id, what, from)
+      // Logged against Michael, because he is who hired: the line used to read
+      // as the asker doing it, and on a floor three deep that is four different
+      // people each appearing to staff the floor themselves.
+      activity.push(
+        'spawn',
+        dispatchId(),
+        `${from} needed a ${role} and none was free - ${dispatchId()} hired ${name}`
+      )
+      // `brief` with it: the roster shows a new hire with what it was hired to
+      // do, and dropping it left an agent appearing on the floor with no sign
+      // of why. The explicit hire path has always sent it.
+      send('agent:hired', { ...state, name, project, role, ...(brief ? { brief } : {}) })
       return state.id
     } catch (err) {
       console.error(`[bullpen] could not hire a ${role}:`, err)
       return null
     }
+  }
+
+  /**
+   * Cards nobody has taken, past the point where somebody should have.
+   *
+   * `offer` tells one agent a posted card is there and leaves it unheld on
+   * purpose, so a busy one can pass. Nothing then looked at it again: an offer
+   * declined - or made to an agent that never read it - left the card on the
+   * list with no holder, no chase, and nothing that would ever mention it. The
+   * silent-agent watchdog cannot see it, because it watches agents and this
+   * card has none.
+   *
+   * Offered once more, then handed back to whoever posted it. `chased` is the
+   * same set the silent-agent path uses and is keyed by card id, so a card gets
+   * one second chance here exactly as an agent gets one there.
+   *
+   * Beside `offer` rather than inside `sweepHung`, which is where it started:
+   * that one is module-level and this needs the pick-or-hire path, which is not.
+   */
+  function sweepUnclaimed(): void {
+    const now = Date.now()
+    for (const card of board.tasks('')) {
+      if (now - card.createdAt < STALL_MS || card.status === column('stuck')) continue
+      if (!chased.has(card.id)) {
+        chased.add(card.id)
+        if (offer(card)) continue
+      }
+      if (dropped.has(card.id)) continue
+      dropped.add(card.id)
+      board.setTaskStatus(card.id, column('stuck'))
+      pushTasks()
+      activity.push('dead', card.by ?? 'bullpen', `nobody took "${card.text.slice(0, 60)}"`)
+      const tell = card.by && ptys.isRunning(card.by) ? card.by : dispatchId()
+      if (ptys.isRunning(tell)) {
+        hive.send({
+          from: 'bullpen',
+          to: tell,
+          subject: `nobody took: ${card.text.slice(0, 60)}`,
+          task: card.id,
+          body:
+            `This was posted for "${card.role ?? 'nobody in particular'}" and has been offered ` +
+            'twice with nobody claiming it. It is on the board as stuck. Hand it to somebody by ' +
+            'name, or take it off the list.'
+        })
+      }
+      reportDue = true
+    }
+  }
+
+  /**
+   * A message addressed to a role, put in front of somebody.
+   *
+   * The floor says who work goes to; who is actually free to take it is a fact
+   * about right now, and every brief that asked an agent to work it out - read
+   * the floor file, check who is idle, check how full they are, hire if nobody
+   * fits - was asking a model to do bookkeeping it does badly and silently. So
+   * the app does it: reuse whoever is free under the threshold, hire when
+   * nobody is, and open the card either way.
+   */
+  const assignTo = (role: string, from: string, msg: Message): string | null => {
+    // Not `role === roleOf(from)`. That was here to stop an agent handing work
+    // to itself, which the candidate list already does by dropping `from` - and
+    // what it actually blocked was two different agents in the same role. A
+    // floor that draws a line from a role back to itself means "hand it to
+    // another one of me", and it was read as meaning nothing: refused before
+    // `refuseMail` was ever asked, so the drawing had no say. A floor that
+    // draws no such line still refuses, one line further down.
+    if (!wf.roles[role]) return null
+    // Asked before anybody is chosen or hired: the chain refuses this message
+    // a moment later anyway, and hiring somebody for work that will not be
+    // delivered leaves an agent standing on the floor with nothing to do.
+    if (from !== 'bullpen' && from !== wf.human && from !== 'webhook') {
+      if (refuseMail(wf, roleOf(from), role)) return null
+    }
+
+    // What the work is, for the board and for the roster.
+    const what = [msg.subject, msg.body].filter(Boolean).join(' — ')
+    const who = staffFor(role, from, what)
+    if (!who) return null
+
+    // Written here rather than left to a card rule. Written here rather than left to a card
+    // A floor with no rules still has work being handed over, and a board that
+    // shows none of it is the app lying about what the floor is doing.
+
+    /**
+     * A check is somebody else's build, being looked at.
+     *
+     * This is the one moment both cards are in hand: the sender quoted the card
+     * they are handing over, and a card is about to be opened for the role that
+     * decides whether it passed. Recorded so a pass closes that build and
+     * nothing else - the alternative, and what this replaces, was "every card
+     * waiting on this project", which closed every feature under test the
+     * moment any one of them passed.
+     */
+    const build = msg.task ? board.task(msg.task) : undefined
+    const checks =
+      can(wf, role, 'checks') && build && build.agentId && build.agentId !== who
+        ? build.id
+        : undefined
+
+    const opened = cardFor(who, what, from, { role, checks })
+    // Never over the top of one the sender already quoted. `task` means "the
+    // card this message is about", and on a report that is the sender's own -
+    // stamping the card just opened for the reader clobbered it, so a report
+    // that named which of two jobs it had finished arrived naming neither.
+    // `cardTo` ignores an id that is not the agent's anyway, so the sender's is
+    // the one worth keeping.
+    if (!msg.task) msg.task = opened ?? undefined
+    return who
+  }
+
+  /**
+   * Put a posted card in front of somebody who could take it.
+   *
+   * A card on the list wakes nobody. An agent acts when something is typed at
+   * it and at no other time, so `post` without this was a card written to a
+   * file that every agent could read and none had any reason to open - the one
+   * failure mode a shared list invites, and the reason the list is a payload
+   * here rather than a transport.
+   *
+   * Offered, not assigned: the card stays unheld until somebody claims it, so
+   * an agent that is busy or unwilling leaves it for the next one. Returns who
+   * was told, or null when the floor has nobody for that role.
+   */
+  function offer(card: Task): string | null {
+    const role = card.role ?? ''
+    if (!wf.roles[role]) return null
+    const who = staffFor(role, card.by ?? dispatchId(), card.text)
+    if (!who) return null
+    hive.send({
+      from: 'bullpen',
+      to: who,
+      subject: `up for grabs: ${card.text.slice(0, 60)}`,
+      task: card.id,
+      body:
+        `${card.by ?? 'somebody'} put this on the board for "${role}" and nobody has taken it.\n\n` +
+        `${card.text}\n\n` +
+        `Take it by writing {"from": "${who}", "to": "board", "subject": "claim", "task": "${card.id}"} ` +
+        'to your outbox, then work it and report the way you report anything. ' +
+        'Leave it if you are already on something - it stays on the list for somebody else.'
+    })
+    activity.push('task', dispatchId(), `offered "${card.text.slice(0, 60)}" to ${who}`)
+    return who
   }
 
   hive.staff = (to: string, from: string, msg: Message): string | null => assignTo(to, from, msg)
@@ -1184,33 +1819,175 @@ function wire(): void {
     }
   })
 
-  hive.on('dead', (msg) => {
+  /**
+   * Undeliverable, and said so - the same reason `blocked` answers.
+   *
+   * `blocked` is a message the floor refused; this is one it accepted and then
+   * could not place, which from the sender's side is worse: they were allowed
+   * to write it. A message to a role nobody holds and nobody could be hired
+   * into used to end here, logged and pushed at the UI and never mentioned to
+   * the agent waiting on the reply.
+   *
+   * Three different silences, so three different sentences. `?` is a file that
+   * did not parse - the message hive built already says so. `*` is a broadcast
+   * that reached nobody, which is a floor of one rather than a bad address.
+   * Anything else is a name, and `refuseMail` is what says where it should
+   * have gone instead - for a role that exists and could not be staffed it
+   * says nothing, and that is the case worth spelling out.
+   */
+  hive.on('dead', (msg: Message) => {
     activity.push('dead', msg.from, `undeliverable to ${msg.to}: ${msg.subject}`)
     send('hive:dead', msg)
+    if (!ptys.isRunning(msg.from)) return
+    const why =
+      msg.to === '?'
+        ? msg.body
+        : msg.to === '*'
+          ? 'Nobody else is on the floor, so the broadcast reached no one.'
+          : (refuseMail(wf, roleOf(msg.from), msg.to) ??
+            (!wf.roles[msg.to]
+              ? `There is nobody called "${msg.to}" on this floor.`
+              : // Named before the staffing answer, because "nobody could be
+                // hired into it" reads as a floor that ran out of room when
+                // what happened is that the sender addressed their own job.
+                msg.to === roleOf(msg.from)
+                ? `"${msg.to}" is your own role, so there is nobody else in it to hand this to. Do it yourself, or send it to whoever handed it to you.`
+                : `Nobody holds "${msg.to}" and nobody could be hired into it. Say so to whoever handed you this, or take it on yourself if you can.`))
+    hive.send({
+      from: 'bullpen',
+      to: msg.from,
+      subject: `not delivered: ${msg.subject}`,
+      body: `${why}\n\nNothing was delivered. Your message is unchanged in the dead letters if you need it back.`
+    })
   })
   hive.on('question', (msg: Message) => {
     // Stamped here: an agent writes the json itself and rarely sets `ts`, so
     // without this every question reads as "— ago" wherever it is shown.
     const ts = msg.ts || Date.now()
-    if (msg.from === godId && (reportWanted || /^\s*re(port)?\b/i.test(msg.subject))) {
+    if (msg.from === godId && (reportWanted || REPORTING.test(msg.subject))) {
       reportWanted = false
-      lastReport = { ...msg, ts }
+      const report = { ...msg, ts }
+      reports.unshift(report)
+      reports.length = Math.min(reports.length, REPORTS_KEPT)
       activity.push('message', msg.from, `${msg.from} reported: ${msg.subject}`)
       notify('report', `${msg.from} reported`, msg.body, { tab: 'monitor', id: msg.from })
-      send('report:new', lastReport)
+      send('report:new', report)
       return
     }
-    const q = { ...msg, id: `q${++questionSeq}`, ts }
-    questions.set(q.id, q)
+    const q: Ask = { id: `q${++questionSeq}`, from: msg.from, subject: msg.subject, body: msg.body, ts }
+    asks.add(q)
     activity.push('question', msg.from, `${msg.from} asks you: ${msg.subject}`)
     notify('ask', `${msg.from} asks you`, msg.subject, { tab: 'ask me', id: msg.from })
-    send('ask:pending', [...questions.values()])
+    send('ask:pending', asks.pending())
   })
 
   // A router tick that throws would otherwise be an EventEmitter 'error' with
   // no listener, which takes the whole main process down over one bad message.
   hive.on('error', (err: unknown) => {
     activity.push('dead', 'bullpen', `mail router error: ${err instanceof Error ? err.message : String(err)}`)
+  })
+
+  /**
+   * A change to the task list, asked for rather than made.
+   *
+   * `$BULLPEN_TASKS` is a file and every agent can read it. None of them may
+   * write it: two reading the same list at the same moment both see a card
+   * free, and only one may come away holding it. So the list is read directly
+   * and changed by message, and main is the only writer there is.
+   *
+   * Four verbs, and no more. Anything richer belongs in the mail an agent
+   * already sends - a card says where work stands, not what was decided about
+   * it, and a board that carried the conversation would be a second inbox
+   * nobody is prompted to read.
+   */
+  hive.on('board', (msg: Message) => {
+    const verb = msg.subject.trim().toLowerCase().split(/\s+/)[0] ?? ''
+    const reply = (body: string): void => {
+      hive.send({ from: 'bullpen', to: msg.from, subject: `re: board ${verb}`, body })
+    }
+    const card = msg.task ? board.task(msg.task) : undefined
+    const mine = (): boolean => {
+      if (!card) {
+        reply(msg.task ? `There is no card ${msg.task}.` : 'Name the card in "task".')
+        return false
+      }
+      if (card.agentId !== msg.from) {
+        reply(`Card ${card.id} is ${card.agentId || 'nobody'}'s, not yours. Claim it first.`)
+        return false
+      }
+      return true
+    }
+
+    if (verb === 'post') {
+      // Work put on the list for a role rather than for a person. `assignTo` is
+      // still what finds somebody, so this is the same hand-off the mail makes -
+      // the difference is that the card exists first, and is what the message
+      // points at rather than what it is reconstructed from.
+      const role = (msg.role ?? '').trim()
+      if (!wf.roles[role]) return reply(`"${role}" is not a role on this floor.`)
+      // The floor still says who may hand work to whom. Posting is a hand-off
+      // with the taker left open, not a way around the lines on the chart.
+      const refused = refuseMail(wf, roleOf(msg.from), role)
+      if (refused) return reply(refused)
+      const made = board.addTask('', msg.body.trim() || msg.subject, column('start'), {
+        by: msg.from,
+        role
+      })
+      if (!made) return reply('A card needs something written on it.')
+      pushTasks()
+      activity.push('task', msg.from, `${msg.from} posted for ${role}: ${made.text.slice(0, 80)}`)
+      // And put in front of somebody. A card nobody is told about is a card
+      // nobody opens: an agent acts when something is typed at it and at no
+      // other time, so the list is where work lives, not how it travels.
+      const told = offer(made)
+      reply(
+        told
+          ? `Posted as ${made.id}, and ${told} has been told it is there.`
+          : `Posted as ${made.id}, but nobody holds "${role}" and nobody could be hired into it - ` +
+            'it will sit on the list until somebody can.'
+      )
+      return
+    }
+
+    if (verb === 'claim') {
+      if (!card) return reply(msg.task ? `There is no card ${msg.task}.` : 'Name the card in "task".')
+      if (card.role && card.role !== roleOf(msg.from)) {
+        return reply(`Card ${card.id} is work for "${card.role}", which is not what you are here.`)
+      }
+      if (!board.claim(card.id, msg.from)) {
+        return reply(`Card ${card.id} is already ${board.task(card.id)?.agentId}'s.`)
+      }
+      pushTasks()
+      activity.push('task', msg.from, `${msg.from} took "${card.text.slice(0, 80)}"`)
+      reply(`Yours: ${card.id}. Report on it the way you report on anything else.`)
+      return
+    }
+
+    if (verb === 'done' || verb === 'blocked') {
+      if (!mine()) return
+      const where = column(verb === 'done' ? 'done' : 'stuck')
+      cardTo(msg.from, where, card!.id)
+      activity.push('task', msg.from, `${msg.from} says ${verb}: ${card!.text.slice(0, 80)}`)
+      // Said on the board is not said to the person waiting. Whoever handed it
+      // over is told, because a card moving is not a report - and the card knows
+      // who that was, which is why `by` is on it.
+      // Only to somebody who can actually be written to. `by` is whoever opened
+      // the card, and that is not always an agent: the webhook opens cards, and
+      // so does the operator through the panel - mail to either is dead mail
+      // and a "not delivered" bounce at the agent that did nothing wrong.
+      if (card!.by && card!.by !== msg.from && ptys.isRunning(card!.by)) {
+        hive.send({
+          from: msg.from,
+          to: card!.by,
+          subject: `${verb === 'done' ? 'done' : 'fail'}: ${card!.text.slice(0, 60)}`,
+          body: msg.body || `Marked ${verb} on the board.`,
+          task: card!.id
+        })
+      }
+      return
+    }
+
+    reply('The board takes "post", "claim", "done" and "blocked", and nothing else.')
   })
 
   hive.on('hire', (msg: Message) => {
@@ -1237,14 +2014,26 @@ function wire(): void {
    */
   function hire(msg: Message): void {
     const project = msg.subject.trim()
-    // The workflow says which roles may be hired into. Anything else - a typo,
-    // or a role this floor does not have - falls back to whoever builds, rather
-    // than quietly producing a kind of agent nobody briefed.
+    // The workflow says which roles may be hired into. A hire that names one
+    // gets it; a hire that names nothing gets the next role down the chain from
+    // whoever asked - the one they may write to, and the one they are waiting
+    // on.
+    //
+    // It used to fall straight to whoever builds. On a floor of
+    // boss → analyst → developer → tester that turned "the floor is empty, hire
+    // somebody to take this request" into a developer: three desks past the one
+    // the boss can hand work to, briefed to report to a role with nobody in it.
+    // The work stopped there, and the floor had no analyst on it at all.
     const asked = msg.role?.trim().toLowerCase() ?? ''
+    const downstream = (wf.talksTo[roleOf(msg.from)] ?? []).filter(
+      (r) => wf.roles[r]?.hireable === true
+    )
     const role =
       wf.roles[asked]?.hireable === true
         ? asked
-        : rolesWith(wf, 'builds').find((r) => wf.roles[r].hireable) ?? wf.dispatch
+        : (downstream[0] ??
+          rolesWith(wf, 'builds').find((r) => wf.roles[r].hireable) ??
+          wf.dispatch)
     // An existing project is known by the agents already on it. A new one has
     // to name its directory - otherwise hiring could never start a project at
     // all, only add to one, and the first agent on every project would have to
@@ -1278,6 +2067,7 @@ function wire(): void {
         reportTo: msg.from
       })
       hires.set(state.id, { name, project })
+      forgetAgent(state.id)
       // A hire is work starting, even when nobody dispatched it from the UI.
       reportDue = true
       activity.push(
@@ -1385,7 +2175,8 @@ function wire(): void {
   approvals.on('status', (id: string, status: string) => {
     send('agent:status', id, status)
     if (status === 'working') {
-      working.add(id)
+      working.set(id, Date.now())
+      hung.delete(id)
       // Taking a turn is not taking the card back. A developer whose work is
       // waiting on a tester gets woken by all sorts of things - a broadcast, a
       // question, the tester's own reply - and every one of them used to drag
@@ -1402,8 +2193,16 @@ function wire(): void {
       // for turns nobody was waiting on, and "finished" should mean finished
       // something. The report is what it last said - the closest thing to one
       // that exists without asking the model to write it.
-      if (working.delete(id)) reportFinished(id)
+      hung.delete(id)
+      if (working.delete(id)) {
+        reportFinished(id)
+        // Finished a turn - so if it still holds live work, nobody has been
+        // told where that work stands.
+        watchForStall(id)
+      }
       reportWhenQuiet()
+      // Free again: whatever else the operator released is next.
+      pump(id)
     }
   })
   // An agent stopped at its own question. Bullpen cannot answer it - the CLI is
@@ -1484,6 +2283,28 @@ function wire(): void {
   })
 
   ipcMain.handle('agent:spawn', (_e, spec: AgentSpec) => spawnAgent(spec))
+
+  /**
+   * Bring an agent back up under the same id, somewhere else or on another model.
+   *
+   * A CLI reads its working directory and its `--model` once, at startup, so
+   * both are a restart and there is no way to make them anything else - the
+   * same reason `god:move` restarts Michael. Done here rather than as kill and
+   * spawn from the renderer because `spawnAgent` refuses an id that is still
+   * running: the renderer would have had to watch for the exit event and race
+   * it, and losing that race is a dead row on the roster with no way back.
+   */
+  ipcMain.handle('agent:restart', async (_e, spec: AgentSpec) => {
+    await stop(spec.id)
+    // Whatever it was refused before, restated from the floor in force. It is
+    // the same agent in the same role; only where it works and what it runs on
+    // have moved.
+    try {
+      return spawnAgent(spec)
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
 
   /**
    * Michael is the floor's starting state, not a hire: the renderer asks for him
@@ -1686,6 +2507,172 @@ function wire(): void {
    */
   ipcMain.handle('workflow:list', () => LIST())
 
+  /**
+   * The same floors on the other machine.
+   *
+   * Three presses, not a background daemon: a sync that runs on its own is a
+   * sync that overwrites work while somebody is in the middle of it, and last
+   * write wins has no opinion about who was typing. Say when.
+   */
+  /** The code somebody is typing into github.com right now. */
+  let pending: DeviceCode | null = null
+
+  ipcMain.handle('sync:status', () => {
+    const cfg = readConfig(BULLPEN_HOME)
+    return {
+      gist: cfg.sync?.gist ?? '',
+      machine: cfg.sync?.machine ?? hostname(),
+      hasToken: Boolean(readToken(BULLPEN_HOME)),
+      user: cfg.sync?.user ?? '',
+      keyring: keyringWorks(),
+      canSignIn: Boolean(CLIENT_ID),
+      floors: Object.keys(readFloors(BULLPEN_HOME)).length
+    }
+  })
+
+  /**
+   * Sign in to GitHub without a server.
+   *
+   * Two presses in one flow: this hands back the code to show, and `sync:wait`
+   * blocks until the person has typed it in. Split because the code has to be
+   * on screen *while* the polling happens - one call that did both would show
+   * the code only after it had already been used.
+   */
+  ipcMain.handle('sync:signIn', async () => {
+    // Said here rather than left to `deviceCode`: the button is always on
+    // screen, so this is the first press on a build that shipped without a
+    // client id, and it should read as "not in this build" rather than as a
+    // failure the person pressing it could have avoided.
+    if (!CLIENT_ID) return { error: 'Signing in is not set up in this build.' }
+    const got = await deviceCode(CLIENT_ID)
+    if (got.error || !got.code) return { error: got.error ?? 'GitHub did not send a code.' }
+    pending = got.code
+    // Opened here rather than in the renderer: the page is on github.com and
+    // the window has no business navigating anywhere.
+    shell.openExternal(got.code.url)
+    return { userCode: got.code.userCode, url: got.code.url, expires: got.code.expires }
+  })
+
+  ipcMain.handle('sync:wait', async () => {
+    if (!pending) return { error: 'Nothing to wait for. Start again.' }
+    const code = pending
+    const res = await awaitToken(CLIENT_ID, code)
+    pending = null
+    if (res.error || !res.token) return { error: res.error ?? 'GitHub would not say why.' }
+    writeToken(BULLPEN_HOME, res.token)
+    await remember(res.token)
+    return { ok: true }
+  })
+
+  /** Ask GitHub who the token belongs to, and keep the answer. */
+  const remember = async (token: string): Promise<string> => {
+    const who = await whoAmI(token)
+    if (!who.login) return ''
+    const cfg = readConfig(BULLPEN_HOME)
+    writeConfig(BULLPEN_HOME, { ...cfg, sync: { ...cfg.sync, user: who.login } })
+    return who.login
+  }
+
+  /**
+   * Who is signed in, asked rather than remembered.
+   *
+   * The dialog draws the remembered name first and calls this after, because a
+   * token can outlive the answer: revoked on github.com, or signed in before
+   * this was ever recorded. An error here is not fatal - it means the name on
+   * screen is the last one that was true.
+   */
+  ipcMain.handle('sync:whoami', async () => {
+    const token = readToken(BULLPEN_HOME)
+    if (!token) return { error: 'Not signed in.' }
+    const who = await whoAmI(token)
+    if (who.error || !who.login) return { error: who.error ?? 'GitHub sent no login.' }
+    await remember(token)
+    return { login: who.login }
+  })
+
+  ipcMain.handle(
+    'sync:set',
+    (_e, next: { token?: string; machine?: string }) => {
+      if (next.token !== undefined) {
+        writeToken(BULLPEN_HOME, next.token.trim())
+        // The name belongs to the token. Left behind, the dialog says somebody
+        // is signed in as an account this machine can no longer reach.
+        if (!next.token.trim()) {
+          const cfg = readConfig(BULLPEN_HOME)
+          writeConfig(BULLPEN_HOME, { ...cfg, sync: { ...cfg.sync, user: '', gist: '' } })
+        }
+      }
+      const fields = ['machine'] as const
+      if (fields.some((f) => next[f] !== undefined)) {
+        const cfg = readConfig(BULLPEN_HOME)
+        writeConfig(BULLPEN_HOME, {
+          ...cfg,
+          sync: {
+            ...cfg.sync,
+            ...Object.fromEntries(
+              fields.filter((f) => next[f] !== undefined).map((f) => [f, next[f]!.trim()])
+            )
+          }
+        })
+      }
+      return { ok: true }
+    }
+  )
+
+  const bundleHere = (machine: string): Bundle => bundle(BULLPEN_HOME, machine)
+
+  /**
+   * The gist this machine syncs through: the one already on the account, or a
+   * new one.
+   *
+   * Worked out rather than asked for. There was a field for the id and a button
+   * to make one, which meant the second machine could not sync until somebody
+   * had carried a hex string across to it - on a setup where both ends are
+   * signed in to the same GitHub account and the file has the same name in
+   * both. Whatever this resolves is written back, so it is looked up once.
+   */
+  const gistFor = async (token: string, machine: string): Promise<{ gist?: string; error?: string }> => {
+    const saved = readConfig(BULLPEN_HOME).sync?.gist
+    if (saved) return { gist: saved }
+    const found = await findGist(token)
+    if (found.error) return { error: found.error }
+    const gist = found.gist ?? (await createGist(token, bundleHere(machine))).gist
+    if (!gist) return { error: 'GitHub would not make a gist to sync through.' }
+    const cfg = readConfig(BULLPEN_HOME)
+    writeConfig(BULLPEN_HOME, { ...cfg, sync: { ...cfg.sync, gist, machine } })
+    return { gist }
+  }
+
+  /**
+   * Read what is up there, and let the clock decide.
+   *
+   * Both directions in one press. Asking an operator to know whether they are
+   * ahead or behind is asking them to keep the answer this function computes.
+   */
+  ipcMain.handle('sync:now', async () => {
+    const token = readToken(BULLPEN_HOME)
+    if (!token) return { error: 'Not signed in to GitHub yet.' }
+    const cfg = readConfig(BULLPEN_HOME)
+    const machine = cfg.sync?.machine ?? hostname()
+    const found = await gistFor(token, machine)
+    if (found.error || !found.gist) return { error: found.error ?? 'No gist to sync through.' }
+    const gist = found.gist
+    const here = bundleHere(machine)
+
+    const got = await readGist({ token, gist })
+    if (got.error) return { error: got.error }
+
+    // Nothing up there yet, or this machine is the newer one: push.
+    if (!got.bundle || newer(here, got.bundle) === 'here') {
+      const put = await writeGist({ token, gist }, here)
+      if (put.error) return { error: put.error }
+      return { went: 'up' as const, floors: Object.keys(here.floors).length, at: here.at }
+    }
+
+    const done = adopt(BULLPEN_HOME, got.bundle)
+    return { went: 'down' as const, from: got.bundle.from, at: got.bundle.at, ...done }
+  })
+
   const LIST = (): { name: string; description: string; markdown: string; builtin: boolean }[] => [
     ...PRESETS.map((w) => ({
       name: w.name,
@@ -1805,7 +2792,7 @@ function wire(): void {
   })
 
   /** Whether the floor Bullpen ships refuses to be saved over. */
-  const SHIPPED_IS_READ_ONLY = false
+  const SHIPPED_IS_READ_ONLY = true
 
   /**
    * Write the floor to disk - unless it breaks a law.
@@ -1821,11 +2808,9 @@ function wire(): void {
     // A shipped floor is in the source, not on disk. Saving one wrote a file
     // beside it under the same name - and the list drops a saved floor that
     // takes a shipped one's name, so the edit went to disk, vanished from the
-    // list, and the floor it was made on carried on unchanged.
-    //
-    // Off while the redraft is being tried on the shipped floor itself: it is
-    // the only floor there is, and testing "write it" on anything else means
-    // drawing one first. Set it back to true.
+    // list, and the floor it was made on carried on unchanged. Refused rather
+    // than allowed-and-lost: draw on it all you like, and the moment you want
+    // to keep what you drew, it is yours under your own name.
     if (SHIPPED_IS_READ_ONLY && PRESETS.some((p) => p.name === parsed.workflow.name)) {
       return {
         error: `"${parsed.workflow.name}" is the floor Bullpen ships and is not yours to write over. Give it another name in the file and it is yours to keep.`
@@ -1847,24 +2832,17 @@ function wire(): void {
 
   ipcMain.handle('workflow:patch', async (_e, patch: Partial<Workflow>) => {
     const next = patched(patch)
-    // Before `wf` moves, while the old floor can still say who was who.
-    const retired = await retire(next)
+    // The same desk as every other door. A patch may name a different agent on
+    // the dispatch role, and this one used to take it.
+    seatGod(next)
     // Noted, not refused. A floor half-drawn is a floor mid-thought: somebody
     // adds a role before the line that reaches it, or a line before the rule
     // that uses it, and refusing to save until every check passes means the
     // work in front of them cannot be put down. The problems come back with the
     // save so they can be shown, and the floor is what they drew.
     const problems = lint(next, rulebook())
-    wf = next
-    const markdown = toMarkdown(wf)
-    writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), workflow: wf })
-    try {
-      saveWorkflow(BULLPEN_HOME, markdown)
-    } catch (err) {
-      console.error('[bullpen] could not save the patched workflow:', err)
-    }
-    hive.reserved = { human: wf.human, hire: wf.hire }
-    return { workflow: wf, markdown, problems, retired }
+    const retired = await applyFloor(next)
+    return { workflow: wf, markdown: toMarkdown(wf), problems, retired }
   })
 
   /**
@@ -1890,16 +2868,37 @@ function wire(): void {
   }
 
   /**
+   * The front desk, which is Michael on every floor there has ever been.
+   *
+   * Not a default and not a suggestion: the desk work is dispatched to is the
+   * same desk everywhere - the same agent, the same face on the roster, the
+   * same id every brief already writes to. What the floor calls the *role* is
+   * its own business; who sits there is not.
+   *
+   * Seated rather than checked, because a floor refused for naming somebody
+   * else is a floor somebody has to fix by hand to say a thing they did not
+   * mean. Returns whether it had to change anything, so the caller knows
+   * whether what it was handed is still what it should keep.
+   */
+  const GOD = { id: 'michael', name: 'Michael' } as const
+
+  const seatGod = (w: Workflow): boolean => {
+    const desk = w.roles[w.dispatch]
+    if (!desk) return false
+    if (desk.fixed?.id === GOD.id && desk.fixed?.name === GOD.name) return false
+    w.roles = { ...w.roles, [w.dispatch]: { ...desk, fixed: { ...GOD } } }
+    return true
+  }
+
+  /**
    * What a written floor has to be true of, whatever the model wrote.
    *
    * Rules a model can forget are not rules. Three of them are worth more than
    * the prompt line asking for them:
    *
-   * The front desk is Michael. The model picks a plausible id and a plausible
-   * name every time - `chief · Michael` on one floor, `lead · Dana` on the next
-   * - and the desk work is dispatched to is the same desk on all of them: the
-   * same agent, the same face on the roster, the same id every brief already
-   * writes to.
+   * The front desk is Michael - see `seatGod`. The model picks a plausible id
+   * and a plausible name every time: `chief · Michael` on one floor,
+   * `lead · Dana` on the next.
    *
    * `- reports to you:` and `- hires:` name a role or they are nothing. A floor
    * came back naming `boss` for both on a floor whose roles are `manager`,
@@ -1916,12 +2915,11 @@ function wire(): void {
     const parsed = parseMarkdown(markdown)
     if ('error' in parsed) return markdown
     const w = parsed.workflow
-    const seat = w.roles[w.dispatch]
-    if (!seat) return markdown
+    if (!w.roles[w.dispatch]) return markdown
+    seatGod(w)
     const named = (r: string | undefined): boolean => Boolean(r && w.roles[r])
     return toMarkdown({
       ...w,
-      roles: { ...w.roles, [w.dispatch]: { ...seat, fixed: { id: 'michael', name: 'Michael' } } },
       voice: named(w.voice) ? w.voice : undefined,
       hires: named(w.hires) ? w.hires : undefined
     })
@@ -2011,14 +3009,24 @@ function wire(): void {
       `- every brief, addressed to the agent, naming only the roles that role may write to, and ` +
       `saying what it reports and to whom\n` +
       `- a "## how it works" section of three to five sentences for whoever opens this floor next\n` +
-      `Leave "## card rules" exactly as it is - what a message does to a card is worked out from ` +
-      `the drawing here, and anything you write there is thrown away.\n` +
+      `- "## board": the stages a card moves through on a floor that does *this* work, in this ` +
+      `floor's own words. A writing floor is not a support desk and neither is a delivery team, ` +
+      `so name the stages the way somebody doing this work would say them out loud. Each line is ` +
+      `"- key: label #colour (kind)", the kind being one of start, working, waiting, stuck, done. ` +
+      `Exactly one column per kind, and always a start and a done. Only give it a "waiting" one ` +
+      `if somebody on this floor decides whether work passed - that is the column work sits in ` +
+      `while it waits to be checked - and only a "stuck" one if being blocked is worth seeing on ` +
+      `the board.\n` +
+      `Leave "## card rules" out of your answer entirely - what a message does to a card is ` +
+      `worked out from the drawing here, and anything written there is thrown away. Copying the ` +
+      `ones above back is worse than leaving them out: they name the stages of the board you were ` +
+      `just asked to replace, and a file naming a stage its own board does not have will not read.\n` +
       `Answer with the whole file in Bullpen's format and nothing else - no fences, no preamble.` +
       extra
 
     /** The words are the model's; the shape is the drawing's. */
     const keep = (md: string): { markdown: string; problems: string[] } | { error: string } => {
-      const parsed = parseMarkdown(md)
+      const parsed = parseMarkdown(withoutCardRules(md))
       if ('error' in parsed) return { error: parsed.error }
       const w = parsed.workflow
       const filled = withWork(floor).roles
@@ -2033,12 +3041,18 @@ function wire(): void {
           ]
         })
       )
+      // The board is the model's, when what came back is a board at all. It is
+      // the one part of the shape that is about the *work* rather than about
+      // who does it - `briefed → drafting → in review → published` is a floor
+      // of writers saying what it does, and `todo → doing → done` is the app
+      // saying nothing. Pinned to the drawing's own columns before, so every
+      // floor written here came out with the same four words.
+      const board = isBoard(w.columns) ? w.columns : floor.columns
+      const shape = { ...floor, columns: board, roles }
       const next: Workflow = {
-        ...floor,
+        ...shape,
         description: w.description || floor.description,
         summary: w.summary ?? floor.summary,
-        roles,
-        columns: floor.columns,
         // Worked out, not asked for. What a message does to a card follows from
         // the drawing - who hands work out, who does it, who decides it passed -
         // and a model asked to write those lines wrote a floor where handing
@@ -2046,9 +3060,9 @@ function wire(): void {
         // put its card back into `doing`, and the first task typed at the floor
         // opened nothing at all. None of that is visible in the file; it is
         // visible three days later as a board that does not move.
-        cardRules: drawnCardRules(withWork({ ...floor, cardRules: [] }))
+        cardRules: drawnCardRules(withWork({ ...shape, cardRules: [] }))
       }
-      return { markdown: toMarkdown(next), problems: lint(next) }
+      return { markdown: toMarkdown(trimmed(next)), problems: lint(trimmed(next)) }
     }
 
     try {
@@ -2131,27 +3145,50 @@ function wire(): void {
     return { problems: lint(parsed.workflow, rulebook()), preview: parsed.workflow }
   })
 
-  ipcMain.handle('workflow:set', async (_e, text: string) => {
-    const parsed = parseMarkdown(text)
-    if ('error' in parsed) return { error: parsed.error }
-    const problems = lint(parsed.workflow, rulebook())
-    // Refused rather than warned about: every one of these fails silently at
-    // runtime - a card that never moves, a report that never reaches anyone -
-    // and a floor that looks busy and finishes nothing is the worst outcome
-    // this whole file exists to avoid.
-    if (problems.length) return { error: problems.join('\n') }
-    const retired = await retire(parsed.workflow)
-    wf = parsed.workflow
-    hive.reserved = { human: wf.human, hire: wf.hire }
+  /**
+   * Make a floor the one that runs.
+   *
+   * Everything applying a floor means, in one place. It was in two: `workflow:set`
+   * did all of this, and `workflow:patch` set `wf` and saved and stopped there -
+   * no reseating of the front desk, no board cleared, no tool refusals re-read,
+   * so a floor applied through the second door came up with cards keyed to
+   * columns it no longer had, agents holding permissions it had taken away, and
+   * whoever the patch named sitting at Michael's desk.
+   *
+   * The two doors still differ where they are meant to: one refuses a floor that
+   * does not lint, the other notes the problems and saves anyway, because a
+   * half-drawn floor is a floor mid-thought. What happens *after* that decision
+   * is the same either way, and is here.
+   *
+   * `saved` is the text to keep on disk - what was typed, unless the desk had to
+   * be reseated, in which case what is running is not what was typed.
+   */
+  async function applyFloor(next: Workflow, saved?: string): Promise<string[]> {
+    // Before `wf` moves, while the old floor can still say who was who.
+    const retired = await retire(next)
+    wf = next
+    hive.reserved = { human: wf.human, hire: wf.hire, board: BOARD_PARTY }
+    godId = fixedId(wf, wf.dispatch)
     writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), workflow: wf })
-    // Applied is also saved: switching away and back should not mean retyping
-    // the floor you were just running.
+    const markdown = toMarkdown(wf)
     try {
-      saveWorkflow(BULLPEN_HOME, text)
+      saveWorkflow(BULLPEN_HOME, saved ?? markdown)
     } catch (err) {
       console.error('[bullpen] could not save the applied workflow:', err)
     }
-    godId = fixedId(wf, wf.dispatch)
+    // The board with them. A card carries the key of a column on the floor it
+    // was opened on, and this floor's columns are not those - so what was left
+    // behind was not stale work, it was work in no column at all: not shown
+    // anywhere, and still counted. Cleared rather than migrated, because a card
+    // is about a floor and this is a different one. The two sets go with them:
+    // a card id that will never be looked up again is one they need not hold.
+    chased.clear()
+    dropped.clear()
+    const cardsDropped = board.clearTasks()
+    if (cardsDropped) {
+      pushTasks()
+      activity.push('task', 'bullpen', `${cardsDropped} card(s) cleared for "${wf.name}"`)
+    }
     // Roles learned under the old workflow name things this one may not have.
     for (const [id, role] of [...roles]) if (!wf.roles[role]) roles.delete(id)
     // What a role never does was read once, at spawn. An agent that survives
@@ -2164,6 +3201,28 @@ function wire(): void {
       approvals.setDenied(a.id, wf.roles[roleOf(a.id)]?.never ?? [])
     }
     activity.push('spawn', 'bullpen', `workflow set to "${wf.name}"`)
+    return retired
+  }
+
+  ipcMain.handle('workflow:set', async (_e, text: string) => {
+    const parsed = parseMarkdown(text)
+    if ('error' in parsed) return { error: parsed.error }
+    // Michael's desk, whatever the file says. The chart forces it on the way
+    // out of `staffed` and the generator on the way out of `tidy`, and this is
+    // the door neither of those covers: markdown typed into the file column and
+    // applied as it stands, which was the one way left to seat somebody else at
+    // the desk the operator types at.
+    const reseated = seatGod(parsed.workflow)
+    const problems = lint(parsed.workflow, rulebook())
+    // Refused rather than warned about: every one of these fails silently at
+    // runtime - a card that never moves, a report that never reaches anyone -
+    // and a floor that looks busy and finishes nothing is the worst outcome
+    // this whole file exists to avoid.
+    if (problems.length) return { error: problems.join('\n') }
+    // Saved as written, unless the desk had to be reseated - then what is
+    // running is not what was typed, and keeping the typed copy would show a
+    // floor with somebody else's name on the front desk every time it opened.
+    const retired = await applyFloor(parsed.workflow, reseated ? undefined : text)
     return { workflow: wf, markdown: toMarkdown(wf), retired }
   })
 
@@ -2217,6 +3276,24 @@ function wire(): void {
     approvals.clearPending(id)
     return ptys.kill(id)
   })
+  /**
+   * Off the roster for good: the board forgets it too.
+   *
+   * Separate from `agent:kill` because firing an agent that has already exited
+   * never kills anything - the row just goes - and that is the case that left
+   * the cards behind. The renderer calls this on every fire, running or not.
+   */
+  ipcMain.handle('agent:forget', (_e, id: string) => {
+    approvals.clearSteers(id)
+    approvals.clearPending(id)
+    forgetAgent(id)
+    return true
+  })
+  // Asked for once per terminal, when its buffer is first created. Applying a
+  // floor reloads the window and leaves the agents that have a place on the new
+  // one running, so the renderer comes back with an empty xterm attached to a
+  // pty that has already printed everything it is going to.
+  ipcMain.handle('pty:backlog', (_e, id: string) => ptys.backlog(id))
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => ptys.resize(id, cols, rows))
 
@@ -2234,19 +3311,58 @@ function wire(): void {
     return true
   })
 
+  /**
+   * A turn that never ends has no event to hang this off.
+   *
+   * Everything else here is driven by something happening - a hook, a message,
+   * an exit. The one failure with no event of its own is the one where nothing
+   * happens at all, so it takes a clock. Unref'd, and `reportWhenQuiet` is
+   * called after: writing a hung turn off is often exactly what makes the floor
+   * quiet enough to report.
+   */
+  setInterval(() => {
+    try {
+      sweepHung()
+      sweepUnclaimed()
+      reportWhenQuiet()
+    } catch (err) {
+      console.error('[bullpen] hung-turn sweep failed:', err)
+    }
+    // Half the window it is watching for, capped at a minute: a sweep slower
+    // than the thing it looks for would report a hung turn twice as late as it
+    // had to, and one faster than a second is a clock for no reason.
+  }, Math.min(Math.max(HUNG_MS / 2, 1_000), 60_000)).unref?.()
+
+  /**
+   * What this agent's CLI would start on with no flag from us.
+   *
+   * Read on demand rather than stored on the agent: it is a file on disk that
+   * the operator may edit between one menu opening and the next, and a copy
+   * taken at spawn would be the answer to a question nobody asked yet.
+   */
+  ipcMain.handle('agent:configModel', (_e, id: string, cmd: string, cwd: string) => {
+    const fromFiles = configuredModel(cmd, cwd, app.getPath('home'))
+    if (fromFiles) return fromFiles
+    // Last: what the CLI itself printed when it came up. Nobody having written
+    // a model down does not mean nobody knows which one is answering - it means
+    // the only thing that does is the process, and it says so on its first
+    // screen. See `bannerModel` for how narrow that read is.
+    return bannerModel(ptys.backlog(id), engineFor(cmd).models)
+  })
   ipcMain.handle('agent:ctx', (_e, id: string) => currentCtx(id))
   ipcMain.handle('agent:cost', (_e, id: string) => currentCost(id))
   ipcMain.handle('activity:list', (_e, limit?: number) => activity.list(limit))
 
-  ipcMain.handle('ask:list', () => [...questions.values()])
+  ipcMain.handle('ask:list', () => asks.pending())
   // Re-read on a reload: the report is the one thing on the monitor that did
   // not happen while this window was open.
-  ipcMain.handle('report:last', () => lastReport)
+  ipcMain.handle('report:list', () => reports)
   ipcMain.handle('dispatch:last', () => lastDispatch)
   ipcMain.handle('ask:answer', (_e, qid: string, answer: string) => {
-    const q = questions.get(qid)
+    // Stamped, not deleted. The question, its wording and what was said back
+    // are what somebody reads a day later to know what has already been decided.
+    const q = asks.answer(qid, answer)
     if (!q) return false
-    questions.delete(qid)
     // The reply travels back through the hive, so the agent receives it exactly
     // as it receives any other message - no second delivery mechanism.
     // Under whatever this floor calls the human: the gate and the card rules
@@ -2254,14 +3370,16 @@ function wire(): void {
     // recognises is an answer the router treats as another agent's.
     hive.send({ from: wf.human, to: q.from, subject: `re: ${q.subject}`, body: answer })
     activity.push('answer', HUMAN, `you answered ${q.from}: ${q.subject}`)
-    send('ask:pending', [...questions.values()])
+    send('ask:pending', asks.pending())
     return true
   })
   ipcMain.handle('ask:dismiss', (_e, qid: string) => {
-    questions.delete(qid)
-    send('ask:pending', [...questions.values()])
+    if (!asks.dismiss(qid)) return false
+    send('ask:pending', asks.pending())
     return true
   })
+  /** Everything ever asked, answers and all, newest first. */
+  ipcMain.handle('ask:history', () => asks.all())
 
   /**
    * Dispatch: hand a request to the boss's own prompt, and only ever his.
@@ -2328,9 +3446,29 @@ function wire(): void {
   })
   ipcMain.handle('board:tasks', (_e, id?: string) => board.tasks(id))
   ipcMain.handle('board:addTask', (_e, id: string, text: string) => {
-    const t = board.addTask(id, text)
+    // The floor's starting column, not `todo`. A card typed in by hand is a
+    // card like any other, and this used to store a key off a board that no
+    // longer has one: the floor Bullpen ships starts at `asked`, so every
+    // hand-added card landed in a column the board cannot draw and nothing
+    // could move it out of.
+    const t = board.addTask(id, text, column('start'))
     pushTasks()
     return t
+  })
+  /**
+   * Say yes to a card: this one is work, start it.
+   *
+   * The board is a list until the operator says so, which is why this is its
+   * own call rather than a flag on `addTask` - adding a card costs nothing and
+   * this is the press that spends. Everything else released for this agent is
+   * worked through after it, one card at a time, as each turn ends.
+   */
+  ipcMain.handle('board:release', (_e, taskId: string) => {
+    const card = board.task(taskId)
+    if (!card || !card.agentId) return false
+    released.add(card.id)
+    pump(card.agentId)
+    return true
   })
   ipcMain.handle('board:removeTask', (_e, id: string) => {
     board.removeTask(id)
@@ -2386,6 +3524,30 @@ function wire(): void {
   )
 
   ipcMain.handle('ui:notify', () => readConfig(BULLPEN_HOME).notify !== false)
+  /**
+   * Fire one, past the two rules that suppress the real ones.
+   *
+   * `notify` says nothing while the window has focus and nothing twice in a few
+   * seconds - both true of somebody standing in this dialog pressing the
+   * button - so a test routed through it would answer by doing nothing, which
+   * is the one answer that cannot be told apart from a broken setup. The switch
+   * above is not consulted either: this is how you find out whether turning it
+   * on would achieve anything.
+   */
+  ipcMain.handle('ui:notifyTest', () => {
+    if (!Notification.isSupported()) {
+      return { error: 'This machine does not show desktop notifications.' }
+    }
+    try {
+      new Notification({
+        title: 'Bullpen',
+        body: 'Notifications are working. This is what one looks like.'
+      }).show()
+      return { ok: true as const }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('ui:setNotify', (_e, on: boolean) => {
     writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), notify: on === true })
     return on === true
@@ -2496,7 +3658,7 @@ app.whenReady().then(async () => {
   // What the human and hiring are called here. Routed on, so a floor that
   // addresses its operator as "boss" has mail to "boss" reach the ask-me queue
   // rather than the dead letters.
-  hive.reserved = { human: wf.human, hire: wf.hire }
+  hive.reserved = { human: wf.human, hire: wf.hire, board: BOARD_PARTY }
 
   approvals.setTheme(readConfig(BULLPEN_HOME).mode ?? 'light')
   await approvals.start()

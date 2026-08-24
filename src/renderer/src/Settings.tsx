@@ -190,6 +190,8 @@ export function Settings({
             />
             <div style={S.rule} />
             <AgentsPane onMoveGod={onMoveGod} />
+            <div style={S.rule} />
+            <SyncPane />
           </div>
         )}
 
@@ -224,6 +226,196 @@ export function Settings({
   )
 }
 
+/**
+ * The same floors on the other machine.
+ *
+ * Three presses and no daemon. A sync that runs on its own is a sync that
+ * overwrites work while somebody is in the middle of it, and last-write-wins
+ * has no opinion about who was typing - so the operator says when, and is told
+ * afterwards which way it went and whose version won.
+ *
+ * What crosses is the floors and the settings that mean the same thing
+ * anywhere. Not where Michael works, not the window size, not the webhook
+ * token, and not which floor is running: pulling that would swap the floor out
+ * from under agents already standing on it.
+ */
+function SyncPane() {
+  const [state, setState] = useState<{
+    gist: string
+    machine: string
+    hasToken: boolean
+    user: string
+    keyring: boolean
+    canSignIn: boolean
+    floors: number
+  } | null>(null)
+  /** The code GitHub is waiting to be told, while it is being told. */
+  const [code, setCode] = useState<{ userCode: string; url: string } | null>(null)
+  const [busy, setBusy] = useState('')
+  const [note, setNote] = useState('')
+  const [error, setError] = useState('')
+
+  const read = (): void => {
+    window.bullpen.syncStatus().then((s) => {
+      setState(s)
+      // Confirm the remembered name against GitHub, once the pane is drawn.
+      // A token can be revoked from the other side, and "signed in as" is only
+      // worth showing if it is who this machine actually reaches.
+      if (s.hasToken) {
+        window.bullpen.whoAmI().then((who) => {
+          if (who.login) setState((was) => (was ? { ...was, user: who.login! } : was))
+        })
+      }
+    })
+  }
+  useEffect(read, [])
+
+  if (!state) return <div style={{ color: 'var(--faint)' }}>reading…</div>
+
+  const ready = state.hasToken
+
+  return (
+    <div>
+      <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>the same floors elsewhere</div>
+      <div style={{ color: 'var(--faint)', lineHeight: 1.6, margin: '2px 0 10px' }}>
+        Floors and the settings that travel, through a secret gist. Whichever machine syncs last
+        is the one that wins — this is not a merge. Nothing about <i>this</i> machine goes up:
+        not where Michael works, not the webhook token, not which floor is running.
+      </div>
+
+      <div style={S.row}>
+        <span style={S.rowLabel}>this machine</span>
+        <input
+          style={S.field}
+          value={state.machine}
+          placeholder="laptop"
+          title="what the other machine sees when this one wins"
+          onChange={(e) => setState({ ...state, machine: e.target.value })}
+          onBlur={async () => {
+            await window.bullpen.setSync({ machine: state.machine })
+            read()
+          }}
+        />
+      </div>
+
+      {/* The sign-in, and the only way in. GitHub shows a box and this shows
+          the code that goes in it - no server, no redirect, nothing pasted out
+          of a settings page on github.com. */}
+      <div style={S.row}>
+        <span style={S.rowLabel}>github</span>
+        {state.hasToken ? (
+          <>
+            <span style={{ flex: 1, color: 'var(--ok)' }}>
+              signed in{state.user ? ' as ' : ''}
+              {state.user && <b style={{ color: 'var(--accent-ink)' }}>{state.user}</b>}
+            </span>
+            <button
+              style={S.btn}
+              title="forget this account on this machine"
+              onClick={async () => {
+                if (!confirm('Sign out? This machine stops syncing until you sign in again.')) return
+                await window.bullpen.setSync({ token: '' })
+                setNote('Signed out.')
+                read()
+              }}
+            >
+              sign out
+            </button>
+          </>
+        ) : (
+          <>
+            {code ? (
+              <span style={{ flex: 1, lineHeight: 1.6 }}>
+                Type{' '}
+                <b style={{ color: 'var(--accent-ink)', letterSpacing: '0.12em' }}>{code.userCode}</b>{' '}
+                at <span style={{ color: 'var(--muted)' }}>{code.url}</span> — waiting…
+              </span>
+            ) : (
+              <button
+                style={{ ...S.btn, ...S.btnGo }}
+                disabled={busy !== ''}
+                onClick={async () => {
+                  setBusy('signin')
+                  setError('')
+                  setNote('')
+                  const got = await window.bullpen.signIn()
+                  if (got.error || !got.userCode || !got.url) {
+                    setBusy('')
+                    return setError(got.error ?? 'GitHub did not send a code.')
+                  }
+                  setCode({ userCode: got.userCode, url: got.url })
+                  const done = await window.bullpen.awaitSignIn()
+                  setCode(null)
+                  setBusy('')
+                  if (done.error) return setError(done.error)
+                  setNote('Signed in.')
+                  read()
+                }}
+              >
+                {busy === 'signin' ? 'waiting…' : 'sign in with GitHub'}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      {!state.keyring && state.hasToken && (
+        <div style={{ color: 'var(--warn)', lineHeight: 1.6, marginBottom: 6 }}>
+          No keyring on this machine, so the token is written plainly in{' '}
+          <code>~/.bullpen/credentials</code>. Said rather than hidden.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+        <span style={{ color: 'var(--faint)', flex: 1, lineHeight: 1.5 }}>
+          {state.floors} floor{state.floors === 1 ? '' : 's'} here
+        </span>
+        <button
+          style={{ ...S.btn, ...(ready ? S.btnGo : null) }}
+          disabled={!ready || busy !== ''}
+          title={ready ? 'read what is up there, and let the clock decide' : 'sign in first'}
+          onClick={async () => {
+            setBusy('now')
+            setError('')
+            setNote('')
+            const res = await window.bullpen.syncNow()
+            setBusy('')
+            if (res.error) return setError(res.error)
+            if (res.went === 'up') setNote(`Up: ${res.floors} floors from here.`)
+            else {
+              const gone = res.dropped?.length ? `, ${res.dropped.length} taken off` : ''
+              setNote(`Down: ${res.floors} floors from ${res.from}${gone}.`)
+            }
+            read()
+          }}
+        >
+          {busy === 'now' ? 'syncing…' : 'sync now'}
+        </button>
+      </div>
+      {/* Where it went. Nothing on this pane used to say - the gist id had a
+          field of its own and then the field was taken out, which left "Up: 3
+          floors from here" and no way to go and look at them. */}
+      {state.gist && (
+        <div style={{ color: 'var(--faint)', marginTop: 6, lineHeight: 1.6 }}>
+          through gist <code>{state.gist.slice(0, 8)}</code> on {state.user || 'GitHub'} —{' '}
+          <a
+            href={`https://gist.github.com/${state.gist}`}
+            style={{ color: 'var(--accent-ink)' }}
+            onClick={(e) => {
+              e.preventDefault()
+              window.bullpen.openExternal(`https://gist.github.com/${state.gist}`)
+            }}
+          >
+            open it
+          </a>
+        </div>
+      )}
+      {note && <div style={{ color: 'var(--ok)', marginTop: 6 }}>{note}</div>}
+      {error && <div style={{ color: 'var(--danger)', marginTop: 6, lineHeight: 1.6 }}>{error}</div>}
+    </div>
+  )
+}
+
 /** Theme and notifications: the two switches that were only ever icons. */
 function LookPane({
   mode,
@@ -240,6 +432,8 @@ function LookPane({
   prefs: { fontSize: number; floor: string }
   onPrefs: (next: { fontSize?: number; floor?: string }) => void
 }) {
+  /** What the last test notification did, or why it could not. */
+  const [tested, setTested] = useState('')
   return (
     <div style={S.pane}>
       <div style={{ ...LABEL, color: 'var(--accent-ink)' }}>theme</div>
@@ -307,6 +501,22 @@ function LookPane({
           Tell me when an agent needs an answer, and when work comes back.
         </span>
       </label>
+      {/* The switch says what Bullpen will send. Whether anything arrives is
+          the operating system's answer, and on macOS it is given once, in a
+          panel nobody comes back to - so ask it here rather than leaving a
+          ticked box standing in for a permission that was refused. */}
+      <div style={{ ...S.formRow, gap: 10 }}>
+        <button
+          style={S.btn}
+          onClick={async () => {
+            const res = await window.bullpen.notifyTest()
+            setTested(res.error ?? 'Sent. Nothing on screen means this machine is refusing them.')
+          }}
+        >
+          send a test
+        </button>
+        {tested && <span style={{ color: 'var(--muted)', lineHeight: 1.5 }}>{tested}</span>}
+      </div>
     </div>
   )
 }
@@ -404,6 +614,19 @@ const S: Record<string, React.CSSProperties> = {
   /** One scrolling page. There is nothing to navigate between any more. */
   page: { flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 },
   rule: { height: 1, background: 'var(--line)', margin: '18px 0' },
+  /** A label and its control on one line, the way the rest of this pane reads. */
+  row: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 },
+  rowLabel: { color: 'var(--muted)', width: 96, flex: '0 0 auto' },
+  field: {
+    flex: 1,
+    minWidth: 0,
+    background: 'var(--panel)',
+    border: '1px solid',
+    borderColor: 'var(--line)',
+    color: 'var(--ink)',
+    font: 'inherit',
+    padding: '4px 6px'
+  },
   btn: {
     background: 'transparent',
     color: 'var(--muted)',

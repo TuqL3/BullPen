@@ -43,15 +43,16 @@ const tokens = (n: number): string =>
 export function Monitor({
   agents,
   lastSeen,
-  report,
+  reports,
   dispatched,
   onSelect,
   onOpenTerminal
 }: {
   agents: Agent[]
   lastSeen: Record<string, number>
-  /** Where the work stands. Shown here and nowhere else - it is not a question. */
-  report: Report | null
+  /** Where the work stands, every round of it, newest first. Shown here and
+   *  nowhere else - a report is not a question. */
+  reports: Report[]
   /** The brief the operator handed over, as they wrote it. */
   dispatched: Dispatch | null
   /** Waiting agent picked: goes to ask me, where every question is collected. */
@@ -64,6 +65,8 @@ export function Monitor({
   const [sent, setSent] = useState('')
   const [confirmKill, setConfirmKill] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
+  /** Which of the earlier reports are open, by their timestamp. */
+  const [open, setOpen] = useState<number[]>([])
 
   // Everything on this tab is an elapsed time, and elapsed times do not change
   // when the store does - they change when the clock does. Without this an
@@ -149,19 +152,54 @@ export function Monitor({
         </div>
       )}
 
-      {report && (
+      {reports[0] && (
         <div style={S.report}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
             <span style={{ ...LABEL, color: 'var(--accent-ink)' }}>
-              latest report · {god?.name ?? report.from}
-              {report.ts ? ` · ${ago(report.ts, now)} ago` : ''}
+              latest report · {god?.name ?? reports[0].from}
+              {reports[0].ts ? ` · ${ago(reports[0].ts, now)} ago` : ''}
             </span>
             <span style={{ flex: 1 }} />
             <button style={S.disclose} onClick={() => setExpanded(!expanded)}>
               {expanded ? 'collapse' : 'expand'}
             </button>
           </div>
-          <pre style={{ ...S.reportBody, maxHeight: expanded ? 'none' : 340 }}>{report.body}</pre>
+          <pre style={{ ...S.reportBody, maxHeight: expanded ? 'none' : 340 }}>
+            {reports[0].body}
+          </pre>
+        </div>
+      )}
+
+      {/* The rounds before this one. Kept shut, because the reason to come to
+          this tab is what the floor is doing now - but kept, which is the part
+          that was missing: the previous report used to be overwritten by the
+          next one and was then nowhere at all. */}
+      {reports.length > 1 && (
+        <div style={S.earlier}>
+          <span style={{ ...LABEL, color: 'var(--faint)' }}>
+            {reports.length - 1} earlier report{reports.length === 2 ? '' : 's'}
+          </span>
+          {reports.slice(1).map((r) => (
+            <div key={r.ts} style={S.older}>
+              <div
+                style={S.olderHead}
+                onClick={() =>
+                  setOpen((was) =>
+                    was.includes(r.ts) ? was.filter((t) => t !== r.ts) : [...was, r.ts]
+                  )
+                }
+              >
+                <span style={{ color: 'var(--faint)', flex: '0 0 auto' }}>
+                  {open.includes(r.ts) ? '−' : '+'}
+                </span>
+                <span style={S.olderSubject}>{r.subject}</span>
+                <span style={{ color: 'var(--faint)', flex: '0 0 auto' }}>
+                  {ago(r.ts, now)} ago
+                </span>
+              </div>
+              {open.includes(r.ts) && <pre style={S.reportBody}>{r.body}</pre>}
+            </div>
+          ))}
         </div>
       )}
 
@@ -411,6 +449,24 @@ const S: Record<string, React.CSSProperties> = {
     marginBottom: 12,
     background: 'var(--panel)',
     border: '1px solid var(--line)'
+  },
+  earlier: { marginBottom: 12 },
+  older: { borderTop: '1px solid var(--line)' },
+  olderHead: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 8,
+    padding: '5px 2px',
+    cursor: 'pointer',
+    fontSize: 11
+  },
+  olderSubject: {
+    flex: 1,
+    minWidth: 0,
+    color: 'var(--muted)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap'
   },
   // The brief, not the orders around it: a left rule rather than a box, so it
   // reads as the thing that started the round rather than a second report.

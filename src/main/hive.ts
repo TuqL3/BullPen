@@ -28,6 +28,18 @@ export type Message = {
    * checks the work rather than the one who wrote it.
    */
   role?: string
+  /**
+   * Which card on the board this message is about.
+   *
+   * Stamped by the app on work it hands out, and quoted back by the agent when
+   * it reports. Without it the board had to guess, and the guess was "whoever
+   * sent this, their newest open card" - so an agent holding two tasks closed
+   * the wrong one every time it finished the older.
+   *
+   * The router does not read it. It rides along like `subject` does, and main
+   * is what looks it up.
+   */
+  task?: string
 }
 
 export type Delivery = { to: string; msg: Message }
@@ -56,7 +68,7 @@ export const HUMAN = 'you'
  * its operator as `boss` says so in its workflow, and the router has to answer
  * to that instead. Set by main whenever a workflow is applied.
  */
-export type Reserved = { human: string; hire: string }
+export type Reserved = { human: string; hire: string; board: string }
 
 /**
  * Reserved recipient: a request to hire. Michael has to be able to put someone
@@ -67,6 +79,16 @@ export type Reserved = { human: string; hire: string }
  * and `cwd` names the directory when the project does not exist yet.
  */
 const HIRE = 'hire'
+
+/**
+ * Reserved recipient: the task list itself.
+ *
+ * Agents read `$BULLPEN_TASKS` directly - it is a file - but nothing may write
+ * to it except main, or two agents reading the same list at the same moment
+ * both come away holding the same card. So a change to the board is a message
+ * like any other, and main is the only writer.
+ */
+const BOARD = 'board'
 
 /**
  * File-based agent mailbox.
@@ -111,7 +133,7 @@ export class Hive extends EventEmitter {
    * Defaults to `you` and `hire`, which is what they were when they were
    * constants - a floor that never renames them cannot tell the difference.
    */
-  reserved: Reserved = { human: HUMAN, hire: HIRE }
+  reserved: Reserved = { human: HUMAN, hire: HIRE, board: BOARD }
 
   // Plain assignment, not a constructor parameter property: `node
   // --experimental-strip-types` rejects parameter properties, and that is how
@@ -130,6 +152,31 @@ export class Hive extends EventEmitter {
   register(id: string): void {
     mkdirSync(join(this.agentDir(id), 'inbox'), { recursive: true })
     mkdirSync(join(this.agentDir(id), 'outbox'), { recursive: true })
+  }
+
+  /**
+   * Empty an id's mailbox, both ways, and hand back how much was in it.
+   *
+   * Delivered mail is not consumed - the briefs tell every agent its mail is in
+   * `$BULLPEN_MAILBOX/inbox`, so it stays there to be read. A name is free the
+   * moment its agent stops, though, and the next hire on the next project is
+   * given that name: it came up standing in front of nine messages about work
+   * it had never done, on a floor whose roles had since changed, and its brief
+   * told it to go and read them.
+   *
+   * The directory itself stays. `list()` is what the router walks, and an id it
+   * cannot see is an id nothing can be addressed to.
+   */
+  forget(id: string): number {
+    let gone = 0
+    for (const box of ['inbox', 'outbox']) {
+      const dir = join(this.agentDir(id), box)
+      for (const name of this.jsonFiles(dir)) {
+        rmSync(join(dir, name), { force: true })
+        gone++
+      }
+    }
+    return gone
   }
 
   list(): string[] {
@@ -221,13 +268,25 @@ export class Hive extends EventEmitter {
           this.emit('blocked', msg, why)
         }
 
-        if (msg.to === this.reserved.human || msg.to === this.reserved.hire) {
-          const why = this.gate?.(msg.from, msg.to) ?? null
+        const reserved = (
+          [
+            [this.reserved.human, 'question'],
+            [this.reserved.hire, 'hire'],
+            // Not gated. `talksTo` says who may write to whom, and the board is
+            // not a whom - a floor that had to draw a line to it before anybody
+            // could say they had finished would be a floor where forgetting that
+            // line silently froze every card on it.
+            [this.reserved.board, 'board']
+          ] as const
+        ).find(([name]) => name === msg.to)
+        if (reserved) {
+          const [, event] = reserved
+          const why = event === 'board' ? null : (this.gate?.(msg.from, msg.to) ?? null)
           if (why) {
             refuse(why)
             continue
           }
-          this.emit(msg.to === this.reserved.human ? 'question' : 'hire', msg)
+          this.emit(event, msg)
           continue
         }
 
@@ -236,8 +295,18 @@ export class Hive extends EventEmitter {
           msg.to === '*' || agents.includes(msg.to)
             ? msg.to
             : (this.staff?.(msg.to, from, msg) ?? msg.to)
+        // `agents` is the snapshot this sweep opened with, and `staff` is
+        // allowed to hire - so the one name it is most likely to return is the
+        // one name that snapshot cannot contain. Asking it anyway is what made
+        // a hire swallow the message that caused it: somebody was hired, given
+        // a card, and never told what the work was, which reads from every
+        // angle as an agent that is simply slow.
+        //
+        // Re-listed only when the snapshot misses, so the ordinary path is
+        // still one readdir per sweep rather than one per message.
+        const known = (id: string): boolean => agents.includes(id) || this.list().includes(id)
         const addressed =
-          named === '*' ? agents.filter((a) => a !== from) : agents.includes(named) ? [named] : []
+          named === '*' ? agents.filter((a) => a !== from) : known(named) ? [named] : []
         // Per target, so a broadcast reaches the part of the floor it is
         // allowed to reach rather than being refused whole.
         const blocked = addressed

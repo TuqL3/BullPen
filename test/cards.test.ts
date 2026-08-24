@@ -85,6 +85,71 @@ test('a task is on the board from the moment it is handed over to the moment it 
  * The analyst's board used to be empty by construction while she was the
  * busiest agent on the floor: whoever assigns was excluded from being assigned.
  */
+/**
+ * A rule is about a pair and nothing else, so one line carries every message
+ * between those two - and a worker sends "done: ..." and "blocked: ..." down
+ * exactly the same one. Both landed in the finished column, so the board read
+ * as work delivered while the agent behind it was waiting on an answer.
+ */
+test('a report that says it is blocked does not read as finished', () => {
+  const w = {
+    ...SOLO,
+    columns: [
+      { key: 'todo', label: 'todo', bar: '#a3e3ff', kind: 'start' as const },
+      { key: 'doing', label: 'doing', bar: '#e8cf6a', kind: 'working' as const },
+      { key: 'blocked', label: 'blocked', bar: '#e8917f', kind: 'stuck' as const },
+      { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' as const }
+    ],
+    cardRules: [{ from: 'dev', to: 'god', status: 'done' }]
+  } as Workflow
+
+  assert.deepEqual(move(w, 'dave', 'michael', 'done: the export'), {
+    kind: 'move',
+    agent: 'dave',
+    status: 'done'
+  })
+  assert.deepEqual(move(w, 'dave', 'michael', 'blocked: no credentials'), {
+    kind: 'move',
+    agent: 'dave',
+    status: 'blocked'
+  })
+
+  // With nowhere to be stuck, the rule is still the answer - inventing a
+  // column is not this function's job.
+  const flat = { ...w, columns: w.columns.filter((c) => c.kind !== 'stuck') } as Workflow
+  assert.deepEqual(move(flat, 'dave', 'michael', 'blocked: no credentials'), {
+    kind: 'move',
+    agent: 'dave',
+    status: 'done'
+  })
+
+  // And on the last line of all. Reporting to the human is its own branch -
+  // the human has no role to match and no card - and it returned before the
+  // check above ever ran, so the boss saying "blocked: the human has to decide
+  // this" closed its own card as delivered. That is the hand-off the operator
+  // actually reads, and the board told them the opposite of the message.
+  const up = { ...w, cardRules: [{ from: 'god', to: HUMAN, status: 'done' }] } as Workflow
+  assert.deepEqual(move(up, 'michael', HUMAN, 'done: the export'), {
+    kind: 'move',
+    agent: 'michael',
+    status: 'done'
+  })
+  assert.deepEqual(move(up, 'michael', HUMAN, 'blocked: need a decision'), {
+    kind: 'move',
+    agent: 'michael',
+    status: 'blocked'
+  })
+
+  // Same floor with nowhere to be stuck: the rule stands, as it does anywhere
+  // else. The override never invents a column.
+  const upFlat = { ...up, columns: flat.columns } as Workflow
+  assert.deepEqual(move(upFlat, 'michael', HUMAN, 'blocked: need a decision'), {
+    kind: 'move',
+    agent: 'michael',
+    status: 'done'
+  })
+})
+
 test('whoever assigns work is themselves given work', () => {
   const m = move(CHAIN, 'michael', 'ba')
   assert.equal(m?.kind, 'open', 'the analyst gets a card of her own')

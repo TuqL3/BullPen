@@ -10,7 +10,7 @@ import { getPrefs } from './prefs'
  * on every select would throw away scrollback, which is the whole point of
  * watching an agent work.
  */
-const terms = new Map<string, { term: Xterm; fit: FitAddon }>()
+const terms = new Map<string, { term: Xterm; fit: FitAddon; queued?: string[] }>()
 let mode: Mode = 'light'
 
 /**
@@ -70,7 +70,7 @@ const THEMES: Record<Mode, ITheme> = {
   }
 }
 
-function get(id: string): { term: Xterm; fit: FitAddon } {
+function get(id: string): { term: Xterm; fit: FitAddon; queued?: string[] } {
   const existing = terms.get(id)
   if (existing) return existing
   const term = new Xterm({
@@ -83,8 +83,34 @@ function get(id: string): { term: Xterm; fit: FitAddon } {
   const fit = new FitAddon()
   term.loadAddon(fit)
   term.onData((data) => window.bullpen.write(id, data))
-  const entry = { term, fit }
+  /**
+   * A new buffer for an agent that has been running for a while.
+   *
+   * Applying a floor reloads the window, and an agent whose role is on the new
+   * floor is not restarted with it - so this opens onto a pty that has already
+   * printed everything it had to say. Nothing replayed it, and an idle agent
+   * prints nothing more, so the pane stayed black while the agent behind it was
+   * up and well.
+   *
+   * Live output is held until the replay lands rather than written straight
+   * through: the fetch is a round trip to main, and a chunk that arrives during
+   * it would otherwise be painted before the history it comes after.
+   */
+  const entry: { term: Xterm; fit: FitAddon; queued?: string[] } = { term, fit, queued: [] }
   terms.set(id, entry)
+  window.bullpen
+    .backlog(id)
+    .then((past) => {
+      if (past) term.write(past)
+    })
+    .catch(() => {
+      // An older main with no such handler. A blank terminal is what this was
+      // before; it is not worth failing the pane over.
+    })
+    .finally(() => {
+      for (const chunk of entry.queued ?? []) term.write(chunk)
+      entry.queued = undefined
+    })
   return entry
 }
 
@@ -168,7 +194,10 @@ export function paneSize(el: Element | null): { cols: number; rows: number } {
 
 /** Feed PTY output into the right buffer even while its tab is hidden. */
 export function writeToTerminal(id: string, chunk: string): void {
-  get(id).term.write(chunk)
+  const entry = get(id)
+  // Still waiting on the replay of what came before it. Held, not dropped.
+  if (entry.queued) entry.queued.push(chunk)
+  else entry.term.write(chunk)
 }
 
 export function disposeTerminal(id: string): void {

@@ -26,9 +26,12 @@ import {
   rolesWith,
   saveWorkflow,
   drawnCardRules,
+  isBoard,
   matches,
   withWork,
   toMarkdown,
+  trimmed,
+  withoutCardRules,
   type CardRule,
   type Workflow,
   workCwd,
@@ -335,6 +338,176 @@ test('the rules written from a drawing name only pairs that have a line', () => 
   // Take a line off and the rule about it is not written.
   const cut = { ...w, talksTo: { ...w.talksTo, tester: ['dev'] } } as Workflow
   assert.ok(!drawnCardRules(cut).some((r) => r.from === 'tester' && r.to === 'ba'))
+})
+
+/**
+ * Which way a line goes is what decides whether it is a hand-off or a report,
+ * and the drawing is the only thing that says. Level with each other counted as
+ * a report, so a worker passing work sideways was marked as having finished it.
+ */
+test('a line that does not go back up is a hand-off, not a report', () => {
+  const w = {
+    ...(DEFAULT_WORKFLOW as Workflow),
+    capabilities: [{ name: 'speaks', kind: 'speaksToHuman' as const, what: '' }],
+    columns: [
+      { key: 'todo', label: 'todo', bar: '#a3e3ff', kind: 'start' as const },
+      { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' as const }
+    ],
+    cardRules: [],
+    dispatch: 'boss',
+    entry: 'boss',
+    roles: {
+      boss: { label: 'the boss', can: ['speaks'], brief: 'x' },
+      one: { label: 'one', can: [], brief: 'y', hireable: true },
+      two: { label: 'two', can: [], brief: 'z', hireable: true }
+    },
+    talksTo: { boss: ['one', 'two', 'you'], one: ['boss', 'two'], two: ['boss', 'one'] }
+  } as unknown as Workflow
+
+  const at = (from: string, to: string): string | undefined =>
+    drawnCardRules(w).find((r) => r.from === from && r.to === to)?.status
+
+  // `one` and `two` are both one hop from the boss, so neither is reporting to
+  // the other: whatever crosses between them is work.
+  assert.equal(at('one', 'two'), 'open', 'sideways is work being handed over')
+  assert.equal(at('two', 'one'), 'open')
+  // Back towards the operator still is a report.
+  assert.equal(at('one', 'boss'), 'done')
+  assert.equal(at('boss', 'one'), 'open')
+})
+
+/**
+ * A file grows things nobody uses and nothing says so - a capability declared
+ * and held by no role, a second column of a kind everything already answers
+ * with the first - and a floor read by somebody new is read as though every
+ * line in it is load-bearing.
+ */
+test('writing the floor again takes out what nothing reaches', () => {
+  const w = {
+    ...(DEFAULT_WORKFLOW as Workflow),
+    capabilities: [
+      { name: 'speaks', kind: 'speaksToHuman' as const, what: '' },
+      { name: 'builds', kind: 'builds' as const, what: '' },
+      { name: 'checks', kind: 'checks' as const, what: 'held by nobody' }
+    ],
+    columns: [
+      { key: 'todo', label: 'todo', bar: '#a3e3ff', kind: 'start' as const },
+      { key: 'analysis', label: 'analysis', bar: '#b39ddb', kind: 'working' as const },
+      { key: 'building', label: 'building', bar: '#e8cf6a', kind: 'working' as const },
+      { key: 'review', label: 'review', bar: '#6ec6c9', kind: 'waiting' as const },
+      { key: 'done', label: 'done', bar: '#7fd8a0', kind: 'done' as const }
+    ],
+    roles: {
+      boss: { label: 'the boss', can: ['speaks'], brief: 'x' },
+      dev: { label: 'a developer', can: ['builds'], brief: 'y', hireable: true }
+    },
+    talksTo: { boss: ['dev', 'you'], dev: ['boss'] },
+    dispatch: 'boss',
+    entry: 'boss',
+    cardRules: [{ from: 'dev', to: 'boss', status: 'review' }]
+  } as unknown as Workflow
+
+  const out = trimmed(w)
+  assert.deepEqual(
+    out.capabilities.map((c) => c.name),
+    ['speaks', 'builds'],
+    'a word no role holds is a word nothing can name'
+  )
+  assert.deepEqual(
+    out.columns.map((c) => c.key),
+    ['todo', 'analysis', 'review', 'done'],
+    'the second `working` column is a stage no card can reach; `review` is named by a rule'
+  )
+})
+
+/**
+ * The failure this stops: the board is written again for the work the floor
+ * actually does, the rules still name the stages the old one had, and the file
+ * that gets written will not read back - `"done" is not a column on this board`.
+ */
+test('a rule that names a stage the board no longer has goes with it', () => {
+  const w = {
+    ...(DEFAULT_WORKFLOW as Workflow),
+    columns: [
+      { key: 'requested', label: 'requested', bar: '#a3e3ff', kind: 'start' as const },
+      { key: 'delivered', label: 'delivered', bar: '#7fd8a0', kind: 'done' as const }
+    ],
+    cardRules: [
+      { from: 'ba', to: 'dev', status: 'done' },
+      { from: 'dev', to: 'ba', status: 'delivered' },
+      { from: 'tester', to: 'ba', status: 'closes' },
+      { from: 'god', to: 'ba', status: 'open' }
+    ]
+  } as unknown as Workflow
+
+  const out = trimmed(w)
+  assert.deepEqual(
+    out.cardRules.map((r) => r.status),
+    ['delivered', 'closes', 'open'],
+    '`done` is not a stage on this board any more'
+  )
+
+  // And what is left round-trips, which is the whole point.
+  const back = parseMarkdown(toMarkdown(out))
+  assert.ok(!('error' in back), 'error' in back ? back.error : '')
+})
+
+/**
+ * What `write it` reads is the model's file with its rules taken out. Asked to
+ * leave the section alone, a model copies the old rules back - and those name
+ * the stages of the board it was in the same breath asked to replace, so the
+ * whole file refused to read before anything could throw them away.
+ */
+test('the rules a model sends back are gone before the file is read', () => {
+  const middle = [
+    '# f',
+    '',
+    '## board',
+    '- a: a #fff (start)',
+    '',
+    '## card rules',
+    '- x → y: done',
+    '- y → x: opens a card',
+    '',
+    '## briefs',
+    '',
+    '### x',
+    '',
+    'hi',
+    ''
+  ].join('\n')
+  assert.ok(!withoutCardRules(middle).includes('card rules'))
+  assert.ok(withoutCardRules(middle).includes('## briefs'), 'and what follows it stays')
+  assert.ok(withoutCardRules(middle).includes('- a: a #fff (start)'), 'and what precedes it')
+
+  // Last section, and a file that never had one.
+  const last = '# f\n\n## board\n- a: a #fff (start)\n\n## card rules\n- x → y: done\n'
+  assert.ok(!withoutCardRules(last).includes('x → y'))
+  const none = '# f\n\n## board\n- a: a #fff (start)\n'
+  assert.equal(withoutCardRules(none), none)
+})
+
+/** A board is a board when it has keys of its own, a start and an end. */
+test('a board the model wrote is only taken when it is one', () => {
+  const col = (key: string, kind: string): { key: string; label: string; bar: string; kind: string } => ({
+    key,
+    label: key,
+    bar: '#fff',
+    kind
+  })
+  const ok = [col('briefed', 'start'), col('drafting', 'working'), col('published', 'done')]
+  assert.equal(isBoard(ok as Workflow['columns']), true)
+  assert.equal(isBoard([col('a', 'start')] as Workflow['columns']), false, 'no end')
+  assert.equal(
+    isBoard([col('a', 'start'), col('a', 'done')] as Workflow['columns']),
+    false,
+    'two columns cannot share a key'
+  )
+  assert.equal(
+    isBoard([col('a b', 'start'), col('z', 'done')] as Workflow['columns']),
+    false,
+    'a key is one word'
+  )
 })
 
 test('the file leaves out what a role did not say', () => {
@@ -1160,7 +1333,7 @@ test('a floor keeps the agents it has a role for, and no others', () => {
  * this out from the floor file - four steps a model does badly and silently.
  */
 test('work handed to a role goes to whoever is free, emptiest window first', () => {
-  const w = DEFAULT_WORKFLOW // hire above 70, reuse below 50
+  const w = DEFAULT_WORKFLOW // reuse below 50, hire above 70
 
   const busy = { id: 'a', role: 'dev', idle: false, ctxPct: 10 }
   const full = { id: 'b', role: 'dev', idle: true, ctxPct: 71 }
@@ -1170,14 +1343,28 @@ test('work handed to a role goes to whoever is free, emptiest window first', () 
 
   // Emptiest of the free ones, and never somebody in another role.
   assert.equal(pickForRole(w, 'dev', [busy, full, some, fresh, other]), 'd')
-  assert.equal(pickForRole(w, 'dev', [busy, full, some]), 'c')
   // Nobody eligible is not an error: it means hire, which is the caller's job.
-  assert.equal(pickForRole(w, 'dev', [busy, full]), null)
   assert.equal(pickForRole(w, 'dev', []), null)
+  // The emptiest window on the floor belongs to somebody mid-turn. Work waits
+  // for a new pair of hands rather than being stacked on a turn in progress:
+  // a second task handed to a working agent lands as an interruption, and the
+  // first one is what pays for it.
+  assert.equal(pickForRole(w, 'dev', [busy]), null)
+  // Idle but past "give it to one under" is treated the same as busy - what is
+  // left of that window is not enough to work in.
+  assert.equal(pickForRole(w, 'dev', [busy, full, some]), null)
   // A fresh hire has no reading yet. That is empty, not full.
   assert.equal(pickForRole(w, 'dev', [{ id: 'new', role: 'dev', idle: true }]), 'new')
   // At the threshold, not under it.
-  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 70 }]), null)
+  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 50 }]), null)
+  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 49 }]), 'x')
+
+  // A floor may ship without `thresholds-ordered`, so the two numbers can be
+  // the wrong way round. The lower one decides either way - reuse 90 must not
+  // hand work to an agent that hire 10 calls unavailable.
+  const inverted = { ...w, reuseBelowPct: 90, hireAbovePct: 10 }
+  assert.equal(pickForRole(inverted, 'dev', [{ id: 'y', role: 'dev', idle: true, ctxPct: 20 }]), null)
+  assert.equal(pickForRole(inverted, 'dev', [{ id: 'y', role: 'dev', idle: true, ctxPct: 5 }]), 'y')
 })
 
 /**
@@ -1511,4 +1698,26 @@ test('a floor that names none of them still reads the words it was written in', 
     assert.ok('workflow' in back, `"${w.name}" must still parse`)
     if ('workflow' in back) assert.deepEqual(back.workflow.cardRules, w.cardRules)
   }
+})
+
+/**
+ * `board` is an address, so it cannot also be somebody.
+ *
+ * The router checks the reserved names before it looks for an agent, so a role
+ * called `board` is a role nothing can reach: every message meant for it lands
+ * on the task list instead, and the role sits on the chart doing nothing with
+ * no error anywhere. `you` and `hire` were already covered; this one was added
+ * later and was not.
+ */
+test('a role may not be called by the name of a reserved address', () => {
+  const w = structuredClone(DEFAULT_WORKFLOW)
+  w.roles.board = structuredClone(w.roles[w.dispatch])
+  delete w.roles.board.fixed
+  w.roles.board.hireable = true
+  w.talksTo.board = [w.dispatch]
+  w.talksTo[w.dispatch] = [...(w.talksTo[w.dispatch] ?? []), 'board']
+  assert.ok(
+    lint(w).some((p) => p.includes('board') && p.includes('reserved address')),
+    `a role called board must be refused: ${lint(w).join(' | ')}`
+  )
 })

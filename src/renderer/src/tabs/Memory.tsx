@@ -20,36 +20,46 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<{ where: string; text: string }[] | null>(null)
   /**
-   * Read it, or write it with the rendering beside you.
+   * Always the source beside the rendering.
    *
-   * No editor-only mode: a memory file is prose that has to read well, and an
-   * editor with the reading hidden is the one of the two nobody asked for.
+   * No read-only mode and no switch to find: a memory file is prose that has to
+   * read well *and* the one file in the workspace you change to change how the
+   * agent behaves, so the reading and the writing are the same view. There was
+   * a toggle here, defaulting to read, which meant every edit started with
+   * finding the button that turns editing on.
    */
-  const [mode, setMode] = useState<'read' | 'split'>('read')
   const [draft, setDraft] = useState('')
   const [note, setNote] = useState('')
 
   const agent = agents.find((a) => a.id === who) ?? null
+  /** What is on disk. Anything else in the editor is unsaved. */
+  const saved = doc?.text ?? ''
+  const dirty = draft !== saved
 
   const load = (): void => {
     if (!agent) return setDoc(null)
     setLoading(true)
     window.bullpen
       .memory(agent.cwd)
-      .then(setDoc)
+      .then((d) => {
+        setDoc(d)
+        // The editor is the file until somebody types, so there is no separate
+        // "open it" step to seed it.
+        setDraft(d?.text ?? '')
+      })
       .finally(() => setLoading(false))
   }
   // Editing is dropped when the agent changes: a draft belongs to the file it
   // was opened from, and carrying it across would write one agent's rules into
   // another's workspace.
   useEffect(() => {
-    setMode('read')
     setNote('')
+    setDraft('')
     // Cleared, not left standing while the new one is read. `memory()` is a
-    // round trip, and `split` is one click away the whole time it is in flight
-    // - opening the editor in that window seeded the draft from the agent you
-    // just left, and saving wrote their rules into this one's workspace, which
-    // is the thing switching agents is supposed to make impossible.
+    // round trip, and the editor is live the whole time it is in flight - one
+    // left holding the agent you just left would save their rules into this
+    // one's workspace, which is the thing switching agents must make
+    // impossible.
     setDoc(null)
     load()
   }, [agent?.id, agent?.cwd])
@@ -67,7 +77,7 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
   const syncing = useRef(false)
 
   const sync = (from: HTMLElement | null, to: HTMLElement | null): void => {
-    if (!from || !to || syncing.current || mode !== 'split') return
+    if (!from || !to || syncing.current) return
     const fromMax = from.scrollHeight - from.clientHeight
     const toMax = to.scrollHeight - to.clientHeight
     if (fromMax <= 1 || toMax <= 1) return
@@ -78,11 +88,10 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
     })
   }
 
-  /** Opening the editor starts from what is on disk, not from the last draft. */
-  const open = (next: 'split'): void => {
-    if (mode === 'read') setDraft(doc?.text ?? `# ${agent?.name ?? 'Agent'}\n\n`)
+  /** Put back what is on disk, and lose whatever was typed over it. */
+  const revert = (): void => {
+    setDraft(saved)
     setNote('')
-    setMode(next)
   }
 
   const save = async (): Promise<void> => {
@@ -91,7 +100,6 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
     const res = await window.bullpen.codeWrite(agent.cwd, name, draft)
     if (res.error) return setNote(res.error)
     setNote(`saved ${name} — it takes effect on the agent's next turn`)
-    setMode('read')
     load()
   }
 
@@ -147,33 +155,14 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
           </span>
         )}
         <span style={{ flex: 1 }} />
-        {/* One row of switches rather than an edit button that swaps the panel:
-            split is where a memory file actually gets written - the rules read
-            differently rendered than they do as source. */}
-        {(['read', 'split'] as const).map((m) => (
-          <span
-            key={m}
-            style={{ ...S.choice, ...(mode === m ? S.choiceOn : null) }}
-            onClick={() => {
-              if (loading) return
-              return m === 'read' ? setMode('read') : open('split')
-            }}
-          >
-            {m}
-          </span>
-        ))}
-        {mode !== 'read' && (
+        {/* Only once there is something to save. Two buttons that do nothing
+            are two buttons somebody has to work out the state of. */}
+        {dirty && (
           <>
             <button style={S.btn} onClick={save}>
               save
             </button>
-            <button
-              style={S.link}
-              onClick={() => {
-                setMode('read')
-                setNote('')
-              }}
-            >
+            <button style={S.link} onClick={revert}>
               cancel
             </button>
           </>
@@ -181,36 +170,29 @@ export function Memory({ agents, selected }: { agents: Agent[]; selected: string
       </div>
 
       {loading && <div style={S.empty}>Reading…</div>}
-      {!loading && !doc && mode === 'read' && (
+      {!loading && !doc && (
         <div style={S.empty}>
           No CLAUDE.md, CLAUDE.local.md or AGENTS.md in {agent?.cwd}. This agent runs on the briefing
-          you gave it and nothing else.{' '}
-          <button
-            style={S.link}
-            onClick={() => open('split')}
-          >
-            write one
-          </button>
+          you gave it and nothing else — type below and save to give it one.
         </div>
       )}
       {note && <div style={S.note}>{note}</div>}
 
-      <div style={{ ...S.body, ...(mode === 'split' ? S.split : null) }}>
-        {mode !== 'read' && (
-          <textarea
-            ref={editor}
-            style={S.editor}
-            value={draft}
-            spellCheck={false}
-            onChange={(e) => setDraft(e.target.value)}
-            onScroll={() => sync(editor.current, preview.current)}
-          />
-        )}
-        {/* In split it renders the draft, not the file: the point is seeing
-            what you are typing, before it is saved. */}
-        {!loading && (doc || mode === 'split') && (
+      <div style={{ ...S.body, ...S.split }}>
+        <textarea
+          ref={editor}
+          style={S.editor}
+          value={draft}
+          placeholder={`# ${agent?.name ?? 'Agent'}\n\nWhat this agent should always know.`}
+          spellCheck={false}
+          onChange={(e) => setDraft(e.target.value)}
+          onScroll={() => sync(editor.current, preview.current)}
+        />
+        {/* The draft, not the file: the point is seeing what you are typing
+            before it is saved. */}
+        {!loading && (
           <Markdown
-            text={mode === 'split' ? draft : (doc?.text ?? '')}
+            text={draft}
             innerRef={preview}
             onScroll={() => sync(preview.current, editor.current)}
           />
@@ -238,16 +220,6 @@ const S: Record<string, React.CSSProperties> = {
   },
   body: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
   split: { flexDirection: 'row', gap: 10 },
-  choice: {
-    padding: '4px 10px',
-    background: 'transparent',
-    color: 'var(--muted)',
-    border: '1px solid',
-    borderColor: 'var(--line)',
-    cursor: 'pointer',
-    font: `11px ${MONO}`
-  },
-  choiceOn: { background: 'var(--accent)', color: '#241f1a', borderColor: 'var(--accent)' },
   input: {
     flex: 1,
     padding: '6px 9px',
@@ -257,7 +229,7 @@ const S: Record<string, React.CSSProperties> = {
     font: `12px ${MONO}`
   },
   select: {
-    padding: '4px 6px',
+    padding: '6px 6px',
     background: 'var(--sunk)',
     color: 'var(--ink)',
     border: '1px solid var(--line)',

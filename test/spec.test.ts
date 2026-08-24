@@ -43,6 +43,43 @@ test('the writer is briefed on exactly what the reference documents', () => {
 })
 
 /**
+ * A floor comes out in the language it was asked for in - except the parts
+ * nothing reads.
+ *
+ * It used to come out entirely in English, on the grounds that a floor half in
+ * one language reads as two documents stapled together. True of the prose, and
+ * the wrong line to draw: the briefs are most of the file and all of the part
+ * that decides how the floor behaves, and a brief the operator cannot read is a
+ * brief they cannot correct.
+ *
+ * So the split is by who reads the line. A column key is stored on a card and a
+ * capability's bracket is matched against four words - translate either and it
+ * silently stops matching. A column *label* and a capability *name* are read by
+ * a person and belong in the person's language.
+ */
+test('the writer answers in the language it was asked in, except the wire words', () => {
+  assert.doesNotMatch(
+    BRIEF,
+    /in English, whatever language the request is written in/,
+    'the whole-file English rule is what this replaced'
+  )
+  assert.match(BRIEF, /in the language the request came in/)
+
+  // The words that are matched rather than read. Named one by one rather than
+  // pattern-matched: they are ASCII like any other word, so nothing but the
+  // words themselves catches one going missing from the brief.
+  for (const wire of ['(speaksToHuman)', '(assigns)', '(builds)', '(checks)', '`done:`', '`fail:`']) {
+    assert.ok(BRIEF.includes(wire), `the brief no longer tells the writer to keep ${wire}`)
+  }
+
+  // A key is what a card is stored under and a rule is matched against, so it
+  // is ASCII whatever the label beside it says. The brief has to say so in the
+  // same breath as it says the label is free, or the writer takes the freedom
+  // and applies it to both.
+  assert.match(BRIEF, /Column \*\*keys\*\*/)
+})
+
+/**
  * Anything the parser reads has to be documented, or a person writing a floor
  * by hand cannot know it exists. This is the direction that catches a feature
  * added to the code and never written down.

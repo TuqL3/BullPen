@@ -127,7 +127,6 @@ export const buildsCapabilityIn = (w: WorkflowInfo | null): string | undefined =
   w?.roles[rolesWithIn(w, 'builds')[0] ?? '']?.can[0] ??
   (w?.capabilities ?? [])[0]?.name
 
-export const roleCan = (role: string, kind: string): boolean => rolesWith(kind).includes(role)
 
 /**
  * A role with a fixed agent is part of the floor rather than staff on it: the
@@ -188,7 +187,12 @@ export const roleName = (role: string): string => wf?.roles[role]?.fixed?.name ?
  */
 export const roleTag = (role: string): string | null => {
   const def = wf?.roles[role]
-  if (!def || roleCan(role, 'builds')) return null
+  // Every role, including the ones that build. They used to be left blank on
+  // the grounds that most of the floor builds and the word would be noise -
+  // which is true right up until the floor is four deep, and a row reading only
+  // its directory is a row that does not say whether that agent is the analyst,
+  // the developer or the tester.
+  if (!def) return null
   return def.label.replace(/^(the|a|an) /i, '')
 }
 

@@ -253,6 +253,313 @@ test('the inbound door answers its own knock', async () => {
   await main.invoke('webhook:set', false, 0)
 })
 
+/**
+ * The front desk is Michael, including on a floor typed by hand.
+ *
+ * Three doors already forced it - the chart on the way out of `staffed`, the
+ * generator on the way out of `tidy`, and the blank floor by writing it in.
+ * This was the fourth: markdown pasted into the file column and applied as it
+ * stands, which is the one path that reached `workflow:set` uncorrected. What
+ * came out was a floor whose dispatch agent was somebody else - a different id
+ * to every brief that writes to Michael, a different face on the roster, and
+ * nothing anywhere saying it had happened.
+ */
+test('the desk work is typed at is Michael, whatever the file put there', async () => {
+  const before = await main.invoke<{ markdown: string }>('workflow:get')
+  const floor = before.markdown.replace(/^- agent: .+$/m, '- agent: sep · Sếp')
+  assert.match(floor, /- agent: sep · Sếp/, 'the test has to actually seat somebody else')
+
+  const set = await main.invoke<{ error?: string }>('workflow:set', floor)
+  assert.equal(set.error, undefined, `a floor naming somebody else is corrected, not refused: ${set.error}`)
+
+  const after = await main.invoke<{ markdown: string }>('workflow:get')
+  assert.match(after.markdown, /- agent: michael · Michael/)
+  assert.ok(!after.markdown.includes('sep · Sếp'), 'and the other name is gone, not merely outranked')
+
+  // The saved copy too. It used to be written from the text as typed, so the
+  // floor ran as Michael and reopened as somebody else on the next launch.
+  const saved = await main.invoke<{ name: string; markdown: string }[]>('workflow:list')
+  const mine = saved.find((w) => w.markdown.includes('- agent:'))
+  assert.ok(mine && !mine.markdown.includes('sep · Sếp'), 'what is on disk is what is running')
+
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  assert.equal(god.id, 'michael', 'and he is who the dispatch box types at')
+})
+
+/**
+ * A card typed in by hand starts where the floor starts.
+ *
+ * `board.addTask` defaults to `todo`, which is one board's word: the floor
+ * Bullpen ships starts at `asked`. The IPC never passed a column, so every
+ * hand-added card was stored under a key the board has no column for - not
+ * drawn anywhere, and nothing able to move it out.
+ */
+test('a card added by hand lands in the floor\'s own starting column', async () => {
+  const shipped = SHIPPED[0]
+  const start = shipped.columns.find((c) => c.kind === 'start')!.key
+  assert.notEqual(start, 'todo', 'this test says nothing if the shipped floor starts at todo')
+
+  const set = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(shipped))
+  assert.equal(set.error, undefined, `the shipped floor must apply: ${set.error}`)
+
+  const card = await main.invoke<{ status: string } | null>('board:addTask', 'harper', 'count the exports')
+  assert.equal(card?.status, start)
+})
+
+/**
+ * The two words that move a card are said to everybody, not only to whoever
+ * hands work out.
+ *
+ * They used to sit behind the "here is how you hand work over" guard, which is
+ * skipped for a role that writes to nobody but the human. That is the one role
+ * whose report is the last thing that happens to a task: it reported in
+ * whatever words it chose, and `stuckInstead` reads "fail:" - so a failure
+ * closed the card green on the one hand-off the operator actually reads.
+ */
+test('every agent is told the two words, even one who hands work to nobody', async () => {
+  const floor = toMarkdown(SHIPPED[0]).replace(
+    /^- talks to: data_analyst$/m,
+    '- talks to: you'
+  )
+  assert.match(floor, /- talks to: you/, 'the test has to actually cut the role off')
+  const set = await main.invoke<{ error?: string }>('workflow:set', floor)
+  assert.equal(set.error, undefined, `the floor must apply: ${set.error}`)
+
+  await hire('marlowe', 'marketing_sale')
+  const args = main.pty('marlowe').args
+  const brief = args[args.indexOf('--append-system-prompt') + 1]
+  assert.ok(brief, 'an agent is briefed at spawn or never')
+  assert.match(brief, /"done: "/, 'the word that closes a card')
+  assert.match(brief, /"fail: "/, 'and the word that does not')
+  assert.ok(
+    !brief.includes('Handing work over'),
+    'and it is not told how to hand out work it can hand to nobody'
+  )
+})
+
+/**
+ * Work handed down the chain staffs the floor, and Michael is who staffed it.
+ *
+ * Every step hires: the boss asks for an analyst and gets one, and the analyst
+ * asks for a worker and gets one too - without either of them reading the
+ * roster, checking who is idle, or writing to `hire`. The hire is logged
+ * against Michael whoever asked, because there is one desk that staffs this
+ * floor and it is not whichever agent happened to want the work done.
+ */
+test('a role nobody holds is hired into, at any depth, by Michael', async () => {
+  const set = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(SHIPPED[0]))
+  assert.equal(set.error, undefined, `the shipped floor must apply: ${set.error}`)
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  // An empty floor, because that is what this test is about. Earlier tests
+  // leave agents standing and idle, and an idle one holding the role being
+  // asked for is reused rather than hired - which is correct, and is the other
+  // half of `assignTo`.
+  for (const id of [...main.ptys.keys()]) {
+    if (id !== god.id) await main.invoke('agent:kill', id)
+  }
+  // By who is *running*, not by which keys exist. Hire names come off the same
+  // roster earlier tests spawn by hand from, so a fresh hire routinely reuses
+  // an id this harness has already seen - and comparing key sets reads that as
+  // nobody having been hired at all.
+  const running = (): string[] => [...main.ptys.keys()].filter((id) => !main.pty(id).killed)
+  const before = new Set(running())
+  const added = (): string[] => running().filter((id) => !before.has(id))
+
+  // Step one: the boss hands work to a role with nobody in it.
+  mail(god.id, { to: 'data_analyst', subject: 'count the exports', body: 'by channel' })
+  await settle(1200)
+  const [analyst] = added()
+  assert.ok(analyst, 'the boss asked for an analyst and nobody was free - somebody is hired')
+
+  // Step two: that hire hands work on, and is staffed the same way. It has no
+  // project of its own and never writes to "hire".
+  mail(analyst, { to: 'marketing_sale', subject: 'cut the segments', body: 'by region' })
+  await settle(1200)
+  const worker = added().find((id) => id !== analyst)
+  assert.ok(worker, 'and the analyst asking one step further is staffed too')
+
+  // Reported to whoever asked, not to whoever hired.
+  const args = main.pty(worker).args
+  const brief = args[args.indexOf('--append-system-prompt') + 1]
+  assert.match(brief, new RegExp(analyst), 'the work goes back to the one who handed it over')
+
+  // The hire line names the display name, not the id, so match on the asker -
+  // there is one hire line per step and each names who needed somebody.
+  const log = await main.invoke<{ actor: string; text: string }[]>('activity:list', 400)
+  for (const asker of [god.id, analyst]) {
+    const line = log.find((a) => /hired/.test(a.text) && a.text.startsWith(`${asker} needed`))
+    assert.ok(line, `the hire ${asker} caused is on the record`)
+    assert.equal(line.actor, god.id, `a hire is Michael's: ${line.text}`)
+  }
+})
+
+/**
+ * The monitor keeps every round, not the last one.
+ *
+ * One report was held, and the next overwrote it - so a floor that reports
+ * three times an hour threw its own history away as fast as it wrote it. All
+ * that was left of the round before was an activity line saying a report had
+ * happened, without a word of what it said.
+ */
+test('reports pile up newest first instead of overwriting each other', async () => {
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  const before = (await main.invoke<{ subject: string }[]>('report:list')).length
+
+  mail(god.id, { to: 'you', subject: 'report: first round', body: 'two files read' })
+  await settle(1200)
+  mail(god.id, { to: 'you', subject: 'report: second round', body: 'the spec is in' })
+  await settle(1200)
+
+  const list = await main.invoke<{ subject: string; ts: number }[]>('report:list')
+  assert.equal(list.length, before + 2, 'both are kept')
+  assert.equal(list[0].subject, 'report: second round', 'newest first')
+  assert.equal(list[1].subject, 'report: first round')
+  assert.ok(list[0].ts >= list[1].ts, 'and stamped, so the monitor can date them')
+
+  // A report is not a question: neither of them may reach the ask queue.
+  const asked = await main.invoke<{ subject: string }[]>('ask:list')
+  assert.equal(
+    asked.filter((a) => /round/.test(a.subject)).length,
+    0,
+    'nothing owed in reply, so nothing waiting for one'
+  )
+})
+
+/**
+ * A hire that names no role gets the one the asker is waiting on.
+ *
+ * Michael writes `{to: "hire", subject: <project>}` and nothing else - that is
+ * what his own briefing tells him to send, and there is no role in it. The
+ * fallback used to be "whoever builds", which on this floor is the marketing &
+ * sale worker: two desks past the analyst the boss actually hands work to, and
+ * briefed to report to a role with nobody in it. The floor came up with no
+ * analyst on it and the request stopped there.
+ */
+test('a hire with no role named is hired into the next role down the chain', async () => {
+  const set = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(SHIPPED[0]))
+  assert.equal(set.error, undefined, `the shipped floor must apply: ${set.error}`)
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  for (const id of [...main.ptys.keys()]) {
+    if (id !== god.id) await main.invoke('agent:kill', id)
+  }
+  const running = (): string[] => [...main.ptys.keys()].filter((id) => !main.pty(id).killed)
+  const before = new Set(running())
+
+  mail(god.id, { to: 'hire', subject: 'nfc-music-box', cwd: work, body: 'read the spec' })
+  await settle(1200)
+
+  const [hired] = running().filter((id) => !before.has(id))
+  assert.ok(hired, 'somebody is hired')
+  const line = (await main.invoke<{ text: string }[]>('activity:list', 400)).find((a) =>
+    /hired .* on nfc-music-box/.test(a.text)
+  )
+  assert.ok(line, 'the hire is on the record')
+  assert.match(
+    line.text,
+    /as data_analyst/,
+    `the boss talks to the analyst, so that is who gets hired: ${line.text}`
+  )
+})
+
+/**
+ * A message the floor accepted and could not place is answered.
+ *
+ * `blocked` - a message the chain refused - has always replied. This is the
+ * other silence: an address that got past the gate and reached nobody, which
+ * from the sender's side is worse, because they were allowed to write it. It
+ * was logged, pushed at the UI, and never mentioned to the agent waiting.
+ */
+test('a message that reaches nobody comes back with a reason', async () => {
+  await main.invoke('workflow:set', toMarkdown(SHIPPED[0]))
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+
+  mail(god.id, { to: 'nobody-of-that-name', subject: 'a word', body: 'please' })
+  await settle(1200)
+  const back = inbox(god.id)
+  assert.ok(
+    back.some((m) => /not delivered: a word/.test(m.subject)),
+    'the sender is told, not merely logged at'
+  )
+})
+
+/**
+ * A line from a role back to itself means "hand it to another one of me".
+ *
+ * `assignTo` used to refuse that before the floor was consulted, on the way to
+ * stopping an agent handing work to itself - which the candidate list already
+ * does, by dropping the sender. So the drawing had no say: a floor of two
+ * writers who pass work between them was read as a floor where that line does
+ * nothing, and the message died without a reply.
+ */
+test('a role may hand work to another agent in the same role, if the floor drew it', async () => {
+  const floor = toMarkdown(SHIPPED[0]).replace(
+    '- talks to: boss, marketing_sale',
+    '- talks to: boss, marketing_sale, data_analyst'
+  )
+  assert.match(floor, /- talks to: boss, marketing_sale, data_analyst/, 'the self line has to be drawn')
+  const set = await main.invoke<{ error?: string }>('workflow:set', floor)
+  assert.equal(set.error, undefined, `a floor may draw a line to itself: ${set.error}`)
+
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  for (const id of [...main.ptys.keys()]) {
+    if (id !== god.id) await main.invoke('agent:kill', id)
+  }
+  // By who is *running*, not by which keys exist. Hire names come off the same
+  // roster earlier tests spawn by hand from, so a fresh hire routinely reuses
+  // an id this harness has already seen - and comparing key sets reads that as
+  // nobody having been hired at all.
+  const running = (): string[] => [...main.ptys.keys()].filter((id) => !main.pty(id).killed)
+  const before = new Set(running())
+  const added = (): string[] => running().filter((id) => !before.has(id))
+
+  mail(god.id, { to: 'data_analyst', subject: 'the first half', body: 'q1' })
+  await settle(1200)
+  const [first] = added()
+  assert.ok(first, 'somebody is hired into the role')
+
+  // The one thing that was impossible: an analyst asking for an analyst.
+  mail(first, { to: 'data_analyst', subject: 'the second half', body: 'q2' })
+  await settle(1200)
+  const second = added().find((id) => id !== first)
+  assert.ok(second, 'and a second one, because the sender is not a candidate for their own ask')
+})
+
+/**
+ * The other door onto the same floor.
+ *
+ * `workflow:patch` applies a floor from a partial - the chart's shape, without
+ * a round trip through markdown. It set `wf`, saved, and stopped: no reseating
+ * of the front desk, no board cleared, no tool refusals re-read. So a floor
+ * applied through it came up with cards keyed to columns it no longer had and
+ * whoever the patch named sitting at Michael's desk, while the same floor
+ * applied through `workflow:set` came up correctly.
+ */
+test('applying a floor by patch does what applying it by text does', async () => {
+  await main.invoke('workflow:set', toMarkdown(SHIPPED[0]))
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+  const before = await main.invoke<{
+    workflow: { dispatch: string; roles: Record<string, { fixed?: { id: string; name: string } }> }
+  }>('workflow:get')
+  const seat = before.workflow.dispatch
+
+  await main.invoke('board:addTask', god.id, 'a card from the old floor')
+  assert.ok(
+    (await main.invoke<unknown[]>('board:tasks')).length > 0,
+    'there is a card to lose'
+  )
+
+  const out = await main.invoke<{ workflow: { roles: Record<string, { fixed?: { id: string } }> } }>(
+    'workflow:patch',
+    { roles: { ...before.workflow.roles, [seat]: { ...before.workflow.roles[seat], fixed: { id: 'sep', name: 'S\u1ebfp' } } } }
+  )
+  assert.equal(out.workflow.roles[seat].fixed?.id, 'michael', 'the desk is Michael on every door')
+  assert.equal(
+    (await main.invoke<unknown[]>('board:tasks')).length,
+    0,
+    'and the cards of the floor that is gone go with it'
+  )
+})
+
 after(async () => {
   await main?.stop()
   rmSync(home, { recursive: true, force: true })

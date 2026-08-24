@@ -139,10 +139,24 @@ export async function bootMain(home: string): Promise<Main> {
       BrowserWindow: Object.assign(function () {
         return win
       }, { getAllWindows: () => [win] }),
-      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      // `showMessageBox` answers with the default button, which is what a
+      // person clicking through would do. Absent, `ui:unsaved` threw rather
+      // than returning - a channel the harness could not reach at all.
+      dialog: {
+        showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+        showMessageBox: async () => ({ response: 0 })
+      },
       Notification: { isSupported: () => false },
       screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },
-      shell: { openExternal: () => {} }
+      shell: { openExternal: () => {} },
+      // No keyring under a test runner. `secret.ts` says so out loud rather
+      // than pretending, and writes the token plainly - which is what a machine
+      // without a keyring does too.
+      safeStorage: {
+        isEncryptionAvailable: () => false,
+        encryptString: (s: string) => Buffer.from(s, 'utf8'),
+        decryptString: (b: Buffer) => b.toString('utf8')
+      }
     }
   })
   mock.module('node-pty', { namedExports: { spawn: fakeSpawn } })

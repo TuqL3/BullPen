@@ -1,5 +1,4 @@
 import {
-  DEFAULT_CAPABILITIES,
   HIRE_PARTY,
   HUMAN_PARTY,
   KNOWN_COLUMNS,
@@ -16,7 +15,13 @@ import {
  * arrows are the drawing; what they do to the work is the operator's to say.
  */
 const HOUSE = {
-  capabilities: DEFAULT_CAPABILITIES,
+  // Three, not four. Nothing on this floor decides whether work passed, and a
+  // word no role holds is a word nothing can name.
+  capabilities: [
+    { name: 'speaksToHuman', kind: 'speaksToHuman', what: 'may write to "you"' },
+    { name: 'assigns', kind: 'assigns', what: 'hands work out and may hire' },
+    { name: 'builds', kind: 'builds', what: 'does the work and reports when done' }
+  ],
   columns: KNOWN_COLUMNS,
   cardRules: [],
   words: {},
@@ -50,30 +55,39 @@ const HOUSE = {
 const DEFAULT_FLOOR: Workflow = {
   name: "default",
   description: "How work moves here.",
-  summary: "Everything enters through Michael, the boss: he reads the request, refuses what this floor cannot finish, and hands the rest to the data analyst. She owns the work from there - she collects, cleans, and analyses the data herself, and puts the marketing & sale worker on whatever legwork sits outside the analysis. A card opens when the boss hands the task over, moves to doing when the worker picks it up, and closes when the analyst reports the answer back up. The boss then tells the human, in his own words, and only then is the task finished - a worker saying it is built is not the same thing. Nobody skips a link: the router refuses a message that does not follow this chain and hands it back to the sender.",
+  summary: "Work arrives from the human at the boss, who is the only role that speaks to them. He reads it first - is this a question this floor can answer, is the source named, is there enough in it to start - and either tells the human it stops here or hands it to the data analyst, hiring one when nobody idle is left. The analyst pulls from the named sources, cleans on a copy, does the statistics the question needs, and when a piece of the work is legwork rather than analysis - cutting a report into segments, counting a campaign, reformatting an export - hands that one piece to the marketing & sale worker and waits for it back. Nothing on this floor decides whether work passed, so a card goes from pulling straight to written up, or sideways into stalled when the sources are unreachable or the records will not carry the question. The boss then puts the finding to the human in his own words - answered, blocked, or a decision that is theirs to make.",
   dispatch: "boss",
   entry: "boss",
   reuseBelowPct: 50,
   hireAbovePct: 70,
   human: "you",
   hire: "hire",
-  capabilities: DEFAULT_CAPABILITIES,
+  // Three, not four. Nothing on this floor decides whether work passed, and a
+  // word no role holds is a word nothing can name.
+  capabilities: [
+    { name: 'speaksToHuman', kind: 'speaksToHuman', what: 'may write to "you"' },
+    { name: 'assigns', kind: 'assigns', what: 'hands work out and may hire' },
+    { name: 'builds', kind: 'builds', what: 'does the work and reports when done' }
+  ],
+  // Named for the work, not for the app. `todo / doing / blocked / done` is a
+  // board saying nothing; this is a floor that answers questions with data,
+  // said in the words somebody doing that would use.
   columns: [
-    {"key":"todo","label":"todo","bar":"#a3e3ff","kind":"start"},
-    {"key":"doing","label":"doing","bar":"#e8cf6a","kind":"working"},
-    {"key":"blocked","label":"blocked","bar":"#e8917f","kind":"stuck"},
-    {"key":"done","label":"done","bar":"#7fd8a0","kind":"done"},
+    { key: 'asked', label: 'the question as asked', bar: '#a3e3ff', kind: 'start' },
+    { key: 'pulling', label: 'pulling and cleaning', bar: '#e8cf6a', kind: 'working' },
+    { key: 'stalled', label: "data won't carry it", bar: '#e8917f', kind: 'stuck' },
+    { key: 'reported', label: 'written up', bar: '#7fd8a0', kind: 'done' }
   ],
   // Worked out from the drawing by `drawnCardRules`, not written by hand: the
   // model wrote these once and put the sender's card on the move every time
   // work was handed over, so the person doing it never got a card at all.
   cardRules: [
-    { from: 'data_analyst', to: 'boss', status: 'done' },
-    { from: 'marketing_sale', to: 'data_analyst', status: 'done' },
+    { from: 'data_analyst', to: 'boss', status: 'reported' },
+    { from: 'marketing_sale', to: 'data_analyst', status: 'reported' },
     { from: 'boss', to: 'data_analyst', status: 'open' },
     { from: 'data_analyst', to: 'marketing_sale', status: 'open' },
     { from: 'you', to: 'boss', status: 'open' },
-    { from: 'boss', to: 'you', status: 'done' }
+    { from: 'boss', to: 'you', status: 'reported' }
   ],
   words: {},
   talksTo: {
@@ -85,7 +99,7 @@ const DEFAULT_FLOOR: Workflow = {
     boss: {
       label: "the boss",
       can: ["speaksToHuman", "assigns"],
-      does: "Takes what the human hands over, decides whether this floor can finish it, hands the rest to the data analyst, and reports back to the human how it went.",
+      does: "Takes the question the human hands over, decides whether this floor can answer it, hands it to the data analyst, and reports back to the human what came of it.",
       fixed: {"id":"michael","name":"Michael"},
       brief: [
         "You are Michael, and you stand in for the person running this floor. Work\nreaches you from them, and you are the only one here who answers to them.",
@@ -116,8 +130,8 @@ const DEFAULT_FLOOR: Workflow = {
     },
     data_analyst: {
       label: "data",
-      can: ["assigns", "builds", "checks"],
-      does: "Turns the boss's request into an answer - collects, cleans, and analyses the data, puts the marketing & sale worker on what needs doing, and reports the result to the boss.",
+      can: ["builds", "assigns"],
+      does: "Takes a question from the boss, pulls and cleans the data it names, hands any legwork to the marketing & sale worker, and writes up the answer for the boss.",
       hireable: true,
       brief: [
         "You are \"{{self.id}}\", the data analyst on this Bullpen floor, and you turn raw data from internal systems and outside sources into a report somebody can decide on - market conditions, project feasibility, whatever the question was. {{reportTo}}, the boss, hands you your work and answers to the person running the floor for it.",
@@ -200,7 +214,8 @@ You are {{self.name}}, and you stand in for the person running this floor.
 «what this one does, and what it must not do»
 
 Read $BULLPEN_FLOOR to see who is here and how full their context is. Reuse an
-idle agent under {{reuseBelowPct}}%; over {{hireAbovePct}}% treat them as busy.
+idle agent under {{reuseBelowPct}}%; at or over that, treat them as busy. An
+agent that is working takes nothing new - hire rather than wait for it.
 Hire when nobody fits:
 
 {"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "builder", "body": "<the task>"}

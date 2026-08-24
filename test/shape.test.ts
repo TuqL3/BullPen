@@ -115,14 +115,17 @@ test('a floor with nobody checking says so, and hands out its own work', () => {
   assert.equal(entryRole(), 'god')
 })
 
-test('tags name the unusual roles, and only those', () => {
+test('every role on the floor has a tag, and nothing else does', () => {
   setShape(CHAIN)
   // The article comes off: it reads mid-sentence in a refusal, not on a row.
   assert.equal(roleTag('god'), 'boss')
   assert.equal(roleTag('tester'), 'tester')
-  // Whoever builds is the unremarkable case - tagging every row tags none.
-  assert.equal(roleTag('dev'), null)
-  assert.equal(roleTag('nobody'), null)
+  // Whoever builds used to be left blank, on the grounds that most of a floor
+  // builds. On a chain four deep that left the developer's row saying only
+  // which directory it was in - which is the one thing every row on that
+  // project already says.
+  assert.equal(roleTag('dev'), 'developer')
+  assert.equal(roleTag('nobody'), null, 'a role this floor does not have has no tag')
 })
 
 test('the floor is found by role, and an absent one is undefined not a guess', () => {

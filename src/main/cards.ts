@@ -44,6 +44,33 @@ export function routeCard(
   // goes. Parking it in wait_test on such a floor leaves it there forever.
   const checked = rolesWith(w, 'checks').length > 0
 
+  /**
+   * Somebody saying they are stuck has not finished.
+   *
+   * A rule is about a pair and nothing else, so one line carries every message
+   * between those two - and a worker reporting to whoever handed the task out
+   * sends "done: ..." and "blocked: ..." down exactly the same line. The rule
+   * says `done`, so both landed in the finished column: the board read as work
+   * delivered while the agent behind it was waiting on an answer, which is the
+   * one failure a board exists to prevent.
+   *
+   * `said` already knows these words - it is what moves a card on a floor that
+   * wrote no rules at all - but it only runs when nothing matched. The rule
+   * still decides which column work goes to; this decides that this particular
+   * message was not that.
+   *
+   * Hoisted out of the loop body because the one line it did not cover was the
+   * last one: reporting to the human returns before the loop body gets this
+   * far, so a boss writing "blocked: the human has to decide this" closed its
+   * own card as shipped - on the one hand-off the operator actually reads.
+   */
+  const stuckInstead = (status: string): string | null =>
+    status === columnFor(w, 'done') &&
+    hasColumn(w, 'stuck') &&
+    /^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(msg.subject)
+      ? columnFor(w, 'stuck')
+      : null
+
   // What the floor wrote, or - when it wrote nothing - what the roles and the
   // board already imply. A drawing with boxes and arrows on it moves cards
   // without anybody writing a rule; writing one takes over completely.
@@ -59,8 +86,9 @@ export function routeCard(
     // human is not an agent - no role to match, and no card of their own.
     if (rule.to === human) {
       if (msg.to !== human) continue
-      if (!w.columns.some((c) => c.key === rule.status)) continue
-      return { kind: 'move', agent: msg.from, status: rule.status }
+      const where = stuckInstead(rule.status) ?? rule.status
+      if (!w.columns.some((c) => c.key === where)) continue
+      return { kind: 'move', agent: msg.from, status: where }
     }
     if (msg.to === human) continue
     if (!matches(w, toRole, rule.to)) continue
@@ -79,6 +107,9 @@ export function routeCard(
     if (rule.status === 'closes') return { kind: 'checked', agent: msg.from, subject: msg.subject }
     // Whose card the line moves: the sender's, or the one being written to.
     const agent = rule.whose === 'to' ? msg.to : msg.from
+
+    const held = stuckInstead(rule.status)
+    if (held) return { kind: 'move', agent, status: held }
     // The one place a rule is overruled: the column work waits in to be
     // checked is not somewhere to leave a card on a floor where nobody checks.
     if (hasColumn(w, 'waiting') && rule.status === columnFor(w, 'waiting') && !checked) {

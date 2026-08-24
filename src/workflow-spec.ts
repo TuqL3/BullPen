@@ -47,9 +47,19 @@ export type Capability = string
 
 
 
-/** The two addresses that are not roles. */
+/** The addresses that are not roles. */
 export const HUMAN_PARTY = 'you'
 export const HIRE_PARTY = 'hire'
+/**
+ * The task list.
+ *
+ * Not renameable, unlike the other two. `you` and `hire` are words a floor
+ * writes in its own briefs and may say differently; this one is only ever
+ * written by the house rules the app appends to every brief, so a floor has
+ * nothing to gain by calling it something else and everything to lose by
+ * disagreeing with the sentence its agents were handed.
+ */
+export const BOARD_PARTY = 'board'
 
 /** `- key:` lines the parser reads inside a role. */
 export const ROLE_FIELDS = ['agent', 'can', 'does', 'talks to'] as const
@@ -72,6 +82,29 @@ export function generatorBrief(rules: string, example = ''): string {
   return [
     'You write Bullpen workflow files. A workflow describes a floor of AI agents: who exists, who may write to whom, and what each is told when it starts.',
     'Answer with the markdown file and nothing else - no fences, no preamble, no explanation.',
+    // The description is typed by whoever is running the floor, in whatever
+    // language they think in, and a floor they cannot read is a floor they
+    // cannot correct - the briefs are most of the file and all of the part
+    // that decides how the floor behaves.
+    //
+    // So the split is by who reads the line rather than by language. Some of
+    // this file is matched as a string: the parser's own field names, the
+    // bracket that says which of the four a capability behaves like, the key a
+    // card is stored under, and the two words an agent starts a report with.
+    // Those are wire words - they are English the way a column key is English,
+    // and translating one silently stops it matching. Everything else is read
+    // by a person, and belongs in the person's language.
+    [
+      'THE LANGUAGE OF THE FILE',
+      'Write everything a person reads in the language the request came in. The name, the description, role labels, `- does:`, capability names, column labels, the ` · when <why>` on a card rule, and every brief: the operator\'s language, whatever that is.',
+      'Keep these in English, because they are matched as text rather than read:',
+      '- The field and section names themselves - `## capabilities`, `## roles`, `## board`, `## card rules`, `## briefs`, `- can:`, `- talks to:`, `- does:`, `- agent:`, `- cli:`, `- cwd:`, `- dispatch`, `- entry`, `- hireable`, `- reuse below:`, `- hire above:`.',
+      '- The kind in brackets after a capability: `(speaksToHuman)`, `(assigns)`, `(builds)`, `(checks)`.',
+      '- The purpose in brackets after a column: `(start)`, `(working)`, `(waiting)`, `(stuck)`, `(done)`.',
+      '- Column **keys**, and the `opens a card` / `closes it` a card rule can say. A card is stored under its key and a rule is matched against it, so both are ASCII and English: `- asked: câu hỏi đã nhận #a3e3ff (start)` is a key the board can store and a label the operator can read.',
+      '- The two words a report starts with, `done:` and `fail:`. Those are how a finished task comes off the board and how a blocked one is told apart from a finished one. Say so in the briefs in the operator\'s own language - "báo cáo mở đầu bằng `done:` khi xong và `fail:` khi tắc" - but never translate the two words themselves.',
+      '- Role ids, and the two addresses `you` and `hire`. Ids are directory names and are written into every message: `[a-z0-9-]` only, no accents.'
+    ].join('\n'),
     'These are the rules the file is checked against. Everything you may write is declared below; a line the rules do not name is refused, not ignored.',
     rules,
     [
@@ -84,7 +117,7 @@ export function generatorBrief(rules: string, example = ''): string {
       'The rules above say what may be written, not what has to be. These do:',
       '- Every role names at least one capability on `- can:` and at least one address on `- talks to:`. A role that writes to nobody cannot be part of anything.',
       '- `## capabilities` names each capability used, with what it is for.',
-      '  Two of them are the same on every floor and keep their names: `speaksToHuman` for whoever answers the person running it, and `assigns` for whoever hands work out. Every other one is named for the work *this* floor does - `dieu-tra`, `viet-kich-ban`, `reads-the-diff` - and never `builds` or `checks`, which say nothing about what anybody here actually does. Two floors that do different work should not come out holding the same four words.',
+      '  Two of them are the same on every floor and keep their names: `speaksToHuman` for whoever answers the person running it, and `assigns` for whoever hands work out. Every other one is named for the work *this* floor does - `investigates`, `writes-the-script`, `reads-the-diff` - and never `builds` or `checks`, which say nothing about what anybody here actually does. Two floors that do different work should not come out holding the same four words.',
       '  Every one of them says in brackets which of the four it behaves like: `- viet-code (builds) — writes the code that ships`. The name is yours and the bracket is the machine\'s - the app asks "who hands work out", "who does it", "who decides it passed" and "who answers the human" of every floor there is, and a capability that answers none of them leaves the role holding it classified as whatever is left over. That is not a small thing: a floor whose analyst had no bracket came out with the analyst treated as a builder, hired for build work, and shown on the roster with no idea what they were for.',
       '  `speaksToHuman` is `(speaksToHuman)` and `assigns` is `(assigns)`. Whoever turns a request into work for somebody else is `(assigns)` too, whatever the floor calls them. Whoever decides work passed is `(checks)`. Everything left is `(builds)`.',
       '  `(checks)` is *decides the finished work passed*, and nothing else. Sizing a request, judging whether it can be built, deciding whether to start at all - those happen before anybody works, and they are `(assigns)`. A floor that marked its analyst `(checks)` for judging feasibility gave the analyst the power to close cards, and the card rules written from it sent work handed *down* back *up*.',

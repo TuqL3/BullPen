@@ -10,6 +10,7 @@ import {
 import { join } from 'node:path'
 import { lawOn, type Rules } from '../rules.ts'
 import {
+  BOARD_PARTY,
   CAPABILITY_KINDS,
   HIRE_PARTY,
   HUMAN_PARTY,
@@ -606,11 +607,86 @@ export function drawnCardRules(w: Workflow): CardRule[] {
     for (const to of tos) {
       if (!w.roles[to] || to === from) continue
       if (taken.has(`${from}\u0000${to}`)) continue
-      if (far(to) > far(from)) add(from, to, 'open')
+      // Away from the operator, or level with them, work is being handed over.
+      // Only a line that goes back *up* is a report. Level counted as a report
+      // before, so two workers drawn side by side had the one who passed work
+      // across marked as having finished it.
+      if (far(to) >= far(from)) add(from, to, 'open')
       else if (has('done')) add(from, to, col('done'))
     }
   }
   return out
+}
+
+/** Whether what came back is a board at all: keys of its own, a start, an end. */
+/**
+ * A file with its `## card rules` section taken out.
+ *
+ * `write it` throws the model's rules away either way - the drawing decides
+ * what a message does to a card - but the file was parsed before that happened,
+ * and a model asked to leave the section alone copies the old rules back. Those
+ * name the stages of the board it was in the same breath asked to replace, so
+ * the whole file refused to read: `"done" is not a column on this board`.
+ *
+ * Its heading and every line under it, up to the next heading or the end.
+ */
+export const withoutCardRules = (markdown: string): string =>
+  markdown.replace(/^##[ \t]+card rules\b[^\n]*\n(?:(?!^##[ \t])[^\n]*\n?)*/im, '')
+
+export function isBoard(columns: Workflow['columns']): boolean {
+  if (columns.length < 2) return false
+  const keys = new Set(columns.map((c) => c.key))
+  if (keys.size !== columns.length) return false
+  if (columns.some((c) => !/^[\w-]+$/.test(c.key) || !c.label.trim())) return false
+  return columns.some((c) => c.kind === 'start') && columns.some((c) => c.kind === 'done')
+}
+
+/**
+ * What the floor no longer needs, taken out.
+ *
+ * A file grows things nobody uses and nothing says so: a capability declared
+ * and held by no role, a column no rule can move a card into. Neither breaks
+ * anything, which is why they survive every edit - and a floor read by
+ * somebody new is read as though every line in it is load-bearing.
+ *
+ * Four kinds stay whatever the rules say, because a card reaches them without
+ * one: work lands in `start`, handing it over moves the sender to `working`, a
+ * blocked report is read off the subject into `stuck`, and `done` is where
+ * anything ends.
+ */
+export function trimmed(w: Workflow): Workflow {
+  const held = new Set(Object.values(w.roles).flatMap((r) => r.can))
+  // A rule sends a card to a column by key, and a board can be rewritten under
+  // it - renamed by hand, or written again for the work this floor actually
+  // does. What is left is a rule naming a stage that is not there, and it does
+  // not fail quietly: `toMarkdown` writes the key it was given, and the file it
+  // wrote will not read back - `"done" is not a column on this board`.
+  const keys = new Set(w.columns.map((c) => c.key))
+  const cardRules = w.cardRules.filter(
+    (r) => r.status === 'open' || r.status === 'closes' || keys.has(r.status)
+  )
+  const reached = new Set(cardRules.map((r) => r.status))
+  // The four a card reaches without a rule naming it: work lands in `start`,
+  // handing it over moves the sender to `working`, a blocked report is read
+  // off the subject into `stuck`, and `done` is where anything ends. One of
+  // each, because everything that asks "where does work in progress go" takes
+  // the first - so a second column of the same kind is a stage no card can
+  // reach unless a rule names it outright.
+  const first = new Set<string>()
+  const structural = (c: Workflow['columns'][number]): boolean => {
+    if (c.kind !== 'start' && c.kind !== 'working' && c.kind !== 'stuck' && c.kind !== 'done') {
+      return false
+    }
+    if (first.has(c.kind)) return false
+    first.add(c.kind)
+    return true
+  }
+  return {
+    ...w,
+    cardRules,
+    capabilities: w.capabilities.filter((c) => held.has(c.name)),
+    columns: w.columns.filter((c) => structural(c) || reached.has(c.key))
+  }
 }
 
 export const can = (w: Workflow, role: string, kind: CapabilityKind): boolean =>
@@ -669,16 +745,26 @@ export type Candidate = { id: string; role: string; idle: boolean; ctxPct?: numb
 /**
  * Who takes a task handed to a role rather than to a person.
  *
- * The floor's own two numbers decide, the same ones the briefs quote: an idle
- * agent under `hireAbovePct` can take it, emptiest window first, and anything
- * at or over that is treated as busy even when it is sitting there. Nobody
- * eligible is not an error - it means hire, which is the caller's job.
+ * Only somebody idle and under `reuseBelowPct` - the floor's "give it to one
+ * under" number - takes work, emptiest window first. An agent mid-turn is not
+ * a candidate at any reading: interrupting one to stack a second task on it is
+ * how a floor loses the first. Anything at or over the number is treated the
+ * same as busy. Nobody eligible is not an error - it means hire, which is the
+ * caller's job.
+ *
+ * `hireAbovePct` is the ceiling the briefs quote and the wizard shows, and on
+ * a floor that ordered its two numbers it is the wider of them - so the lower
+ * of the pair is the one that decides. Taken as the lower rather than assumed
+ * to be `reuseBelowPct`, because `thresholds-ordered` is a law a floor may
+ * ship without: reuse 90 over hire 10 would otherwise hand work to an agent
+ * the same floor calls unavailable.
  *
  * An agent with no reading yet has not completed a turn, which is empty rather
  * than full: a fresh hire must be usable on the turn after it is made.
  */
 export function pickForRole(w: Workflow, role: string, staff: Candidate[]): string | null {
-  const free = staff.filter((a) => a.role === role && a.idle && (a.ctxPct ?? 0) < w.hireAbovePct)
+  const ceiling = Math.min(w.reuseBelowPct, w.hireAbovePct)
+  const free = staff.filter((a) => a.role === role && a.idle && (a.ctxPct ?? 0) < ceiling)
   if (!free.length) return null
   const emptiest = [...free].sort((a, b) => (a.ctxPct ?? 0) - (b.ctxPct ?? 0))
   return emptiest[0].id
@@ -982,7 +1068,10 @@ export function lint(w: Workflow, rules?: Rules): string[] {
 
   if (on('addresses-are-not-roles')) {
     if (w.human === w.hire) bad.push('The human and hiring cannot share one address.')
-    for (const address of [w.human, w.hire]) {
+    // `BOARD_PARTY` with them: the router checks the reserved names before it
+    // looks for an agent, so a role called `board` is a role nothing can reach
+    // and every message meant for it lands on the task list instead.
+    for (const address of [w.human, w.hire, BOARD_PARTY]) {
       if (w.roles[address]) bad.push(`"${address}" is both a role and a reserved address.`)
     }
   }

@@ -4,6 +4,7 @@ import {
   anchor,
   edges,
   freeRoleId,
+  shapeKey,
   fillRules,
   ruled,
   firing,
@@ -34,31 +35,6 @@ import { LABEL, MONO } from './theme'
  * and what gets written is still the same markdown file, because that is what
  * the router reads and what you would hand to somebody else.
  */
-/**
- * The part of a floor its card rules are about: who is on it, and who writes to
- * whom. Sorted, because a line drawn and drawn again arrives in a different
- * order and means the same thing.
- */
-const shapeKey = (w: WorkflowInfo | null): string =>
-  !w
-    ? ''
-    : JSON.stringify({
-        // What each one is called and what it may do, not only who it writes
-        // to. A role given a capability it did not have is a role whose brief
-        // is now about the wrong job, and the file was left saying the old one
-        // because nothing here had moved.
-        roles: Object.entries(w.roles)
-          .map(([id, def]) => [id, def.label, [...(def.can ?? [])].sort().join(',')].join('·'))
-          .sort(),
-        dispatch: w.dispatch,
-        entry: w.entry,
-        talksTo: Object.fromEntries(
-          Object.entries(w.talksTo)
-            .map(([from, tos]) => [from, [...tos].sort()] as const)
-            .sort(([a], [b]) => a.localeCompare(b))
-        )
-      })
-
 export function OrgChart({
   workflow,
   onDirty
@@ -82,6 +58,26 @@ export function OrgChart({
    * be spotted by reading either one on its own.
    */
   const [ruledAt, setRuledAt] = useState(() => shapeKey(workflow))
+  /**
+   * The floors that come with Bullpen rather than off disk.
+   *
+   * One of them is running the first time the app opens, and it is not written
+   * over: main refuses the save and says to give it another name. The buttons
+   * that lead there were on the bar anyway - `write it` exists to unblock a
+   * save, and there is no save on this floor to unblock - so the one press an
+   * operator was offered on the floor they start on was the one press that
+   * could not finish.
+   */
+  const [shipped, setShipped] = useState<string[]>([])
+  useEffect(() => {
+    let live = true
+    window.bullpen.workflowList().then((all) => {
+      if (live) setShipped(all.filter((w) => w.builtin).map((w) => w.name))
+    })
+    return () => {
+      live = false
+    }
+  }, [])
   const [nodes, setNodes] = useState<ChartNode[]>([])
   /**
    * What is open, and where.
@@ -238,6 +234,8 @@ export function OrgChart({
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved) || fileEdited
   /** Whether the rules are about the floor as it is now drawn. */
   const rulesStale = shapeKey(draft) !== ruledAt
+  /** Whether this floor is one of Bullpen's own, and so not written over. */
+  const readOnly = shipped.includes(draft.name)
   /** Whether what is drawn is what the app is running. */
   const running = draft.name === workflow?.name && JSON.stringify(draft) === JSON.stringify(workflow)
   // Reported up so the dialog around this can refuse to be dismissed over an
@@ -267,10 +265,19 @@ export function OrgChart({
     // only let the press through: the panel opened over a canvas still holding
     // every edit, with `undo` beside it and the floor still reading `unsaved` -
     // so the answer given was "lose them" and nothing was lost.
-    if (based && saved) {
-      setDraft(saved)
-      relayout(saved)
-      setRuledAt(shapeKey(saved))
+    //
+    // Back to the last written version of this floor, or - on one that has
+    // never been written, a blank or one the model has just drawn - back to the
+    // floor the app is running. That second case was left out, so answering
+    // "lose them" on a new floor kept every line of it: the panel opened, the
+    // canvas still held the new floor, and `write it` was still lit over it.
+    const back = based && saved ? saved : workflow
+    if (back) {
+      setDraft(back)
+      setSaved(back)
+      setBased(true)
+      relayout(back)
+      setRuledAt(shapeKey(back))
       setFileEdited(false)
     }
     return true
@@ -871,6 +878,14 @@ const STARTING_BRIEF = [
             two that have to agree.
 
             `?` went with it: four lines of instruction that are read once. */}
+        {/* Before the buttons, not after: it is a sentence about the floor, and
+            reading it on the far side of the presses it explains put the answer
+            after the question. */}
+        {readOnly && (
+          <span style={{ color: 'var(--faint)' }}>
+            ships with Bullpen — rename it in the file to keep changes
+          </span>
+        )}
         {/* Asked on the way in, not on the way out. Everything in this panel -
             picking one off the list, describing a new one, starting a blank -
             replaces what is on the canvas, so the question belongs to opening
@@ -912,6 +927,31 @@ const STARTING_BRIEF = [
             }}
           >
             undo
+          </button>
+        )}
+        {/* On the bar, lit, and in the way of everything downstream.
+            It sat in the file column's heading beside `save`, which put the
+            press that reconciles the floor at the far edge of the screen from
+            the drawing that had just been changed - and the two buttons a foot
+            apart read as a pair of alternatives rather than as an order.
+            Everything the router acts on is behind it: move a line, type a
+            rule, rename a column, and this is what makes the drawing and the
+            file say the same thing again. It says it by writing the rules the
+            drawing gives, so a rule typed by hand is answered, not kept. */}
+        {rulesStale && !readOnly && (
+          <button
+            style={{ ...S.btn, ...S.btnGo }}
+            disabled={applying || writing}
+            title="write every brief, the rules and the summary again to match the drawing"
+            onClick={redraft}
+          >
+            {writing ? (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <Spinner /> writing the floor…
+              </span>
+            ) : (
+              'write it'
+            )}
           </button>
         )}
         {/* Two presses, not one. Saving writes the file; this is the one that
@@ -1343,41 +1383,7 @@ const STARTING_BRIEF = [
               disk, and this is its heading. */}
           <div style={S.sideHead}>
             <span style={{ ...LABEL, color: 'var(--faint)', flex: 1 }}>the whole file</span>
-            {/* Two presses, and the file in between them.
-                One press wrote the whole floor with the model and put it on
-                disk in the same go, so what an operator read afterwards was
-                already saved - and the model rewrites every brief on the
-                floor. Write it, read it, then keep it. */}
-            {/* Always offered, lit only when the drawing has moved past what is
-                written. It appeared on the change and vanished otherwise, so a
-                floor whose file you simply wanted written again had no button
-                anywhere - and the way to get one back was to move a box and
-                move it back. */}
-            <button
-              style={{
-                ...S.btn,
-                ...(rulesStale ? S.btnGo : {}),
-                height: 18,
-                padding: '0 8px',
-                fontSize: 11
-              }}
-              disabled={applying || writing}
-              title={
-                rulesStale
-                  ? 'the drawing has moved - write every brief, the rules and the summary again to match it'
-                  : 'write every brief, the rules and the summary again from the drawing'
-              }
-              onClick={redraft}
-            >
-              {writing ? (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <Spinner /> writing the floor…
-                </span>
-              ) : (
-                'write it'
-              )}
-            </button>
-            {dirty && !rulesStale && (
+            {dirty && !rulesStale && !readOnly && (
               <button
                 style={{ ...S.btn, ...S.btnGo, height: 18, padding: '0 8px', fontSize: 11 }}
                 disabled={applying || writing}
@@ -1416,6 +1422,15 @@ const STARTING_BRIEF = [
                       // what the save button should be saying.
                       if (written) setSaved(w)
                       setBased(written)
+                      // Its rules are about it. `ruledAt` was left holding the
+                      // shape of the floor this one replaced, so a floor the
+                      // model had just written - rules and all - read as stale
+                      // the moment it landed: `write it` lit on the bar over a
+                      // drawing nobody had touched, `save` hidden behind it,
+                      // and the one press offered was a paid round-trip to have
+                      // the same rules written again. Staleness starts at the
+                      // first edit, not at the open.
+                      setRuledAt(shapeKey(w))
                       relayout(w)
                       setPanel(null)
                     }}
@@ -1793,12 +1808,12 @@ function Summary({
         {num(
           'give it to one under',
           'reuseBelowPct',
-          'work goes to whoever is free - how much of its window an idle one may already have used and still take it'
+          'work goes to whoever is idle - how much of its window one may already have used and still take it. At or over this, somebody new is hired instead, and an agent mid-turn is never given a second task however empty its window'
         )}
         {num(
           'hire past',
           'hireAbovePct',
-          'past this much of its window a role counts as unavailable even when idle, and somebody new is hired'
+          'the ceiling the briefs quote. Work is handed out on "give it to one under", so this only bites when it is the lower of the two'
         )}
       </div>
 

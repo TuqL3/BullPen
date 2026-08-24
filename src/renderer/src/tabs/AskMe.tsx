@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Avatar } from '../Avatar'
 import { LABEL, MONO } from '../theme'
 import type { Question } from '../../../preload/index'
@@ -28,6 +28,21 @@ export function AskMe({
   onOpenTerminal: (id: string) => void
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({})
+  /**
+   * What has already been asked, and what was said back.
+   *
+   * Answering used to delete the question, so the queue was only ever the
+   * present tense: what had been decided an hour ago was unknowable, and two
+   * agents could be told opposite things a day apart with nothing to check
+   * against. Fetched rather than pushed - it changes when `questions` does,
+   * and nobody watches this list for live updates.
+   */
+  const [past, setPast] = useState<Question[]>([])
+  const [showPast, setShowPast] = useState(false)
+  useEffect(() => {
+    window.bullpen.askHistory().then(setPast)
+  }, [questions.length, approvals.length])
+  const dealtWith = past.filter((q) => q.answeredAt || q.dismissedAt)
 
   const agentOf = (id: string) => agents.find((a) => a.id === id)
   const nameOf = (id: string) => agentOf(id)?.name ?? id
@@ -133,6 +148,37 @@ export function AskMe({
           </div>
         )
       })}
+
+      {/* Under the queue, folded away. What is waiting is the reason to open
+          this tab; what has been dealt with is the reason to keep it. */}
+      {dealtWith.length > 0 && (
+        <div style={{ marginTop: nothing ? 0 : 14 }}>
+          <button style={S.linkBtn} onClick={() => setShowPast((v) => !v)}>
+            {showPast ? '▾' : '▸'} {dealtWith.length} already answered
+          </button>
+          {showPast &&
+            dealtWith.map((q) => (
+              <div key={`past-${q.id}`} style={{ ...S.card, borderColor: 'var(--line)', opacity: 0.85 }}>
+                <div style={S.head}>
+                  <Avatar id={agentOf(q.from)?.face ?? q.from} shirt={agentOf(q.from)?.color} size={22} />
+                  <span style={{ ...LABEL, color: 'var(--muted)' }}>{nameOf(q.from)}</span>
+                  <span style={{ flex: 1, color: 'var(--muted)' }}>{q.subject}</span>
+                  <span style={{ ...LABEL, color: 'var(--faint)' }}>
+                    {new Date(q.answeredAt ?? q.dismissedAt ?? q.ts).toLocaleString()}
+                  </span>
+                </div>
+                <pre style={{ ...S.body, color: 'var(--muted)' }}>{q.body}</pre>
+                {q.answeredAt ? (
+                  <pre style={{ ...S.body, borderLeft: '2px solid var(--ok)', color: 'var(--ink)' }}>
+                    {q.answer}
+                  </pre>
+                ) : (
+                  <div style={{ color: 'var(--faint)' }}>Waved away without an answer.</div>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
 
       {!nothing && (
         <p style={S.note}>

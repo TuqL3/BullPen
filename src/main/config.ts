@@ -52,6 +52,15 @@ export type Config = {
    * this pair of eyes - the same floor on a different screen wants a different
    * font size, and the workflow is the thing you would hand to somebody else.
    */
+  /**
+   * Where this machine syncs to, and what it calls itself when it gets there.
+   *
+   * The gist id is not a secret - it is half a URL - and the token is not here
+   * at all: it goes through `safeStorage` into a file of its own, because this
+   * one is read and rewritten by half the app and is the first thing anybody
+   * would paste into a bug report.
+   */
+  sync?: { gist?: string; machine?: string; user?: string }
   ui?: {
     fontSize?: number
     floor?: string
@@ -121,6 +130,21 @@ export function readConfig(home: string): Config {
     // survived a reload and not a restart - it came back as the default chain
     // with no error anywhere, looking like the apply had never happened.
     if (raw.workflow !== undefined) out.workflow = raw.workflow
+    const sync = raw.sync
+    if (sync && typeof sync === 'object') {
+      const gist = typeof sync.gist === 'string' && /^[0-9a-f]{6,}$/i.test(sync.gist) ? sync.gist : undefined
+      const machine = typeof sync.machine === 'string' && sync.machine.trim() ? sync.machine.trim() : undefined
+      // The GitHub login the token belongs to, remembered so the dialog can
+      // say who is signed in without a round trip every time it opens.
+      const user = typeof sync.user === 'string' && sync.user.trim() ? sync.user.trim() : undefined
+      if (gist || machine || user) {
+        out.sync = {
+          ...(gist ? { gist } : {}),
+          ...(machine ? { machine } : {}),
+          ...(user ? { user } : {})
+        }
+      }
+    }
     const ui = raw.ui
     if (ui && typeof ui === 'object') {
       const size = typeof ui.fontSize === 'number' && Number.isFinite(ui.fontSize) ? ui.fontSize : undefined

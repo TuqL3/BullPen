@@ -11,10 +11,15 @@ export type ActivityItem = {
 export type Question = {
   id: string
   from: string
-  to: string
+  to?: string
   subject: string
   body: string
   ts: number
+  /** Set once the human replied. Absent while it is still waiting. */
+  answeredAt?: number
+  answer?: string
+  /** Waved away rather than answered. Still worth having been asked. */
+  dismissedAt?: number
 }
 
 /** A call that came in: accepted, or refused with the reason as its subject. */
@@ -202,12 +207,30 @@ const api = {
     role?: string
   }) => ipcRenderer.invoke('agent:spawn', spec),
   kill: (id: string) => ipcRenderer.invoke('agent:kill', id),
+  /**
+   * Bring one back up under the same id, somewhere else or on another model.
+   * A CLI reads both once at startup, so either is a restart - the conversation
+   * does not survive it.
+   */
+  restart: (spec: {
+    id: string
+    cwd: string
+    cmd?: string
+    args?: string[]
+    cols?: number
+    rows?: number
+    role?: string
+  }) => ipcRenderer.invoke('agent:restart', spec),
+  /** Off the roster for good: drop its cards, schedules, context rule and queue. */
+  forget: (id: string): Promise<boolean> => ipcRenderer.invoke('agent:forget', id),
 
   write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
   /** Type a prompt and submit it - see submitPrompt in main for why not write(). */
   submit: (id: string, text: string) => ipcRenderer.invoke('agent:submit', id, text),
   resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
   onData: (fn: (id: string, chunk: string) => void) => on('pty:data', fn),
+  /** What this agent already printed, for a terminal buffer that has just opened. */
+  backlog: (id: string): Promise<string> => ipcRenderer.invoke('pty:backlog', id),
   onExit: (fn: (id: string, code: number) => void) => on('agent:exit', fn),
   onTrust: (fn: (id: string, sandbox: string) => void) => on('agent:trust', fn),
   onStatus: (fn: (id: string, status: 'working' | 'idle') => void) => on('agent:status', fn),
@@ -235,9 +258,12 @@ const api = {
   askList: (): Promise<Question[]> => ipcRenderer.invoke('ask:list'),
   askAnswer: (qid: string, answer: string) => ipcRenderer.invoke('ask:answer', qid, answer),
   askDismiss: (qid: string) => ipcRenderer.invoke('ask:dismiss', qid),
+  /** Everything ever asked, answers and all, newest first. */
+  askHistory: (): Promise<Question[]> => ipcRenderer.invoke('ask:history'),
   onAsk: (fn: (qs: Question[]) => void) => on('ask:pending', fn),
   /** The god agent's last progress report. Not a question - nothing is owed. */
-  lastReport: (): Promise<Report | null> => ipcRenderer.invoke('report:last'),
+  /** Every report this session, newest first. */
+  reports: (): Promise<Report[]> => ipcRenderer.invoke('report:list'),
   onReport: (fn: (r: Report) => void) => on('report:new', fn),
   /** What the operator last dispatched, in their own words. */
   lastDispatch: (): Promise<Dispatch | null> => ipcRenderer.invoke('dispatch:last'),
@@ -385,6 +411,50 @@ const api = {
     error?: string
   }> => ipcRenderer.invoke('workflow:save', markdown),
   /** Keep one without running it. */
+  /**
+   * The same floors on the other machine, through a secret gist.
+   *
+   * Three presses and no daemon: a sync that runs on its own overwrites work
+   * while somebody is in the middle of it, and last-write-wins has no opinion
+   * about who was typing.
+   */
+  syncStatus: (): Promise<{
+    gist: string
+    machine: string
+    hasToken: boolean
+    /** The GitHub login the token belongs to, as last known. */
+    user: string
+    keyring: boolean
+    canSignIn: boolean
+    floors: number
+  }> => ipcRenderer.invoke('sync:status'),
+
+  /**
+   * Sign in to GitHub without a server: this hands back the code to show, and
+   * `awaitSignIn` blocks until it has been typed in at github.com. Two calls
+   * because the code has to be on screen while the waiting happens.
+   */
+  signIn: (): Promise<{ userCode?: string; url?: string; expires?: number; error?: string }> =>
+    ipcRenderer.invoke('sync:signIn'),
+
+  awaitSignIn: (): Promise<{ ok?: true; error?: string }> => ipcRenderer.invoke('sync:wait'),
+
+  /** Who the stored token belongs to, straight from GitHub. */
+  whoAmI: (): Promise<{ login?: string; error?: string }> => ipcRenderer.invoke('sync:whoami'),
+
+  setSync: (next: { token?: string; machine?: string }): Promise<{ ok: true }> =>
+    ipcRenderer.invoke('sync:set', next),
+
+  /** Read what is up there, and let the clock decide which way it goes. */
+  syncNow: (): Promise<{
+    went?: 'up' | 'down'
+    from?: string
+    at?: number
+    floors?: number
+    dropped?: string[]
+    error?: string
+  }> => ipcRenderer.invoke('sync:now'),
+
   deleteWorkflow: (name: string): Promise<{ ok?: boolean; error?: string }> =>
     ipcRenderer.invoke('workflow:delete', name),
   /**
@@ -499,6 +569,12 @@ const api = {
   setTaskStatus: (id: string, status: string) => ipcRenderer.invoke('board:setTaskStatus', id, status),
   tasks: (id?: string) => ipcRenderer.invoke('board:tasks', id),
   addTask: (id: string, text: string) => ipcRenderer.invoke('board:addTask', id, text),
+  /** Confirm a card is work: the agent is started on it, and on what follows. */
+  /** What this agent is on when no flag says: its CLI's config, else its own
+   *  startup banner. Null when neither answers. */
+  configModel: (id: string, cmd: string, cwd: string): Promise<string | null> =>
+    ipcRenderer.invoke('agent:configModel', id, cmd, cwd),
+  releaseTask: (id: string) => ipcRenderer.invoke('board:release', id),
   removeTask: (id: string) => ipcRenderer.invoke('board:removeTask', id),
   triggers: (id?: string) => ipcRenderer.invoke('board:triggers', id),
   addTrigger: (id: string, prompt: string, mins: number) =>
@@ -547,6 +623,15 @@ const api = {
   }): Promise<{ fontSize: number; floor: string }> => ipcRenderer.invoke('ui:setPrefs', next),
   notify: (): Promise<boolean> => ipcRenderer.invoke('ui:notify'),
   setNotify: (on: boolean): Promise<boolean> => ipcRenderer.invoke('ui:setNotify', on),
+
+  /**
+   * Show one now, whatever the switch says and whoever has focus.
+   *
+   * The switch above turns them off; it cannot tell you whether they were ever
+   * arriving. On macOS they are refused per-app in System Settings, and a
+   * refused notification is indistinguishable from one nobody sent.
+   */
+  notifyTest: (): Promise<{ ok?: true; error?: string }> => ipcRenderer.invoke('ui:notifyTest'),
   /** A notification was clicked: show this tab, and this agent if it names one. */
   onGoto: (fn: (tab: string, id: string | null) => void) => on('ui:goto', fn)
 }

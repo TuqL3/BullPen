@@ -27,6 +27,15 @@ export type Agent = {
    * is wired up. What you can type at it depends on this, not on Bullpen.
    */
   cli?: string
+  /**
+   * The extra arguments it was started with - `--model`, and anything else.
+   *
+   * Kept because a restart re-spawns the process, and one that came back on a
+   * different model than it went down on is an agent whose answers changed for
+   * a reason nobody can see. It is also where the model lives: the CLI takes
+   * `--model` and there is no separate field for it.
+   */
+  args?: string[]
   pid: number
   status: 'running' | 'exited'
   /** Set when a mail or approval arrives; drives the badge, and later the avatar. */
