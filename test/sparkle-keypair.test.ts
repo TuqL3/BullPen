@@ -66,9 +66,15 @@ test('a key Sparkle would not accept is refused rather than half-read', () => {
   // public key ships inside the app and rejects every update it is offered.
   assert.throws(() => publicKeyFromPrivate(''), /is empty/)
   assert.throws(() => publicKeyFromPrivate('   '), /is empty/)
-  assert.throws(() => publicKeyFromPrivate('SUPublicEDKey'), /decodes to 9 bytes/)
+  // "9 bytes" is what an earlier version of this said, and it was a number
+  // node invented by dropping the characters it did not like. This is not
+  // base64 at all, and saying so is the honest answer.
+  assert.throws(() => publicKeyFromPrivate('SUPublicEDKey'), /not valid base64/)
   assert.throws(() => publicKeyFromPrivate(b64(randomBytes(48))), /Sparkle accepts 32, 64, 96/)
-  assert.throws(() => publicKeyFromPrivate('a'.repeat(102)), /Sparkle accepts 32, 64, 96/)
+  // 102 characters was measured off a real export once and used to explain two
+  // failures it had nothing to do with. It is not a length base64 can be, and
+  // that is all this can honestly say about it.
+  assert.throws(() => publicKeyFromPrivate('a'.repeat(102)), /not valid base64/)
 })
 
 test('a matching pair passes', () => {
@@ -94,11 +100,11 @@ test('the public key pasted into the private secret is named as such', () => {
   assert.match(problem ?? '', /never prints the private one/)
 })
 
-test('the name of the plist key, pasted instead of its value, is named as such', () => {
-  // `SUPublicEDKey` is what the key is called in Info.plist, not what goes in it.
+test('the name of the plist key, pasted instead of its value, is refused', () => {
+  // `SUPublicEDKey` is what the key is called in Info.plist, not what goes in
+  // it. It is also not base64, which is the first thing wrong with it.
   const problem = keypairProblem('SUPublicEDKey', legacy(randomBytes(32)))
-  assert.match(problem ?? '', /decodes to \d+ bytes, not 32/)
-  assert.match(problem ?? '', /not the "SUPublicEDKey" line/)
+  assert.match(problem ?? '', /PUBLIC_KEY is not valid base64/)
 })
 
 test('the packaging placeholder is caught before it can ship', () => {
@@ -118,4 +124,30 @@ test('the derived key is what the keypair check then agrees with', () => {
   for (const priv of [b64(randomBytes(32)), legacy(randomBytes(32))]) {
     assert.equal(keypairProblem(publicKeyFromPrivate(priv), priv), null)
   }
+})
+
+test('a key that only decodes because node is lenient is refused', () => {
+  // The v0.1.6 failure. `Buffer.from(x, 'base64')` drops characters outside the
+  // alphabet instead of failing, so all three of these decode to exactly 32
+  // bytes and sail past a length check - and generate_appcast, whose decoder is
+  // strict, then refuses the same value after a ten-minute build.
+  const seed = b64(randomBytes(32))
+  const mangled = [`"${seed}"`, `${seed.slice(0, 20)}\n${seed.slice(20)}`, `'${seed}'`]
+  for (const bad of mangled) {
+    assert.equal(Buffer.from(bad, 'base64').length, 32, 'precondition: node decodes it')
+    assert.throws(() => publicKeyFromPrivate(bad), /not valid base64/)
+    assert.throws(() => publicKeyFromPrivate(bad), /outside the base64 alphabet/)
+  }
+})
+
+test('an unpadded key is not treated as mangled', () => {
+  // Refusing a key that is merely missing its "=" would be one more false
+  // alarm, and this file has raised enough of those.
+  const seed = randomBytes(32)
+  assert.equal(publicKeyFromPrivate(b64(seed).replace(/=+$/, '')), publicKeyFromPrivate(b64(seed)))
+})
+
+test('a public key that is not base64 is named before it is measured', () => {
+  const problem = keypairProblem(`"${b64(randomBytes(32))}"`, b64(randomBytes(32)))
+  assert.match(problem ?? '', /PUBLIC_KEY is not valid base64/)
 })

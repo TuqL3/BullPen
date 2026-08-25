@@ -60,17 +60,55 @@ function publicKeyFromSeed(seed) {
 }
 
 /**
+ * The bytes a base64 value really holds, or null when it is not base64.
+ *
+ * `Buffer.from(x, 'base64')` ignores every character outside the alphabet
+ * rather than failing, so a key wrapped in quotes, carrying a label, or broken
+ * across two lines still decodes - and a 44-character key mangled any of those
+ * ways still decodes to exactly 32 bytes. A length check waves it through.
+ * Sparkle's decoder is strict, so `generate_appcast` refuses the same value
+ * with "Private key not decoded from the argument because it isn't base64
+ * encoded" - after the ten-minute build that produced the archives.
+ *
+ * Padding is added rather than demanded: an unpadded key is still a key, and
+ * refusing one would be a false alarm this file has raised enough of.
+ */
+function strictBase64(value) {
+  const s = value.trim()
+  const padded = s + '='.repeat((4 - (s.length % 4)) % 4)
+  const bytes = Buffer.from(padded, 'base64')
+  return bytes.toString('base64') === padded ? bytes : null
+}
+
+/** How many characters a value carries that base64 has no meaning for. */
+const strayCount = (value) => [...value.trim()].filter((c) => !/[A-Za-z0-9+/=]/.test(c)).length
+
+/**
  * A reason a private key cannot be used, or null when it can.
  *
- * Length is the whole test. It cannot tell a 32-byte seed from a 32-byte public
- * key - they are the same shape - so that mistake is caught in
+ * Length and alphabet are the whole test. Neither can tell a 32-byte seed from
+ * a 32-byte public key - they are the same shape - so that mistake is caught in
  * `keypairProblem` instead, by the value being identical to the public key it
  * is supposed to be checked against.
  */
 function privateKeyProblem(priv) {
   if (!priv || !priv.trim()) return 'SPARKLE_ED_PRIVATE_KEY is empty'
 
-  const bytes = Buffer.from(priv.trim(), 'base64')
+  const bytes = strictBase64(priv)
+  if (bytes === null) {
+    const stray = strayCount(priv)
+    return (
+      'SPARKLE_ED_PRIVATE_KEY is not valid base64. It decodes anyway here, because ' +
+      'node ignores characters outside the alphabet - which is how a mangled key ' +
+      'reaches generate_appcast, whose decoder is strict and refuses it. ' +
+      `${priv.trim().length} characters` +
+      (stray
+        ? `, ${stray} of them outside the base64 alphabet - a quote, a line break, or a label pasted along with the key.`
+        : ', in a length base64 cannot be.') +
+      ' Paste the key and nothing else.'
+    )
+  }
+
   if (PRIVATE_KEY_BYTES.includes(bytes.length)) return null
 
   return (
@@ -102,7 +140,7 @@ export function publicKeyFromPrivate(priv) {
   const problem = privateKeyProblem(priv)
   if (problem) throw new Error(problem)
 
-  const bytes = Buffer.from(priv.trim(), 'base64')
+  const bytes = strictBase64(priv)
   const pub =
     bytes.length === PUBLIC_KEY_BYTES
       ? publicKeyFromSeed(bytes)
@@ -123,7 +161,13 @@ export function keypairProblem(pub, priv) {
     return `SPARKLE_ED_PUBLIC_KEY is the literal placeholder "${PLACEHOLDER}"`
   }
 
-  const pubBytes = Buffer.from(pub.trim(), 'base64')
+  const pubBytes = strictBase64(pub)
+  if (pubBytes === null) {
+    return (
+      `SPARKLE_ED_PUBLIC_KEY is not valid base64 - ${pub.trim().length} characters, ` +
+      `${strayCount(pub)} of them outside the base64 alphabet.`
+    )
+  }
   if (pubBytes.length !== PUBLIC_KEY_BYTES) {
     return (
       `SPARKLE_ED_PUBLIC_KEY decodes to ${pubBytes.length} bytes, not ${PUBLIC_KEY_BYTES}. ` +

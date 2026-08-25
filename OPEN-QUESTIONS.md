@@ -2015,3 +2015,54 @@ is what happened.
 Keychain holds. `generate_keys -p` prints that value and would settle it in a
 second, but it reads the operator's Keychain and is theirs to run. What is
 verified is the derivation itself, against RFC 8032.
+
+## 65. Node decodes base64 that Sparkle refuses
+
+`v0.1.6` got further than any release before it - key derived, app packaged,
+plist check passed - and then:
+
+```
+Error: Private key not decoded from the argument because it isn't base64
+encoded. Please provide a valid key and confirm the contents of the key are
+correct.
+```
+
+`Buffer.from(x, 'base64')` does not fail on bad input. It **ignores every
+character outside the alphabet** and decodes what is left. Measured:
+
+```
+plain seed              -> 32 bytes | canonical: yes
+wrapped in quotes       -> 32 bytes | canonical: NO
+with internal newline   -> 32 bytes | canonical: NO
+key: <seed>             -> 34 bytes | canonical: NO
+```
+
+A key carrying quotes or broken across two lines decodes to exactly 32 bytes,
+which is the length the check was looking for. Sparkle's decoder is strict, so
+the same value is refused - but only by `generate_appcast`, after the build that
+produced the archives it was going to sign.
+
+Both keys are now required to be canonical base64: decode, re-encode, and
+compare. Anything node had to drop to make it fit no longer passes.
+
+**Whitespace is not the problem, and was checked rather than assumed.** With a
+throwaway key, `generate_appcast --ed-key-file` accepted the file with no
+trailing newline, with LF, with CRLF, and with a leading space - all four
+reached "No usable archives", meaning all four keys were read. Sparkle's own
+help documents `echo "$KEY" | generate_appcast --ed-key-file -`, and `echo`
+appends a newline, so this had to be true.
+
+**Padding is added, not demanded.** An unpadded key is still a key, and none of
+the three lengths Sparkle accepts can produce the three-`=` case that would make
+that ambiguous.
+
+**What this cost, and the pattern behind it.** Every failure in §63, §64 and
+this one shared a shape: a guard that answered a question node could answer
+cheaply instead of the question Sparkle actually asks. Length instead of
+validity, `[64, 96]` instead of what `-x` writes, `echo "x=$(cmd)"` instead of
+an exit status. The three checks now in front of a release are worth what they
+cost only because each one is the same comparison `generate_appcast` makes.
+
+**Not verified:** what the secret actually contains. It is a secret; the guard
+reports its character count and how many of those characters base64 has no
+meaning for, which is enough to say what to fix without printing any of it.
