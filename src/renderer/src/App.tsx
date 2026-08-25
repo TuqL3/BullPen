@@ -588,6 +588,12 @@ export default function App() {
     adoptGod(res)
     for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
     setSetupCwd(null)
+    // Straight on to the second decision. Picking a directory is not the
+    // interesting half of setting this up - who is on the floor is - and a
+    // first run that ends on an empty window leaves that half undiscovered
+    // behind a gear icon. Settings opens on `the floor` already, and the floor
+    // it draws is the default one, so this is the only step that was missing.
+    setSettings(true)
     return null
   }
 

@@ -1809,3 +1809,36 @@ Seeded with one, the packaged app under launchd's `PATH` starts Michael and the
 does not take `-ilc`, leaves the old `PATH` and the old blank tab - logged, not
 guessed at. A user whose `claude` is only a shell *alias* is not helped by this
 and cannot be: an alias is not a file, and `execvp` cannot see one.
+
+## 60. A first run ends on the floor, not on an empty window
+
+Choosing a directory for Michael was the whole of first-run setup, and it is not
+the interesting half. Who is on the floor and how work moves between them is,
+and that lived behind a gear icon nobody had been given a reason to press yet.
+`chooseGodHome` now opens Settings on its way out.
+
+Two thirds of what this needed already worked and it is worth writing down which,
+because it looked like three changes and was one:
+
+- Settings opens on `the floor` already - that is its initial section, not a
+  default that has to be chosen.
+- The floor it draws is already the one named `default`: `wf` in main starts as
+  `DEFAULT_WORKFLOW`, so a machine with no `workflow` in its config is running
+  that shape before anybody opens anything.
+
+`PRESETS` holds exactly one floor today, so nothing here offers a choice between
+floors - it shows the one there is. If a second preset ever lands, "the default
+one is selected" stops being a tautology and this is where to look.
+
+**Assumed:** that "the default floor" meant the workflow named `default` in
+`presets.ts` and not `ui.floor`, which is the colour the office floor is painted
+and also defaults to a word (`green`). The two are unrelated settings that share
+a noun. If the colour was meant, this is the wrong dialog section entirely.
+
+**Not verified:** the click. The change is one `setSettings(true)` in the path
+that already unmounts the first-run screen, typechecked, and the dialog is known
+to have a floor to draw by then - `setWf` runs before `godSetup` is even asked.
+What has not been done is a first run with a hand on the mouse. To try it
+without disturbing a real setup:
+
+    BULLPEN_HOME=/tmp/bp-firstrun npm run dev
