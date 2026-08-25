@@ -207,12 +207,47 @@ export function paneSize(el: Element | null): { cols: number; rows: number } {
 }
 
 /**
- * Fit one terminal again and tell its pty. For a pty that was replaced.
+ * The modes a terminal must not still be in when a new process arrives.
+ *
+ * The terminal outlives the process on purpose - the scrollback is what an
+ * operator reads after a restart - but its *modes* belong to the process that
+ * turned them on. Mouse reporting is the one that shows: the old CLI asked for
+ * motion events, the new one has not started reading yet, and the pty echoes
+ * every mouse move back as text, so moving the pointer over a just-restarted
+ * agent typed `^[[<35;122;42M` into it.
+ *
+ * Written into the terminal rather than reset with `term.reset()`, which would
+ * also throw away the scrollback this map exists to keep.
+ */
+const RESET_MODES =
+  // Back to the main screen, if the old process left the alternate one up.
+  '\u001b[?1049l' +
+  // Mouse: click, click+drag, any-motion, and the three coordinate encodings.
+  '\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l' +
+  // Bracketed paste, application cursor keys, application keypad.
+  '\u001b[?2004l\u001b[?1l\u001b>' +
+  // Autowrap on, cursor visible, colours back to plain.
+  '\u001b[?7h\u001b[?25h\u001b[0m'
+
+/**
+ * Drop the modes the outgoing process turned on. Call before it is replaced.
+ *
+ * Before, not after: between the old process dying and the new one taking the
+ * terminal over, the pty is in its default line discipline and echoes whatever
+ * arrives - which, with mouse reporting still on, is every movement of the
+ * pointer sitting over the pane the operator just clicked in.
+ */
+export function forgetModes(id: string): void {
+  if (terms.has(id)) writeToTerminal(id, RESET_MODES)
+}
+
+/**
+ * Measure again, for a pty that was replaced.
  *
  * A restart - a new model, a new directory - hands the same host element a
  * brand new process, which starts at whatever size it was spawned with and is
  * never told otherwise: the element did not move, so nothing here fires. This
- * is the one call that says "the thing on the other end is new, measure again".
+ * is the one call that says "the thing on the other end is new".
  */
 export function refit(id: string): void {
   const entry = terms.get(id)

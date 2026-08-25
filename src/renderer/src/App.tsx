@@ -19,6 +19,7 @@ import { labelForModel, matchModel, modelOf, withModel } from '../../models'
 import { engineFor } from '../../engines'
 import type { Dispatch, Question, Report, UpdateState, WorkflowInfo } from '../../preload/index'
 import {
+  forgetModes,
   paneSize,
   refit,
   setTerminalFontSize,
@@ -777,6 +778,11 @@ export default function App() {
       return
     }
     const { cols, rows } = paneSize(termPane())
+    // The terminal is kept across the restart for its scrollback, and its modes
+    // came from the process about to die. Mouse reporting left on is the one
+    // that shows: the pty echoes every pointer move as text until the new CLI
+    // takes over.
+    forgetModes(a.id)
     try {
       const state = await window.bullpen.restart({
         id: a.id,
