@@ -113,39 +113,83 @@ app in a VM or container.
 
 ## Updating
 
-A packaged app checks GitHub Releases 8 seconds after launch and every six hours
-after that. A newer version shows up as a button in the title bar: press it to
-download, press it again to restart into it. Nothing downloads or installs
-without being asked.
+A packaged app checks for a newer version 8 seconds after launch and every six
+hours after that, and nothing downloads or installs without being asked.
 
-macOS needs the app to be signed with a Developer ID before it can replace
-itself - Squirrel refuses a build it cannot read a signature from - so an
-unsigned build offers the releases page instead. Windows updates in place,
-signed or not.
+The two platforms use different updaters, because they never had the same
+problem.
 
-Publishing a version is a tag. `npm version` writes `package.json` and the
-matching tag together, and pushing the tag is the whole release:
+**macOS - Sparkle.** Squirrel.Mac, which is what `electron-updater` drives here,
+refuses to replace an app it cannot read a Developer ID signature from, and this
+app has never had one. Sparkle validates an update by the EdDSA signature on the
+archive instead, so an ad-hoc signed build updates itself for real. Sparkle also
+draws its own window for the whole find/download/install sequence, so the title
+bar stays empty on macOS - what you see is Sparkle's dialog, not Bullpen's.
+
+**Windows - electron-updater.** NSIS replaces an unsigned install happily, so
+nothing needed solving. The title-bar chip is this path: there is one, it is
+coming down, it is ready to go on.
+
+### Publishing a version
+
+A release is a tag. `npm version` writes `package.json` and the matching tag
+together, and pushing the tag is the whole release:
 
 ```bash
 npm version patch        # or minor / major
 git push --follow-tags
 ```
 
-`.github/workflows/release.yml` then packs macOS on a macOS runner and Windows
-on a Windows runner - node-pty is native, so neither cross-builds - and both
-upload into one **draft** release. Look at it, then press Publish: a draft is
-invisible to `electron-updater`, so nothing updates until you say so.
+`.github/workflows/release.yml` packs macOS on a macOS runner and Windows on a
+Windows runner - node-pty is native, so neither cross-builds - and both upload
+into one **draft** release. Look at it, then press Publish: a draft is not
+GitHub's `latest`, so neither updater can see it until you say so.
 
 The workflow refuses a tag that does not match `package.json`. electron-builder
 publishes to `v${version}` regardless of which tag started the run, so without
 that check the artifacts land on a release nobody tagged.
 
-CI builds are unsigned - there is no Developer ID in the runner - which is the
-`manual` update path above. To build and upload from this machine instead:
+### The Sparkle signing key
+
+macOS releases are signed with an EdDSA key that is not in this repo and must
+not be. Generate it once, on your own machine:
 
 ```bash
-GH_TOKEN=... npm run release   # builds mac + win, uploads to GitHub Releases
+npm run rebuild:sparkle          # vendors Sparkle's tools
+node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys
 ```
+
+That stores the private key in your login Keychain and prints the public key.
+Then export the private half and put both in the repository's Actions secrets:
+
+```bash
+node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys -x key.txt
+```
+
+- `SPARKLE_ED_PUBLIC_KEY` - the printed public key. Packed into `Info.plist`, and
+  what the app validates every update against.
+- `SPARKLE_ED_PRIVATE_KEY` - the contents of `key.txt`. Delete the file afterwards.
+
+Use the file `generate_keys -x` writes, not a key made another way:
+`generate_appcast` accepts a wrongly-shaped key, writes an appcast with **no
+signature in it, and exits 0**. An app carrying the public key then rejects every
+update it is offered, and nothing anywhere says why. The workflow greps the
+generated appcast for `sparkle:edSignature` and fails the release rather than
+publishing one that updates nobody.
+
+Without both secrets the macOS job stops before it builds anything.
+
+### Building by hand
+
+```bash
+npm run build:mac        # universal dmg + zip into release/
+npm run build:win        # nsis x64 + arm64
+GH_TOKEN=... npm run release
+```
+
+A local `build:mac` has no key, so it ships the placeholder and the app reports
+that its updater is off rather than pretending to watch. That is deliberate: a
+developer build does not check for updates.
 
 ## Layout
 

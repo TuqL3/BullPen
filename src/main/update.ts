@@ -1,66 +1,122 @@
-import { execFile } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 
 /**
  * Whether there is a newer version of this app, and getting it.
  *
- * `electron-updater` against the `latest*.yml` electron-builder publishes to
- * GitHub Releases: it compares versions, downloads the artifact for this
- * platform, checks the sha512 the release was published with, and hands the
- * result to the platform's installer. Nothing here re-implements any of that -
- * this is the state the UI shows and the three buttons it offers.
+ * Two updaters, split by platform, because the two platforms do not have the
+ * same problem.
  *
- * The whole thing is off in a dev run. An unpackaged app has no
- * `app-update.yml` in its resources, and asking `autoUpdater` anything without
- * one throws rather than answering.
+ * **macOS: Sparkle.** Squirrel.Mac - which is what `electron-updater` drives
+ * here - refuses to replace an application it cannot read a Developer ID
+ * signature from, and this app has never had one. That is the whole reason the
+ * old `manual` state existed: a button that could only ever open the download
+ * page. Sparkle validates an update by the EdDSA signature on the archive
+ * instead of by the app's own code signature, so an ad-hoc signed build updates
+ * itself for real. Sparkle also draws its own window for the whole find,
+ * download and install sequence, so on macOS the state below stops at `idle` -
+ * there is nothing for the title bar to draw that Sparkle is not already
+ * drawing better.
+ *
+ * **Windows: electron-updater.** NSIS replaces an unsigned install happily, so
+ * there was never a problem to solve. It stays, along with the three-step state
+ * the title bar chip renders: there is one, it is coming down, it is ready.
+ *
+ * The whole thing is off in a dev run. An unpackaged app has neither an
+ * `app-update.yml` in its resources nor an `Info.plist` with a feed in it.
  */
 
 /** What the UI is showing, and what it may do next. */
 export type UpdateState =
   /** Not packaged, so there is nothing to update. */
   | { kind: 'dev'; version: string }
+  /**
+   * Nothing to say. On Windows: checked, and this is the newest there is. On
+   * macOS: Sparkle is armed and watching, and if it finds something it opens
+   * its own window rather than reporting back here.
+   */
   | { kind: 'idle'; version: string; checkedAt?: number }
   | { kind: 'checking'; version: string }
+  /** Windows only - macOS hands the rest of the sequence to Sparkle's window. */
   | { kind: 'available'; version: string; next: string; notes?: string }
   | { kind: 'downloading'; version: string; next: string; percent: number }
   | { kind: 'ready'; version: string; next: string }
-  /**
-   * A new version exists and this copy cannot install it in place.
-   *
-   * macOS hands the install to Squirrel, which refuses an application it cannot
-   * read a code signature from - which is every build made without a Developer
-   * ID. Reported rather than attempted: a button that always fails is worse
-   * than one that says what it can do, which is open the page to download it.
-   */
-  | { kind: 'manual'; version: string; next: string; url: string; why: string }
   | { kind: 'error'; version: string; message: string }
 
-/** Where a human goes when the app cannot install for itself. */
+/** Where a human goes when they want the list rather than the newest. */
 const RELEASES = 'https://github.com/TuqL3/BullPen/releases/latest'
 
 /**
- * Is this copy signed well enough for macOS to replace it with another?
+ * What `electron-sparkle-updater`'s packaging step writes into `Info.plist`
+ * when no key was given, and what the release step is supposed to replace.
  *
- * `codesign -dv` is the same question Squirrel asks, asked before the download
- * rather than after it. Anything that is not darwin is not Squirrel's business
- * and answers yes: NSIS on Windows replaces an unsigned install happily.
+ * A build that ships this validates nothing: every appcast signature fails and
+ * the app quietly never updates. Checked at startup so it is an error somebody
+ * sees rather than an update that silently never arrives.
  */
-export function canInstallInPlace(
-  platform: string,
-  appPath: string,
-  run: (cmd: string, args: string[]) => Promise<boolean>
-): Promise<boolean> {
-  if (platform !== 'darwin') return Promise.resolve(true)
-  return run('codesign', ['-dv', '--verbose=2', appPath])
+export const ED_KEY_PLACEHOLDER = 'SPARKLE_ED_PUBLIC_KEY_PLACEHOLDER'
+
+/** The two things Sparkle has to be told before it can check anything. */
+export type SparkleFeed = { appcastUrl: string; publicEdKey: string }
+
+/** The native bridge, as `electron-sparkle-updater` hands it over. */
+export type SparkleBridge = {
+  init(options: SparkleFeed): boolean
+  checkForUpdates(): void
+  installUpdateNow(): void
+  setAutomaticChecks(enabled: boolean): void
 }
 
-const ok = (cmd: string, args: string[]): Promise<boolean> =>
-  new Promise((done) => execFile(cmd, args, (err) => done(!err)))
+/**
+ * Read one key out of the packaged app's `Info.plist`.
+ *
+ * The feed URL and the public key are already in there - electron-builder wrote
+ * them at pack time and CI replaced the key placeholder - so reading them back
+ * is the one way to be sure the app checks against the key it actually shipped
+ * with. A second copy compiled in here could disagree with the bundle, and the
+ * failure that produces is an app that never updates and never says why.
+ *
+ * `plutil` ships with macOS. Nothing calls this anywhere else.
+ */
+export const plistValue = (plist: string, key: string): string | null => {
+  try {
+    const out = execFileSync('plutil', ['-extract', key, 'raw', '-o', '-', plist], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+    return out.trim() || null
+  } catch {
+    // Absent key, unreadable file, or not a plist at all. The caller turns this
+    // into a message; there is nothing here worth telling them apart.
+    return null
+  }
+}
+
+/**
+ * The feed a packaged macOS build is pointed at, or a reason it has none.
+ *
+ * Throws rather than returning null so the reason travels with the failure -
+ * "no SUFeedURL" and "shipped the placeholder key" are different mistakes made
+ * in different steps of the release, and an updater that just says "off" sends
+ * whoever is looking to the wrong one.
+ */
+export function sparkleFeed(read: (key: string) => string | null): SparkleFeed {
+  const appcastUrl = read('SUFeedURL')
+  if (!appcastUrl) throw new Error('Info.plist has no SUFeedURL')
+  const publicEdKey = read('SUPublicEDKey')
+  if (!publicEdKey) throw new Error('Info.plist has no SUPublicEDKey')
+  if (publicEdKey === ED_KEY_PLACEHOLDER) {
+    throw new Error(
+      'this build shipped the placeholder EdDSA key - the release step never injected the real one'
+    )
+  }
+  return { appcastUrl, publicEdKey }
+}
 
 /**
  * Compare two versions the way the updater does, for the things around it.
  *
- * `electron-updater` decides what is newer for itself; this is here for the UI
+ * Both updaters decide what is newer for themselves; this is here for the UI
  * and the tests, which need to say "1.1.0 is newer than 1.0.0" without asking a
  * module that only loads inside Electron. Pre-release tags are compared as
  * strings after the numbers, which is enough for `1.1.0-beta.1` to sort under
@@ -104,10 +160,13 @@ type Electron = {
  *
  * Every change is announced on `state`, so the window can be told once and
  * follow along rather than polling something that is idle nine times in ten.
+ * Which of the two updaters is behind those verbs is decided by which `attach`
+ * main calls, and nothing above this line has to know.
  */
 export class Updates extends EventEmitter {
   private state: UpdateState
   private el: Electron | null
+  private sparkle: SparkleBridge | null = null
   private timer: NodeJS.Timeout | null = null
   /** The delayed first check. Held so `stop()` can take it back too. */
   private first: NodeJS.Timeout | null = null
@@ -122,8 +181,13 @@ export class Updates extends EventEmitter {
     this.state = { kind: 'dev', version }
   }
 
+  /** Where the releases live, for a window that wants to open the list. */
+  get releasesUrl(): string {
+    return RELEASES
+  }
+
   /**
-   * Hand it the packaged app's `autoUpdater`.
+   * Hand it the packaged app's `electron-updater`. Windows.
    *
    * Separate from the constructor because `electron-updater` is imported
    * lazily: it is a CommonJS module that pulls in Electron at load, and main is
@@ -134,6 +198,44 @@ export class Updates extends EventEmitter {
     if (!el.app.isPackaged) return
     this.el = el
     this.set({ kind: 'idle', version: this.state.version })
+  }
+
+  /**
+   * Hand it the Sparkle bridge and the plist it was packaged with. macOS.
+   *
+   * Returns false and parks in `error` when the bundle cannot say what feed it
+   * belongs to. That is a release-pipeline mistake, not a runtime condition -
+   * reported rather than retried, because no amount of checking again will put
+   * a key into a plist that shipped without one.
+   */
+  attachSparkle(bridge: SparkleBridge, read: (key: string) => string | null): boolean {
+    let feed: SparkleFeed
+    try {
+      feed = sparkleFeed(read)
+    } catch (err) {
+      this.fail(err)
+      return false
+    }
+    if (!bridge.init(feed)) {
+      this.set({
+        kind: 'error',
+        version: this.state.version,
+        message: 'Sparkle refused the feed it was given'
+      })
+      return false
+    }
+    this.sparkle = bridge
+    this.set({ kind: 'idle', version: this.state.version })
+    return true
+  }
+
+  /** Say why there is no updater, when main could not build one. */
+  fail(err: unknown): void {
+    this.set({
+      kind: 'error',
+      version: this.state.version,
+      message: err instanceof Error ? err.message : String(err)
+    })
   }
 
   get(): UpdateState {
@@ -148,11 +250,19 @@ export class Updates extends EventEmitter {
   /**
    * Start listening, check once, and keep checking.
    *
-   * The first check is delayed: launch is already spawning agents, reading the
-   * floor and painting a window, and a release feed is not what any of that is
-   * waiting on.
+   * On macOS this is one call: Sparkle keeps its own schedule off
+   * `SUScheduledCheckInterval` in the plist, in its own process time, and it
+   * goes on doing that whether or not anything here is awake.
+   *
+   * On Windows the first check is delayed: launch is already spawning agents,
+   * reading the floor and painting a window, and a release feed is not what any
+   * of that is waiting on.
    */
   start(firstMs = 8_000, everyMs = 6 * 60 * 60 * 1000): void {
+    if (this.sparkle) {
+      this.sparkle.setAutomaticChecks(true)
+      return
+    }
     const el = this.el
     if (!el) return
     el.autoUpdater.logger = null
@@ -166,7 +276,7 @@ export class Updates extends EventEmitter {
     el.autoUpdater.on('update-available', (info: never) => {
       const next = (info as { version?: string }).version ?? ''
       const notes = (info as { releaseNotes?: string }).releaseNotes
-      void this.offer(next, typeof notes === 'string' ? notes : undefined)
+      this.offer(next, typeof notes === 'string' ? notes : undefined)
     })
     el.autoUpdater.on('update-not-available', () => {
       this.set({ kind: 'idle', version: this.state.version, checkedAt: Date.now() })
@@ -192,8 +302,18 @@ export class Updates extends EventEmitter {
     this.timer = setInterval(() => void this.check(), everyMs)
   }
 
-  /** Ask the feed. Safe to call from a button and from the timer. */
+  /**
+   * Ask the feed. Safe to call from a button and from the timer.
+   *
+   * On macOS this hands over to Sparkle's own window, which is where the rest
+   * of the sequence happens - so the state here does not move, and there is
+   * nothing to await.
+   */
   async check(): Promise<UpdateState> {
+    if (this.sparkle) {
+      this.sparkle.checkForUpdates()
+      return this.state
+    }
     const el = this.el
     if (!el) return this.state
     // Not while something is already happening to this copy of the app.
@@ -202,35 +322,17 @@ export class Updates extends EventEmitter {
     try {
       await el.autoUpdater.checkForUpdates()
     } catch (err) {
-      this.set({
-        kind: 'error',
-        version: this.state.version,
-        message: err instanceof Error ? err.message : String(err)
-      })
+      this.fail(err)
     }
     return this.state
   }
 
-  /** A new version exists: say so, once, and say what can be done about it. */
-  private async offer(next: string, notes?: string): Promise<void> {
-    const el = this.el
-    if (!el) return
-    const version = this.state.version
-    const installable = await canInstallInPlace(process.platform, el.app.getAppPath(), ok)
-    this.set(
-      installable
-        ? { kind: 'available', version, next, notes }
-        : {
-            kind: 'manual',
-            version,
-            next,
-            url: RELEASES,
-            why: 'this build is not signed, so macOS will not let it replace itself'
-          }
-    )
+  /** A new version exists: say so, once. Windows - Sparkle says it itself. */
+  private offer(next: string, notes?: string): void {
+    this.set({ kind: 'available', version: this.state.version, next, notes })
     if (this.told !== next) {
       this.told = next
-      this.emit('found', next, installable)
+      this.emit('found', next)
     }
   }
 
@@ -242,11 +344,7 @@ export class Updates extends EventEmitter {
     try {
       await el.autoUpdater.downloadUpdate()
     } catch (err) {
-      this.set({
-        kind: 'error',
-        version: this.state.version,
-        message: err instanceof Error ? err.message : String(err)
-      })
+      this.fail(err)
     }
     return this.state
   }
@@ -258,6 +356,10 @@ export class Updates extends EventEmitter {
    * so the renderer asks first. This is the yes.
    */
   install(): boolean {
+    if (this.sparkle) {
+      this.sparkle.installUpdateNow()
+      return true
+    }
     const el = this.el
     if (!el || this.state.kind !== 'ready') return false
     el.autoUpdater.quitAndInstall()

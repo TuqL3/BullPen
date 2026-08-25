@@ -1,14 +1,21 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { Updates, canInstallInPlace, isNewer, type UpdateState } from '../src/main/update.ts'
+import {
+  ED_KEY_PLACEHOLDER,
+  Updates,
+  isNewer,
+  sparkleFeed,
+  type SparkleBridge,
+  type UpdateState
+} from '../src/main/update.ts'
 
 /**
  * The parts of the updater that are ours.
  *
- * Comparing versions and deciding what happens to a downloaded one are the two
- * places a mistake here would show: a "new version" that is the one already
- * running, or a button that promises an install this copy cannot do.
- * `electron-updater` itself is not re-tested - it is the thing being wrapped.
+ * Comparing versions, deciding what a packaged bundle is allowed to check
+ * against, and routing the three verbs to whichever of the two updaters is
+ * attached. Neither `electron-updater` nor Sparkle is re-tested - they are the
+ * things being wrapped.
  */
 
 test('newer is newer, and the same version is not', () => {
@@ -25,19 +32,25 @@ test('newer is newer, and the same version is not', () => {
   assert.equal(isNewer('1.1.0-beta.1', '1.0.9'), true)
 })
 
-test('only macOS is asked for a signature, and only macOS can fail it', async () => {
-  const asked: string[] = []
-  const run = async (cmd: string, args: string[]): Promise<boolean> => {
-    asked.push(`${cmd} ${args[0]}`)
-    return false
-  }
-  assert.equal(await canInstallInPlace('win32', '/app', run), true)
-  assert.equal(await canInstallInPlace('linux', '/app', run), true)
-  assert.deepEqual(asked, [], 'NSIS replaces an unsigned install; nothing to ask')
+/**
+ * The placeholder is the dangerous one. A build that ships it looks completely
+ * healthy - Sparkle arms, checks on schedule, and rejects every signature it is
+ * ever shown, so the app simply never updates and nothing anywhere says why.
+ */
+test('a bundle that cannot say what feed it belongs to is refused, with the reason', () => {
+  const plist = (values: Record<string, string>) => (key: string) => values[key] ?? null
 
-  assert.equal(await canInstallInPlace('darwin', '/A.app', run), false)
-  assert.deepEqual(asked, ['codesign -dv'])
-  assert.equal(await canInstallInPlace('darwin', '/A.app', async () => true), true)
+  assert.deepEqual(
+    sparkleFeed(plist({ SUFeedURL: 'https://example.com/appcast.xml', SUPublicEDKey: 'abc123' })),
+    { appcastUrl: 'https://example.com/appcast.xml', publicEdKey: 'abc123' }
+  )
+  assert.throws(() => sparkleFeed(plist({ SUPublicEDKey: 'abc123' })), /SUFeedURL/)
+  assert.throws(() => sparkleFeed(plist({ SUFeedURL: 'https://x/a.xml' })), /SUPublicEDKey/)
+  assert.throws(
+    () => sparkleFeed(plist({ SUFeedURL: 'https://x/a.xml', SUPublicEDKey: ED_KEY_PLACEHOLDER })),
+    /placeholder/,
+    'the release step never injected the real key'
+  )
 })
 
 test('a dev run has no updater at all', async () => {
@@ -69,7 +82,8 @@ test('found, downloaded, installed - and the window is told at every step', asyn
   u.start(60_000, 60_000)
 
   el.fire('update-available', { version: '1.1.0', releaseNotes: 'faster' })
-  const found = await until(u, 'available')
+  const found = u.get()
+  assert.equal(found.kind, 'available')
   assert.equal('next' in found && found.next, '1.1.0')
 
   await u.download()
@@ -86,22 +100,65 @@ test('found, downloaded, installed - and the window is told at every step', asyn
   assert.deepEqual(seen.slice(0, 3), ['available', 'downloading', 'downloading'])
 })
 
-// Only on a Mac: the signature question is one `codesign` answers, and there is
-// no `codesign` anywhere else to answer it.
-test('an unsigned mac is told to fetch it by hand, not handed a button that fails', {
-  skip: process.platform !== 'darwin' ? 'darwin only' : false
-}, async (t) => {
-  const el = fake('1.0.0', { signed: false })
+/**
+ * The macOS half. Sparkle owns the window, so what is tested here is only the
+ * routing: the three verbs reach the bridge, and none of them reach - or need -
+ * the `electron-updater` half that is not attached.
+ */
+test('on macOS the verbs go to Sparkle, and the state stops at idle', () => {
+  const bridge = fakeBridge()
   const u = new Updates('1.0.0')
-  u.attach(el.electron)
-  t.after(() => u.stop())
+  const plist: Record<string, string> = {
+    SUFeedURL: 'https://example.com/appcast.xml',
+    SUPublicEDKey: 'abc123'
+  }
+
+  assert.equal(u.attachSparkle(bridge.bridge, (k) => plist[k] ?? null), true)
+  assert.deepEqual(bridge.feed, { appcastUrl: 'https://example.com/appcast.xml', publicEdKey: 'abc123' })
+  assert.deepEqual(u.get(), { kind: 'idle', version: '1.0.0' })
+
+  // No timers: Sparkle keeps its own schedule off SUScheduledCheckInterval, so
+  // a second one here would be two apps asking the same feed twice as often.
   u.start(60_000, 60_000)
-  el.fire('update-available', { version: '1.1.0' })
-  const s = await until(u, 'manual')
-  assert.match('url' in s ? s.url : '', /github\.com/)
-  // And the download is refused rather than started into an install that dies.
-  assert.equal((await u.download()).kind, 'manual')
-  assert.equal(u.install(), false)
+  assert.equal(bridge.automatic, true)
+  u.stop()
+
+  u.check()
+  assert.equal(bridge.checks, 1)
+  assert.equal(u.get().kind, 'idle', 'Sparkle took over the window; nothing moved here')
+
+  assert.equal(u.install(), true)
+  assert.equal(bridge.installs, 1)
+})
+
+test('a mac build with no key in it says so instead of pretending to watch', () => {
+  const bridge = fakeBridge()
+  const u = new Updates('1.0.0')
+  const plist: Record<string, string> = {
+    SUFeedURL: 'https://example.com/appcast.xml',
+    SUPublicEDKey: ED_KEY_PLACEHOLDER
+  }
+  assert.equal(u.attachSparkle(bridge.bridge, (k) => plist[k] ?? null), false)
+  const s = u.get()
+  assert.equal(s.kind, 'error')
+  assert.match('message' in s ? s.message : '', /placeholder/)
+  assert.equal(bridge.inits, 0, 'and Sparkle was never armed against a key that validates nothing')
+  // Nothing was attached, so the verbs stay no-ops rather than throwing.
+  u.start(60_000, 60_000)
+  assert.equal(bridge.automatic, false)
+  u.stop()
+})
+
+test('a bridge that refuses the feed is an error, not a silent no-op', () => {
+  const bridge = fakeBridge({ accept: false })
+  const u = new Updates('1.0.0')
+  assert.equal(
+    u.attachSparkle(bridge.bridge, (k) =>
+      ({ SUFeedURL: 'https://x/a.xml', SUPublicEDKey: 'abc' })[k] ?? null
+    ),
+    false
+  )
+  assert.equal(u.get().kind, 'error')
 })
 
 /** An `autoUpdater` that would throw if anything actually touched it. */
@@ -120,31 +177,44 @@ function never(): never {
   ) as never
 }
 
-/**
- * Wait for the updater to reach a state, rather than for a number of ms.
- *
- * `offer` shells out to `codesign` before it can say whether an update is
- * installable, and how long that takes is the machine's business. A fixed sleep
- * here is a test that passes on a fast laptop and fails on a busy one.
- */
-const until = (u: Updates, kind: UpdateState['kind']): Promise<UpdateState> =>
-  new Promise((done, fail) => {
-    if (u.get().kind === kind) return done(u.get())
-    const timer = setTimeout(() => fail(new Error(`never reached "${kind}": ${u.get().kind}`)), 5000)
-    const watch = (s: UpdateState): void => {
-      if (s.kind !== kind) return
-      clearTimeout(timer)
-      u.off('state', watch)
-      done(s)
+/** The native Sparkle bridge, counting what it was asked to do. */
+function fakeBridge(opts: { accept?: boolean } = {}): {
+  bridge: SparkleBridge
+  feed: unknown
+  inits: number
+  checks: number
+  installs: number
+  automatic: boolean
+} {
+  const out = {
+    feed: null as unknown,
+    inits: 0,
+    checks: 0,
+    installs: 0,
+    automatic: false,
+    bridge: {} as SparkleBridge
+  }
+  out.bridge = {
+    init: (feed) => {
+      out.inits++
+      out.feed = feed
+      return opts.accept !== false
+    },
+    checkForUpdates: () => {
+      out.checks++
+    },
+    installUpdateNow: () => {
+      out.installs++
+    },
+    setAutomaticChecks: (enabled) => {
+      out.automatic = enabled
     }
-    u.on('state', watch)
-  })
+  }
+  return out
+}
 
 /** A packaged app and an `autoUpdater` whose events this test fires by hand. */
-function fake(
-  version: string,
-  opts: { signed?: boolean } = {}
-): {
+function fake(version: string): {
   electron: Parameters<Updates['attach']>[0]
   fire: (event: string, payload: unknown) => void
   installed: number
@@ -157,11 +227,7 @@ function fake(
       app: {
         isPackaged: true,
         getVersion: () => version,
-        // The signature answer is decided by the path, and `codesign` is asked
-        // for real rather than faked: `/bin/ls` is signed on every Mac there
-        // is, and a path that does not exist is the unsigned case. On anything
-        // but darwin neither is asked - `canInstallInPlace` says yes.
-        getAppPath: () => (opts.signed === false ? '/nonexistent-unsigned.app' : '/bin/ls')
+        getAppPath: () => '/bin/ls'
       },
       autoUpdater: {
         autoDownload: true,

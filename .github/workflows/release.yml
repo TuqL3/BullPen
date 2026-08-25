@@ -42,19 +42,12 @@ jobs:
               --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
-  build:
+  # macOS updates through Sparkle, which needs two things Windows does not: the
+  # app packaged with the EdDSA public key inside it, and an appcast.xml signed
+  # with the matching private key uploaded beside the archives.
+  mac:
     needs: draft
-    strategy:
-      # One platform failing must not throw away the other's packages. The
-      # release is a draft either way, so half of one is still worth having.
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: '--mac'
-          - os: windows-latest
-            target: '--win'
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -63,8 +56,88 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Each platform packs on its own runner rather than cross-building from
-      # one: node-pty is native, and its postinstall patch is compiled in.
+      # Both halves of one keypair. Checked before anything is built rather than
+      # after: without the public key the app ships a placeholder and silently
+      # never updates, and without the private key there is no appcast for it to
+      # read. Either way the release looks complete and updates nothing.
+      - name: Refuse to build a mac release with no signing key
+        env:
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          [ -n "$SPARKLE_ED_PUBLIC_KEY" ] || { echo "::error::secret SPARKLE_ED_PUBLIC_KEY is not set"; exit 1; }
+          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || { echo "::error::secret SPARKLE_ED_PRIVATE_KEY is not set"; exit 1; }
+
+      - run: npm ci
+
+      # Fetches Sparkle.framework and compiles the bridge against this project's
+      # Electron ABI. Must run before the packaging step, which reads the
+      # framework's localization list straight off the vendored copy.
+      - run: npm run rebuild:sparkle
+
+      - run: npm run build
+
+      - name: Package and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          # No Developer ID, and Sparkle does not need one - it validates the
+          # EdDSA signature on the archive instead. The bundle is ad-hoc signed
+          # in scripts/after-pack.mjs, which is all Sparkle asks for.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --config electron-builder.config.mjs --mac -p always
+
+      # Sparkle updates out of the zips, so only the zips go to generate_appcast.
+      # Pointed at a staging directory rather than at `release/` because that
+      # also holds the dmgs, and generate_appcast would write a second appcast
+      # item per version for an archive Sparkle was never meant to update from.
+      - name: Sign and publish the appcast
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          mkdir -p appcast
+          cp release/*-mac.zip appcast/
+          key="$RUNNER_TEMP/sparkle_ed_key"
+          # ponytail: a file in the runner's temp, not the RAM disk the upstream
+          # composite action builds. The runner is ephemeral and single-tenant,
+          # and it is deleted in the same step it is written. Ceiling: a step
+          # that fails between the two lines leaves it on that disk until the
+          # runner is torn down. Move to a RAM disk if this repo ever builds on
+          # a self-hosted machine that outlives the job.
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key"
+          npx electron-sparkle-updater generate-appcast appcast \
+            --ed-key-file "$key" \
+            --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
+          rm -f "$key"
+
+          # generate_appcast will happily write an appcast with no signature in
+          # it and exit 0 - no warning, no message. An app whose Info.plist
+          # carries SUPublicEDKey then rejects every update it is offered, so
+          # the release looks finished and updates nobody. Checked rather than
+          # trusted.
+          if ! grep -q 'sparkle:edSignature' appcast/appcast.xml; then
+            echo "::error::appcast.xml has no sparkle:edSignature - the private key was not in the format generate_appcast expects (use the file written by \`generate_keys -x\`)" >&2
+            exit 1
+          fi
+
+          gh release upload "$GITHUB_REF_NAME" appcast/appcast.xml --clobber
+
+  # Windows never had the problem Sparkle solves: NSIS replaces an unsigned
+  # install happily, and electron-updater drives it with differential downloads.
+  windows:
+    needs: draft
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # node-pty is native and its postinstall patch is compiled in, so the copy
+      # that ships is built on the platform it runs on rather than cross-built.
       - run: npm ci
 
       - run: npm run build
@@ -72,9 +145,4 @@ jobs:
       - name: Package and upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # There is no Developer ID in CI. Left on, electron-builder picks up
-          # whatever identity the runner's keychain happens to hold and fails
-          # late; off, it packages unsigned, which is what src/main/update.ts
-          # already reports as the `manual` update path.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder ${{ matrix.target }} -p always
+        run: npx electron-builder --config electron-builder.config.mjs --win -p always

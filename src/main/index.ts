@@ -5,7 +5,7 @@ import { keyringWorks, readToken, writeToken } from './secret.ts'
 import { adopt, bundle, newer, readFloors, type Bundle } from './sync.ts'
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
 import { checkWorkspace, mergeUi, readConfig, writeConfig } from './config.ts'
@@ -22,7 +22,7 @@ import { Asks, asksPath, REPORTING, type Ask } from './asks.ts'
 import { engineArgs, engineFor } from '../engines.ts'
 import { bannerModel, configuredModel } from './climodel.ts'
 import { newToken, Webhooks } from './webhook.ts'
-import { Updates, type UpdateState } from './update.ts'
+import { plistValue, Updates, type UpdateState } from './update.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
 import {
@@ -2284,13 +2284,10 @@ function wire(): void {
   // Once per version, through the same door every other "you are wanted" goes
   // through. `notify` is already the thing that stays quiet while the window
   // has focus and says nothing twice in a row.
-  updates.on('found', (next: string, installable: boolean) => {
-    notify(
-      'update',
-      `New version available - ${next}`,
-      installable ? 'Open the app to update.' : 'Open the app for the download link.',
-      { tab: 'terminal' }
-    )
+  updates.on('found', (next: string) => {
+    notify('update', `New version available - ${next}`, 'Open the app to update.', {
+      tab: 'terminal'
+    })
   })
   approvals.on('pending', (p: Pending) => send('approvals:pending', p))
   approvals.on('resolved', (p: Pending, decision: string) => send('approvals:resolved', p, decision))
@@ -2495,10 +2492,12 @@ function wire(): void {
   ipcMain.handle('update:check', () => updates.check())
   ipcMain.handle('update:download', () => updates.download())
   ipcMain.handle('update:install', () => updates.install())
+  // Not a step in any update any more - both platforms install for themselves.
+  // Kept as the way out when one of them cannot: an error state, or somebody
+  // who wants the list rather than the newest.
   ipcMain.handle('update:page', () => {
-    const s = updates.get()
-    if (s.kind === 'manual') void shell.openExternal(s.url)
-    return s.kind === 'manual'
+    void shell.openExternal(updates.releasesUrl)
+    return true
   })
 
   ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
@@ -3744,17 +3743,29 @@ app.whenReady().then(async () => {
   await approvals.start()
   wire()
   createWindow()
-  // Packaged only: an unpackaged app has no `app-update.yml` in its resources
-  // and asking `autoUpdater` anything without one throws.
+  // Packaged only, and one updater per platform - see src/main/update.ts for
+  // why macOS cannot use the same one Windows does.
   if (app.isPackaged) {
     try {
-      const mod = await import('electron-updater')
-      updates.attach({ app, autoUpdater: (mod.default ?? mod).autoUpdater })
+      if (process.platform === 'darwin') {
+        const { loadSparkleBridgeForApp } = await import('electron-sparkle-updater')
+        const bridge = await loadSparkleBridgeForApp((m) => console.log('[sparkle]', m))
+        if (!bridge) throw new Error('the Sparkle bridge did not load')
+        // The feed and the key are read back out of the bundle this is running
+        // from, rather than compiled in: the plist is what CI actually stamped.
+        const plist = join(dirname(app.getPath('exe')), '..', 'Info.plist')
+        updates.attachSparkle(bridge, (key) => plistValue(plist, key))
+      } else {
+        const mod = await import('electron-updater')
+        updates.attach({ app, autoUpdater: (mod.default ?? mod).autoUpdater })
+      }
       updates.start()
     } catch (err) {
       // An app that cannot check for a newer version is an app that runs. This
-      // is the last thing startup does for a reason.
+      // is the last thing startup does for a reason. Said in the window too,
+      // not only here: a silent updater and a working one look identical.
       console.error('[bullpen] the updater did not load:', err)
+      updates.fail(err)
     }
   }
   app.on('activate', () => {

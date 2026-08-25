@@ -1669,6 +1669,9 @@ function PanelToggle({
  * progress, or an app that is already the newest there is. The three states
  * that do draw are the three steps: there is one, it is coming down, it is
  * ready to go on.
+ *
+ * On macOS none of the three ever arrive: Sparkle draws its own window for the
+ * whole sequence, so this stays empty there by design rather than by omission.
  */
 function UpdateChip({ state }: { state: UpdateState | null }) {
   if (!state) return null
@@ -1679,17 +1682,16 @@ function UpdateChip({ state }: { state: UpdateState | null }) {
         ? `downloading ${state.percent}%`
         : state.kind === 'ready'
           ? `restart & update`
-          : state.kind === 'manual'
-            ? `get ${state.next}`
-            : state.kind === 'error'
-              ? 'update failed'
-              : ''
+          : state.kind === 'error'
+            ? 'update failed'
+            : ''
   if (!label) return null
 
   const go = (): void => {
     if (state.kind === 'available') return void window.bullpen.updateDownload()
-    if (state.kind === 'manual') return void window.bullpen.updatePage()
-    if (state.kind === 'error') return void window.bullpen.updateCheck()
+    // The releases page, not another check: an error here is the updater
+    // itself being broken, and asking it again asks the broken thing.
+    if (state.kind === 'error') return void window.bullpen.updatePage()
     if (state.kind !== 'ready') return
     // Installing quits this process, and every agent on the floor is a child of
     // it. Nothing here can save a turn that is mid-flight, so the question is
@@ -1714,11 +1716,9 @@ function UpdateChip({ state }: { state: UpdateState | null }) {
   return (
     <button
       title={
-        state.kind === 'manual'
-          ? `${state.why} - opens the download page`
-          : state.kind === 'error'
-            ? `${state.message} - click to try again`
-            : `you are on ${state.version}`
+        state.kind === 'error'
+          ? `${state.message} - click to open the releases page`
+          : `you are on ${state.version}`
       }
       style={{ ...S.panelToggle, ...S.updateChip, color: tone, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       onClick={go}

@@ -1615,8 +1615,102 @@ unsigned and takes the `manual` path §56 describes - the button opens the
 releases page instead of installing. Signing is still the deferred $99. Windows
 NSIS installs in place unsigned, so that half is whole.
 
+*Superseded by §58 for the macOS half: Sparkle does not need the $99, so the
+`manual` path is gone and the workflow grew a third job.*
+
 **Not verified:** the workflow has never run - there are no tags on this repo
 yet, and a workflow file cannot be executed locally. What is verified is
 everything it calls: `npm test` (400 pass), `npm run build`, and
 `electron-builder --mac`, which produced both DMGs, both zips, `latest-mac.yml`
 with per-artifact sha512, and ran the `afterPack` chmod on 3 spawn-helpers.
+
+
+## 58. macOS updates itself now, and it is not Squirrel that does it
+
+§56 and §57 both end at the same wall: Squirrel.Mac will not replace an
+application it cannot read a Developer ID signature from, so every macOS release
+this project has ever made offered a button that opened a download page. Sparkle
+validates an update by the EdDSA signature on the *archive* rather than by the
+app's own code signature, so an ad-hoc signed build updates itself for real. The
+`manual` state, `canInstallInPlace`, and the `codesign -dv` call that fed them
+are deleted - that is the whole point of the change, not a side effect of it.
+
+**Windows was not moved, deliberately.** The obvious symmetry is WinSparkle, and
+it is not available: `winsparkle-node@0.6.0` is the only binding on npm, it calls
+`v8::String::Utf8Value(args[0])` - the one-argument constructor V8 removed in 6.9
+- so it does not compile against Electron 43 (`v8-primitive.h:629` has only the
+two-argument form); it ships no arm64 DLL; its `binding.gyp` has no platform
+condition, so `npm install` runs Windows sources on the macOS dev machine; and it
+bundles WinSparkle 0.6, which predates Ed25519 and can only do DSA. The upstream
+`electron-sparkle-updater` README recommends the same split independently.
+electron-updater stays on Windows, where NSIS was never the problem.
+
+**Four things the first pass had wrong**, each found by actually packaging:
+
+- `electron-builder.mjs` was never read. electron-builder 26 does not discover a
+  `.mjs` config, and the run reported nothing - it fell back to defaults and
+  produced a lowercase `bullpen` in `dist/` with no afterPack, which reads as a
+  successful build. The scripts pass `--config` explicitly now.
+- `sparkleBuilderConfig()` returns a root `zip` key that electron-builder 26
+  rejects outright. Only `dmg` is taken from it.
+- Ad-hoc signing ran on each per-arch staging copy, which rewrote
+  `Electron Framework.../CodeResources` differently per arch and made
+  @electron/universal refuse the merge. It runs on the merged bundle only, which
+  electron-builder gives afterPack a second pass for.
+- `singleArchFiles` is only forwarded to the ASAR merge; node-pty's binaries live
+  in `app.asar.unpacked`, which is walked separately and reads `x64ArchFiles`.
+
+**Why the mac package is universal now.** `generate_appcast` refuses a directory
+holding two archives with the same bundle version - "Duplicate updates are not
+supported" - and an arm64 zip and an x64 zip of one release are exactly that. An
+appcast item carries no architecture, so a per-arch pair cannot share a feed. The
+cost is that every update is both slices, roughly twice the download. The
+alternative, a feed per architecture chosen at runtime, puts the architecture in
+three places at once and fails by having an Intel Mac update itself to a build
+that will not launch. Delta updates are the upgrade path if the size bites.
+
+**Breaks if wrong:** `generate_appcast` accepts a wrongly-shaped private key,
+writes an appcast with no `sparkle:edSignature` in it, and exits 0 with no
+warning. An app carrying `SUPublicEDKey` then rejects every update it is offered,
+and the release looks complete. The workflow greps for the signature and fails
+rather than publishing that, but the key itself has to be the file
+`generate_keys -x` writes.
+
+**Not verified:** the signature. Making a Sparkle key means writing one into the
+operator's login Keychain, which is theirs to do, not this session's - so the end
+of the chain was exercised with a synthesized ed25519 key instead, and that is
+exactly the case that produced the silent unsigned appcast above. What is
+verified: the bridge compiles against Electron 43 and loads inside the packaged
+app, exporting `init, checkForUpdates, installUpdateNow, setAutomaticChecks`, and
+resolving `@rpath/Sparkle.framework` (2.9.4) out of `Contents/Frameworks`; the
+universal package carries `x86_64 arm64` for the app, the bridge and the
+framework; `codesign --verify --deep --strict` passes, which is Sparkle's own
+gate; `SUFeedURL`, `SUScheduledCheckInterval` and 35 localizations land in the
+plist, and `SPARKLE_ED_PUBLIC_KEY` reaches `SUPublicEDKey` when set and leaves the
+placeholder when not; `generate_appcast` runs over the real zip and writes an
+item with the right version, minimum system version and enclosure URL; and the
+signature guard fires on the unsigned appcast that run produced. 402 tests pass.
+
+**Also not verified:** the workflow itself has still never run - there are no
+tags on the remote.
+
+**Why `rebuild:sparkle` names its compiler.** node-gyp's generated Makefile
+takes the compiler from `CC ?= cc`, and `cc` has been a name for the system C
+compiler for as long as there have been C compilers. It is also the name of this
+team's `claude`/`codex` wrapper, which is on `PATH` ahead of `/usr/bin`. node-gyp
+hands it `-o` and it answers `error: unknown option '-o'` - a build failure that
+says nothing about what it really hit. Only the C target breaks: node-pty is C++
+only and `c++` is not shadowed, which is why `npm install` has always worked and
+only this one script did not.
+
+Pinned to `/usr/bin/clang` and `/usr/bin/clang++` rather than to what `xcrun -f
+clang` prints. Those two are the Xcode shims: they respect `xcode-select` and
+they inject `-isysroot`. The path `xcrun -f` resolves to is the raw binary, which
+does not - so it gets past the C target and then fails compiling the Objective-C
+bridge with `'Foundation/Foundation.h' file not found`, having looked in
+`/System/Library/Frameworks`, where the headers have not lived since the SDK
+moved. Both failures were reproduced; the pinned form builds with the wrapper
+first on `PATH` and no environment set.
+
+The script only ever runs on macOS - Sparkle is a macOS framework and
+`fetch-sparkle.sh` is bash - so a hard macOS path costs nothing elsewhere.

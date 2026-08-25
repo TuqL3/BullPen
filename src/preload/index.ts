@@ -179,7 +179,6 @@ export type UpdateState =
   | { kind: 'available'; version: string; next: string; notes?: string }
   | { kind: 'downloading'; version: string; next: string; percent: number }
   | { kind: 'ready'; version: string; next: string }
-  | { kind: 'manual'; version: string; next: string; url: string; why: string }
   | { kind: 'error'; version: string; message: string }
 
 const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void): (() => void) => {
@@ -538,15 +537,16 @@ const api = {
    * The version this is, and whether there is a newer one.
    *
    * `kind: 'dev'` means the app is not packaged and there is nothing to check.
-   * `kind: 'manual'` means a new version exists and this copy cannot install it
-   * for itself - `updatePage()` opens where to get it.
+   * On macOS it stops at `idle`: Sparkle draws its own window for the find,
+   * download and install, so there is nothing here for the title bar to say.
+   * The three-step sequence below is the Windows one.
    */
   update: (): Promise<UpdateState> => ipcRenderer.invoke('update:get'),
   updateCheck: (): Promise<UpdateState> => ipcRenderer.invoke('update:check'),
   updateDownload: (): Promise<UpdateState> => ipcRenderer.invoke('update:download'),
   /** Quits, installs, and comes back on the new version. Ask first. */
   updateInstall: (): Promise<boolean> => ipcRenderer.invoke('update:install'),
-  /** Opens the releases page in a browser, when installing is not on offer. */
+  /** Opens the releases page in a browser. The way out when the updater broke. */
   updatePage: (): Promise<boolean> => ipcRenderer.invoke('update:page'),
   onUpdate: (fn: (state: UpdateState) => void): (() => void) => on('update:state', fn),
   /** Throw away one file's changes. Irreversible: a tracked file goes back to
