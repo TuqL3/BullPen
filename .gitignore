@@ -4,3 +4,4 @@ dist/
 .bullpen/
 *.log
 release/
+key.txt

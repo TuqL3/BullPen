@@ -1691,8 +1691,21 @@ placeholder when not; `generate_appcast` runs over the real zip and writes an
 item with the right version, minimum system version and enclosure URL; and the
 signature guard fires on the unsigned appcast that run produced. 402 tests pass.
 
-**Also not verified:** the workflow itself has still never run - there are no
-tags on the remote.
+**No "Check for Updates" anywhere in the UI, on purpose.** The bridge is four
+functions and none of them is a callback, so main cannot be told an update was
+found - which is the whole reason the title-bar chip stays empty on macOS.
+Sparkle's own scheduler, armed once with `setAutomaticChecks(true)` and paced by
+`SUScheduledCheckInterval`, is what looks; its own window is what reports. A
+button wired to `checkForUpdates()` would open that same window on demand, and
+it is the one thing worth adding here if anybody ever asks for it.
+
+**What the first run proved.** `v0.1.1` reached the remote and the workflow
+ran. It stopped where it was built to stop: the secrets had been added as
+*environment* secrets, which are a separate store and never reach a job that
+does not declare `environment:`, so `SPARKLE_ED_PUBLIC_KEY` arrived empty and the
+guard refused to build. That is the guard working, not the pipeline failing -
+nothing was packaged, and no release was published with an updater that could
+not update. The steps past it have still never executed.
 
 **Why `rebuild:sparkle` names its compiler.** node-gyp's generated Makefile
 takes the compiler from `CC ?= cc`, and `cc` has been a name for the system C

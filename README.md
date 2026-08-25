@@ -113,10 +113,9 @@ app in a VM or container.
 
 ## Updating
 
-A packaged app checks for a newer version 8 seconds after launch and every six
-hours after that, and nothing downloads or installs without being asked.
-
-The two platforms use different updaters, because they never had the same
+A packaged app checks for a newer version on its own, and nothing downloads or
+installs without being asked. *When* it checks is the updater's business, and
+the two platforms use different updaters because they never had the same
 problem.
 
 **macOS - Sparkle.** Squirrel.Mac, which is what `electron-updater` drives here,
@@ -126,8 +125,14 @@ archive instead, so an ad-hoc signed build updates itself for real. Sparkle also
 draws its own window for the whole find/download/install sequence, so the title
 bar stays empty on macOS - what you see is Sparkle's dialog, not Bullpen's.
 
+Sparkle keeps its own schedule, hourly, off `SUScheduledCheckInterval` in
+`Info.plist`; Bullpen only arms it. There is no "Check for Updates" item in the
+UI, because there is nothing for one to do that the schedule does not already
+do - see §58 in OPEN-QUESTIONS.md.
+
 **Windows - electron-updater.** NSIS replaces an unsigned install happily, so
-nothing needed solving. The title-bar chip is this path: there is one, it is
+nothing needed solving. This one checks 8 seconds after launch and every six
+hours after that, and the title-bar chip is its three steps: there is one, it is
 coming down, it is ready to go on.
 
 ### Publishing a version
