@@ -156,6 +156,17 @@ test('one stray character is located, so it can be recognised', () => {
   assert.throws(() => publicKeyFromPrivate(`${seed}%`), /pbcopy/)
 })
 
+test('the stray character is named by code point, not left to guesswork', () => {
+  // The culprit is not part of the key, so naming it leaks nothing - and
+  // "U+0025" ends the argument about whether it is zsh's "%" or something else.
+  const seed = b64(randomBytes(32))
+  assert.throws(() => publicKeyFromPrivate(`${seed}%`), /U\+0025/)
+  // A zero-width space survives trim() and is invisible in every editor, which
+  // is exactly why it has to be named rather than described.
+  assert.throws(() => publicKeyFromPrivate(`${seed}\u200b`), /U\+200B/)
+  assert.throws(() => publicKeyFromPrivate(`${seed}"`), /U\+0022/)
+})
+
 test('an unpadded key is not treated as mangled', () => {
   // Refusing a key that is merely missing its "=" would be one more false
   // alarm, and this file has raised enough of those.

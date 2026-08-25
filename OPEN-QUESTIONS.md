@@ -2099,3 +2099,31 @@ character at the end is consistent with it and with nothing else that has come
 up, but the value is a secret and the guard is deliberately unable to name it.
 If the next run still refuses the key, the count and the position will have
 changed and this explanation is wrong.
+
+## 67. The same 45 characters, twice
+
+`v0.1.8` ran the §66 code and reported exactly what `v0.1.7` had: 45 characters,
+one stray, at the very end. The secret had not changed between the two runs -
+the operator's local check on `key.txt` passed, so the file was clean and
+something between the file and the secret box was not.
+
+The guard now names the character by code point. It is not part of the key -
+it is the contamination - so `U+0025` can be printed in a public log while the
+44 characters around it cannot. Guessing at it from a description has now cost
+two runs: `U+0025` is zsh's `%`, `U+200B` a zero-width space that survives
+`trim()` and is invisible in every editor, `U+0022` a quote.
+
+**The check that closes the loop is local, and does not involve GitHub.**
+
+```bash
+SPARKLE_ED_PRIVATE_KEY="$(pbpaste)" node scripts/check-sparkle-keypair.mjs --print-public
+```
+
+That runs the same guard against exactly what is about to be pasted. A public
+key printed means the clipboard is clean, and if the secret still reports 45
+characters afterwards then the paste did not take - which is a different problem
+from a mangled key and had until now been indistinguishable from one.
+
+**Not verified, and now unlikely to matter:** which of the two it is. The code
+point in the next run settles the first; the local clipboard check settles the
+second; neither needs a tag.

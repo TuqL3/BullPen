@@ -95,13 +95,20 @@ function strayReport(value) {
   const at = [...s].map((c, i) => (/[A-Za-z0-9+/=]/.test(c) ? -1 : i + 1)).filter((i) => i > 0)
   if (at.length === 0) return ''
 
+  // The code point of a character that is *not* part of the key. It names the
+  // culprit outright - U+0025 is zsh's "%", U+200B a zero-width space picked up
+  // from a web page - and it says nothing about the 44 characters that are.
+  const codes = [...new Set(at.map((i) => s.codePointAt(i - 1)))]
+    .map((c) => `U+${c.toString(16).toUpperCase().padStart(4, '0')}`)
+    .join(', ')
+
   const where =
     at.length === 1
       ? at[0] === s.length
         ? ` at the very end - a terminal artefact, such as the reverse-video "%" zsh prints for a file with no trailing newline`
         : ` at character ${at[0]} of ${s.length} - a line break from a wrapped paste`
       : ` at characters ${at.slice(0, 5).join(', ')}${at.length > 5 ? ', ...' : ''}`
-  return `, ${at.length} of them outside the base64 alphabet${where}`
+  return `, ${at.length} of them outside the base64 alphabet (${codes})${where}`
 }
 
 /** How many characters a value carries that base64 has no meaning for. */
