@@ -1,5 +1,13 @@
 appId: com.bullpen.app
 productName: BullPen
+
+# Where a built app looks for a newer one. electron-builder writes the
+# `latest*.yml` feed from this and embeds `app-update.yml` in the package;
+# `electron-updater` reads both. Publishing needs GH_TOKEN in the environment.
+publish:
+  provider: github
+  owner: TuqL3
+  repo: BullPen
 directories:
   output: release
   buildResources: build

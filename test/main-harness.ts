@@ -55,6 +55,15 @@ export type Main = {
   stop(): Promise<void>
 }
 
+/**
+ * Which button the stubbed native dialogs come back with.
+ *
+ * Mutable and shared rather than a parameter: the dialog is stubbed once, when
+ * main is imported, and a test that needs the second answer runs long after
+ * that. Set it, and put it back.
+ */
+export const dialogAnswer = { messageBox: 0 }
+
 export async function bootMain(home: string): Promise<Main> {
   const handlers = new Map<string, (...a: unknown[]) => unknown>()
   const listeners = new Map<string, (...a: unknown[]) => unknown>()
@@ -126,6 +135,10 @@ export async function bootMain(home: string): Promise<Main> {
       app: {
         isPackaged: true,
         getPath: () => home,
+        // Read at load, for the updater's "you are on" line. A test build has
+        // no version of its own and never checks for a newer one.
+        getVersion: () => '0.0.0-test',
+        getAppPath: () => home,
         setName: () => {},
         whenReady: () => ready,
         on: () => {},
@@ -139,12 +152,14 @@ export async function bootMain(home: string): Promise<Main> {
       BrowserWindow: Object.assign(function () {
         return win
       }, { getAllWindows: () => [win] }),
-      // `showMessageBox` answers with the default button, which is what a
-      // person clicking through would do. Absent, `ui:unsaved` threw rather
-      // than returning - a channel the harness could not reach at all.
+      // `showMessageBox` answers with `dialogAnswer.messageBox` - 0, the first
+      // button, which is what a person clicking through would do. Absent,
+      // `ui:unsaved` threw rather than returning - a channel the harness could
+      // not reach at all. A test that is about the other button sets it, and
+      // puts it back.
       dialog: {
         showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-        showMessageBox: async () => ({ response: 0 })
+        showMessageBox: async () => ({ response: dialogAnswer.messageBox })
       },
       Notification: { isSupported: () => false },
       screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },

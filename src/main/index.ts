@@ -22,6 +22,7 @@ import { Asks, asksPath, REPORTING, type Ask } from './asks.ts'
 import { engineArgs, engineFor } from '../engines.ts'
 import { bannerModel, configuredModel } from './climodel.ts'
 import { newToken, Webhooks } from './webhook.ts'
+import { Updates, type UpdateState } from './update.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
 import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
 import {
@@ -617,6 +618,15 @@ function pushRules(): void {
  * the god agent, who is the only one whose job is deciding who does what.
  */
 const webhooks = new Webhooks()
+/**
+ * Whether a newer version has been published.
+ *
+ * Inert until `attach` is called, which only happens in a packaged app - see
+ * `whenReady`. `electron-updater` is a CommonJS module that loads Electron on
+ * import, so it is imported there and not here: this file is also loaded by
+ * tests, which have no Electron for it to find.
+ */
+const updates = new Updates(app.getVersion())
 
 /**
  * What Michael is told every time work is handed to him.
@@ -1229,17 +1239,42 @@ function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType
  * as long as its role does - what goes is the role that is gone, and the fixed
  * agent that a floor has replaced with a different one.
  */
-async function retire(next: Workflow): Promise<string[]> {
-  const gone: string[] = []
+async function retire(next: Workflow): Promise<string[] | null> {
+  const going: string[] = []
   for (const a of ptys.list()) {
     if (a.status !== 'running') continue
     const role = roles.get(a.id) ?? roleOfFixedId(wf, a.id)
     if (!role) continue
     if (hasPlaceFor(next, { id: a.id, role, standing: standing.has(a.id) })) continue
-    await stop(a.id)
-    roles.delete(a.id)
-    standing.delete(a.id)
-    gone.push(a.id)
+    going.push(a.id)
+  }
+  // Killed mid-turn, an agent's work is gone: no record beyond an activity
+  // line, and nobody was asked. An idle one is nothing to ask about - there is
+  // nothing in its hands - so only the ones holding a card stop the switch.
+  //
+  // The second answer keeps the floor that is running rather than keeping the
+  // agents: a floor applied with the agents it has no place for still on it is
+  // the half-applied state everything else here exists to avoid. Escape and the
+  // window close come back as that answer too, so the accident is never the
+  // destructive one.
+  const holding = going.filter((id) => openCard(id))
+  if (holding.length && win) {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Stand them down', `Keep "${wf.name}"`],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${next.name}" has no role for ${holding.length} agent(s) still holding work.`,
+      detail: `${holding.join(', ')} - what they are doing is lost when they are stood down.`
+    })
+    if (response === 1) return null
+  }
+  const gone: string[] = []
+  for (const id of going) {
+    await stop(id)
+    roles.delete(id)
+    standing.delete(id)
+    gone.push(id)
   }
   if (gone.length) {
     activity.push('spawn', 'bullpen', `stood down, not on "${next.name}": ${gone.join(', ')}`)
@@ -2245,6 +2280,18 @@ function wire(): void {
       id: p.agentId
     })
   })
+  updates.on('state', (s: UpdateState) => send('update:state', s))
+  // Once per version, through the same door every other "you are wanted" goes
+  // through. `notify` is already the thing that stays quiet while the window
+  // has focus and says nothing twice in a row.
+  updates.on('found', (next: string, installable: boolean) => {
+    notify(
+      'update',
+      `New version available - ${next}`,
+      installable ? 'Open the app to update.' : 'Open the app for the download link.',
+      { tab: 'terminal' }
+    )
+  })
   approvals.on('pending', (p: Pending) => send('approvals:pending', p))
   approvals.on('resolved', (p: Pending, decision: string) => send('approvals:resolved', p, decision))
 
@@ -2437,6 +2484,23 @@ function wire(): void {
       }
     }
   )
+  /**
+   * The version this is, and the one there could be.
+   *
+   * Four channels: what the state is, ask again, fetch it, and put it on. The
+   * last one takes the whole app down with it - every agent on the floor is a
+   * child of this process - so the renderer asks before calling it.
+   */
+  ipcMain.handle('update:get', () => updates.get())
+  ipcMain.handle('update:check', () => updates.check())
+  ipcMain.handle('update:download', () => updates.download())
+  ipcMain.handle('update:install', () => updates.install())
+  ipcMain.handle('update:page', () => {
+    const s = updates.get()
+    if (s.kind === 'manual') void shell.openExternal(s.url)
+    return s.kind === 'manual'
+  })
+
   ipcMain.handle('git:changes', (_e, root: string) => gitChanges(root))
   ipcMain.handle('git:diff', (_e, root: string, rel: string) => gitDiff(root, rel))
   ipcMain.handle('git:stats', (_e, root: string) => gitStats(root))
@@ -2842,6 +2906,7 @@ function wire(): void {
     // save so they can be shown, and the floor is what they drew.
     const problems = lint(next, rulebook())
     const retired = await applyFloor(next)
+    if (retired === null) return kept()
     return { workflow: wf, markdown: toMarkdown(wf), problems, retired }
   })
 
@@ -3163,9 +3228,12 @@ function wire(): void {
    * `saved` is the text to keep on disk - what was typed, unless the desk had to
    * be reseated, in which case what is running is not what was typed.
    */
-  async function applyFloor(next: Workflow, saved?: string): Promise<string[]> {
+  async function applyFloor(next: Workflow, saved?: string): Promise<string[] | null> {
     // Before `wf` moves, while the old floor can still say who was who.
     const retired = await retire(next)
+    // The human was asked and said no. Nothing has moved yet - this is the
+    // first line of the switch - so there is nothing to undo.
+    if (retired === null) return null
     wf = next
     hive.reserved = { human: wf.human, hire: wf.hire, board: BOARD_PARTY }
     godId = fixedId(wf, wf.dispatch)
@@ -3204,6 +3272,17 @@ function wire(): void {
     return retired
   }
 
+  /**
+   * What a door says when the human answered the stand-down question with no.
+   *
+   * Reported as an error because that is the one shape every caller already
+   * shows: a refusal with a reason, and the floor still running is the one
+   * named in it. `wf` is untouched - `applyFloor` stops before it moves.
+   */
+  const kept = (): { error: string } => ({
+    error: `Kept "${wf.name}" - the agents holding work are still on it.`
+  })
+
   ipcMain.handle('workflow:set', async (_e, text: string) => {
     const parsed = parseMarkdown(text)
     if ('error' in parsed) return { error: parsed.error }
@@ -3223,6 +3302,7 @@ function wire(): void {
     // running is not what was typed, and keeping the typed copy would show a
     // floor with somebody else's name on the front desk every time it opened.
     const retired = await applyFloor(parsed.workflow, reseated ? undefined : text)
+    if (retired === null) return kept()
     return { workflow: wf, markdown: toMarkdown(wf), retired }
   })
 
@@ -3664,6 +3744,19 @@ app.whenReady().then(async () => {
   await approvals.start()
   wire()
   createWindow()
+  // Packaged only: an unpackaged app has no `app-update.yml` in its resources
+  // and asking `autoUpdater` anything without one throws.
+  if (app.isPackaged) {
+    try {
+      const mod = await import('electron-updater')
+      updates.attach({ app, autoUpdater: (mod.default ?? mod).autoUpdater })
+      updates.start()
+    } catch (err) {
+      // An app that cannot check for a newer version is an app that runs. This
+      // is the last thing startup does for a reason.
+      console.error('[bullpen] the updater did not load:', err)
+    }
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -3676,6 +3769,7 @@ app.whenReady().then(async () => {
 // SIGKILL and a hard crash remain uncatchable by definition; those are covered
 // by reapOrphans() on the next startup, not here.
 const shutdown = (): void => {
+  updates.stop()
   ptys.killAll()
   approvals.stop()
   hive.stop()

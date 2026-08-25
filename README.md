@@ -111,6 +111,42 @@ What this does **not** protect against:
 Give agents a scratch directory, not `$HOME`. For real isolation, run the whole
 app in a VM or container.
 
+## Updating
+
+A packaged app checks GitHub Releases 8 seconds after launch and every six hours
+after that. A newer version shows up as a button in the title bar: press it to
+download, press it again to restart into it. Nothing downloads or installs
+without being asked.
+
+macOS needs the app to be signed with a Developer ID before it can replace
+itself - Squirrel refuses a build it cannot read a signature from - so an
+unsigned build offers the releases page instead. Windows updates in place,
+signed or not.
+
+Publishing a version is a tag. `npm version` writes `package.json` and the
+matching tag together, and pushing the tag is the whole release:
+
+```bash
+npm version patch        # or minor / major
+git push --follow-tags
+```
+
+`.github/workflows/release.yml` then packs macOS on a macOS runner and Windows
+on a Windows runner - node-pty is native, so neither cross-builds - and both
+upload into one **draft** release. Look at it, then press Publish: a draft is
+invisible to `electron-updater`, so nothing updates until you say so.
+
+The workflow refuses a tag that does not match `package.json`. electron-builder
+publishes to `v${version}` regardless of which tag started the run, so without
+that check the artifacts land on a release nobody tagged.
+
+CI builds are unsigned - there is no Developer ID in the runner - which is the
+`manual` update path above. To build and upload from this machine instead:
+
+```bash
+GH_TOKEN=... npm run release   # builds mac + win, uploads to GitHub Releases
+```
+
 ## Layout
 
 ```

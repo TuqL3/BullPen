@@ -17,7 +17,7 @@ import { Workers } from './tabs/Workers'
 import { projectOf, slug } from './roster'
 import { labelForModel, matchModel, modelOf, withModel } from '../../models'
 import { engineFor } from '../../engines'
-import type { Dispatch, Question, Report, WorkflowInfo } from '../../preload/index'
+import type { Dispatch, Question, Report, UpdateState, WorkflowInfo } from '../../preload/index'
 import {
   paneSize,
   setTerminalFontSize,
@@ -104,6 +104,8 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>(window.bullpen.initialMode)
   const [tab, setTab] = useState<Tab>('terminal')
+  /** The version this is, and whether there is a newer one. Null until asked. */
+  const [update, setUpdate] = useState<UpdateState | null>(null)
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
   /**
    * The floor's shape. Read once from main, which is where it is enforced -
@@ -387,6 +389,13 @@ export default function App() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  // Told once and then followed: main announces every change to the updater's
+  // state, and a release feed is idle nine times out of ten.
+  useEffect(() => {
+    void window.bullpen.update().then(setUpdate)
+    return window.bullpen.onUpdate(setUpdate)
   }, [])
 
   // Agents read the floor from a file, so it has to be rewritten whenever the
@@ -1018,6 +1027,7 @@ export default function App() {
     // light grey down the side of every scrolling panel.
     <div style={{ ...(VARS[mode] as React.CSSProperties), colorScheme: mode, ...S.app }}>
       <TitleBar
+        update={update}
         layout={layout}
         onTogglePanel={(id) => applyLayout(togglePanel(layout, id))}
         reviewing={reviewing}
@@ -1616,7 +1626,8 @@ function PanelToggle({
   id,
   layout,
   onToggle,
-  size
+  size,
+  flush
 }: {
   id: Switchable
   layout: Layout
@@ -1624,6 +1635,9 @@ function PanelToggle({
   /** Bigger than the default where the glyph has to hold its own beside
    *  something that is not one of ours - the native traffic lights. */
   size?: number
+  /** No vertical padding, for the one that has to be as tall as a traffic
+   *  light and not a pixel taller. */
+  flush?: boolean
 }) {
   const on = !layout.hidden.includes(id)
   return (
@@ -1633,6 +1647,7 @@ function PanelToggle({
       style={
         {
           ...S.panelToggle,
+          ...(flush ? S.panelToggleFlush : null),
           WebkitAppRegion: 'no-drag',
           // Colour, not a box. Four boxed icons in a row read as one control
           // with four parts, and the box was doing the work the colour already
@@ -1647,13 +1662,81 @@ function PanelToggle({
   )
 }
 
+/**
+ * The one line the app says about its own version, and only when it has one.
+ *
+ * Nothing is drawn while there is nothing to say - a dev run, a check in
+ * progress, or an app that is already the newest there is. The three states
+ * that do draw are the three steps: there is one, it is coming down, it is
+ * ready to go on.
+ */
+function UpdateChip({ state }: { state: UpdateState | null }) {
+  if (!state) return null
+  const label =
+    state.kind === 'available'
+      ? `update ${state.next}`
+      : state.kind === 'downloading'
+        ? `downloading ${state.percent}%`
+        : state.kind === 'ready'
+          ? `restart & update`
+          : state.kind === 'manual'
+            ? `get ${state.next}`
+            : state.kind === 'error'
+              ? 'update failed'
+              : ''
+  if (!label) return null
+
+  const go = (): void => {
+    if (state.kind === 'available') return void window.bullpen.updateDownload()
+    if (state.kind === 'manual') return void window.bullpen.updatePage()
+    if (state.kind === 'error') return void window.bullpen.updateCheck()
+    if (state.kind !== 'ready') return
+    // Installing quits this process, and every agent on the floor is a child of
+    // it. Nothing here can save a turn that is mid-flight, so the question is
+    // asked in the words of what is lost rather than "are you sure".
+    if (
+      !confirm(
+        `Restart and install ${state.next}?\n\nEvery agent on the floor is stopped. ` +
+          `Whatever any of them is in the middle of is lost.`
+      )
+    ) {
+      return
+    }
+    void window.bullpen.updateInstall()
+  }
+
+  const tone =
+    state.kind === 'error'
+      ? 'var(--danger)'
+      : state.kind === 'downloading'
+        ? 'var(--muted)'
+        : 'var(--accent-ink)'
+  return (
+    <button
+      title={
+        state.kind === 'manual'
+          ? `${state.why} - opens the download page`
+          : state.kind === 'error'
+            ? `${state.message} - click to try again`
+            : `you are on ${state.version}`
+      }
+      style={{ ...S.panelToggle, ...S.updateChip, color: tone, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      onClick={go}
+      disabled={state.kind === 'downloading'}
+    >
+      {label}
+    </button>
+  )
+}
+
 function TitleBar({
   layout,
   onTogglePanel,
   reviewing,
   diffStat,
   onToggleReview,
-  onSettings
+  onSettings,
+  update
 }: {
   layout: Layout
   onTogglePanel: (id: PanelId) => void
@@ -1663,21 +1746,36 @@ function TitleBar({
   onToggleReview: () => void
   /** How this floor and this machine are set up. */
   onSettings: () => void
+  /** The version this is, and the one there could be. Null until main answers. */
+  update: UpdateState | null
 }) {
   return (
     <div style={S.titlebar}>
-      {/* Leaves room for the macOS traffic lights, which stay native. Wide
-          enough to clear the last light and no wider: the lights end 66px in
-          (14px inset, three 12px dots, 20px apart), the bar already pads 10 and
-          gaps 8, so 52 puts the first switch right beside them. */}
-      <div style={{ width: window.bullpen.isMac ? 52 : 14 }} />
+      {/* Leaves room for the macOS traffic lights, which stay native.
+          The lights are set in main: inset 14, three 12px dots, 8px apart - so
+          they run 14..66 and the next thing in the rhythm starts at 74. The bar
+          pads 10 and gaps 8, and the switch pads 4, which puts its glyph at
+          10 + 50 + 8 + 4 + 2 = 74. The last 2 is the slack inside a 16px box
+          around a glyph whose ink is 12.4 of those 16 - the same 12 the dots
+          are, which is the number the eye is actually comparing. */}
+      <div style={{ width: window.bullpen.isMac ? 50 : 14 }} />
       {/* The roster sits on the left of the window, so its switch sits on the
           left of the bar - where the wordmark used to be. A title bar that
           spells out the name of the app you are looking at is decoration. */}
-      {/* 15, not the default 13: the glyph only fills 11/16 of its box, so at
-          13 it read as smaller than the 12px traffic lights it sits against. */}
-      <PanelToggle id="roster" layout={layout} onToggle={onTogglePanel} size={15} />
+      {/* 16, not the default 13, and no vertical padding at all.
+          The glyph's ink fills 12.4 of its 16-unit box, so a 16px box draws a
+          12px mark - the size of a traffic light. The padding is what made the
+          button taller than the dots beside it: 15px of glyph in 3px of padding
+          top and bottom is a 21px control in a row of 12px ones. */}
+      <PanelToggle
+        id="roster"
+        layout={layout}
+        onToggle={onTogglePanel}
+        size={16}
+        flush
+      />
       <div style={{ flex: 1 }} />
+      <UpdateChip state={update} />
       {/* Fixed order, so a toggle does not move when the panels are rearranged
           and the button under the cursor stays the one you meant. The command
           centre has no switch: it is what the window is for, and a hidden one
@@ -2089,6 +2187,13 @@ const S: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     padding: '3px 6px'
   },
+  // Beside the traffic lights the padding is what shows: it cannot add height
+  // the dots do not have. 4 each side keeps the click target wider than the
+  // glyph without moving it off the rhythm the spacer sets up.
+  panelToggleFlush: { padding: '0 4px' },
+  // Words, not a glyph: "restart & update" is not a thing anybody has a symbol
+  // for, and this is the one control on the bar that changes what it says.
+  updateChip: { ...LABEL, font: `10px ${MONO}`, gap: 5, padding: '3px 8px' },
   groupHead: {
     display: 'flex',
     alignItems: 'center',

@@ -279,16 +279,27 @@ to the human through Michael. What that run did not settle:
   `electron-builder.yml`. Both cross-build from one macOS machine — `node-pty`
   1.1 is node-api and ships its own Windows prebuilds, so `npmRebuild: false`
   and no Windows toolchain is needed.
-- **Assumed, not verified:** the Windows package was never launched on Windows.
-  Only the macOS arm64 package was smoke-tested (`node-pty` spawns from inside
-  the asar). If Windows is wrong, it fails at `loadNativeModule`.
-- **Assumed:** the fd-leak patch (`scripts/patch-node-pty.mjs`) compiles only
-  into `build/Release`, which is arm64. An Intel Mac falls back to the unpatched
-  `prebuilds/darwin-x64`, so the descriptor leak returns there. Windows never
-  needed the patch — it is guarded to the fork path.
+- **Still unverified:** the Windows package has never been *launched* on
+  Windows, and nothing short of a Windows machine settles that. What was an
+  assumption underneath it is now read rather than assumed: `loadNativeModule`
+  (`node-pty/lib/utils.js`) tries `build/Release`, `build/Debug` and then
+  `prebuilds/<platform>-<arch>`, each in a `try`/`catch`, so a binary for the
+  wrong platform is a fall-through and not a failure. The Windows package
+  carries `prebuilds/win32-x64` and `win32-arm64` complete — `conpty.node`,
+  `pty.node`, `winpty.dll`, `winpty-agent.exe` — outside the asar.
+- **Was wrong, not merely assumed:** "an Intel Mac falls back to the unpatched
+  `prebuilds/darwin-x64`, so the descriptor leak returns there". macOS never
+  takes the leaking path at all. `pty.cc` spawns through `pty_posix_spawn` under
+  `#if defined(__APPLE__)` with `POSIX_SPAWN_CLOEXEC_DEFAULT`, and
+  `scripts/patch-node-pty.mjs` guards its helper with `#if !defined(__APPLE__)`
+  for that reason — the patch is a no-op on every Mac, of either architecture.
+  It matters on Linux, which is built from source on the machine that runs it
+  (`postinstall`), and never from a prebuild.
 - macOS notarization needs Apple Developer, $99/yr, or Gatekeeper blocks the app.
 - Windows code signing cert, ~$100-400/yr, or SmartScreen warns on every install.
-- No app icon yet; both builds use the default Electron icon.
+- The icon is generated, not drawn: `scripts/make-icon.ts` writes `build/icon.png`
+  from the same procedural bust the roster paints, and electron-builder derives
+  the `.icns` and `.ico` from it. No bundled art, so no licence to honour.
 
 None of this matters for personal use. All of it matters before selling.
 
@@ -479,8 +490,12 @@ organisation carrying one screen's idea of where the boxes sit.
 
 **Breaks if wrong:** somebody arranges a large floor exactly how they think of
 it, closes the dialog, and it springs back.
-**Fix if it bites:** positions go in `config.json` under the workflow's name -
-this machine's opinion about this floor - and never into the workflow itself.
+
+**Since done, the way that line said:** positions live in `config.json` under
+`ui.chart[<floor name>]`, written the moment a box is put down
+(`OrgChart.tsx: remember`) and read back when the dialog opens. `mergeUi` folds
+them in per floor, so saving one chart does not wipe another's, and the
+workflow itself still carries no coordinates.
 
 ## 16. What a role is for is inferred, not declared
 
@@ -657,7 +672,7 @@ a restart would actually change.
 doing is lost - there is no confirmation and no record beyond the activity line.
 A hired agent survives as long as its role name does, which means a floor that
 renames `dev` to `builder` retires every developer on it.
-**Fix if it bites:** ask before retiring an agent that has an open card.
+**Since done:** it asks. See §54.
 
 ## 29. Handing work to a role, not to a person
 
@@ -1474,3 +1489,134 @@ they covered the drawing they were about. They are the column beside it now,
 full height, one at a time - the same slot `read it` uses, because you are
 either reading the file or editing one thing in it. The title stays put and only
 the body scrolls.
+
+## 54. Nobody is stood down mid-card without being asked
+
+§28's own "fix if it bites", taken. `retire()` works out who the new floor has
+no place for *before* it kills anything, and if any of them is holding an open
+card it stops and asks - one dialog naming them, not one per agent. An idle
+agent is nobody's question: there is nothing in its hands to lose.
+
+The second answer keeps **the floor that is running**, not the agents. Keeping
+them on a floor with no role for them is the half-applied state the rest of
+`applyFloor` exists to avoid, and `retire()` is its first line, so refusing
+costs nothing to undo - `wf` has not moved. Both doors (`workflow:set`,
+`workflow:patch`) hand that back as an `error`, which is the one shape every
+caller already renders. `defaultId` and `cancelId` are both the keep answer, so
+escape and the window close are never the destructive one.
+
+**Breaks if wrong:** a floor that cannot be switched to while anybody holds a
+card - the answer is to finish or abandon the card, which is what the board is
+for. And a headless main (`win` null) never asks and stands them down as before.
+
+## 55. The Windows package carried macOS binaries
+
+`build/Release` is whatever `npm install` compiled on the build machine - on a
+Mac, a Mach-O `pty.node` and `spawn-helper` - and it rode into the Windows
+package, where node-pty looks in `build/Release` first and falls through past
+it. It worked, and it was also the one thing that made the Windows load path a
+try/catch rather than a fact. Removed in `scripts/after-pack.mjs`.
+
+**Not in `electron-builder.yml`.** A platform-level `files:` key was tried
+first, and it drops the packer's own default excludes: the very next build put
+`release/` inside the app, and produced a 3.8 GB `app.asar` and an NSIS step
+that died on `failed creating mmap`. The `afterPack` hook touches the packed
+output and nothing else, and the package is back to 193.8 MB with
+`prebuilds/win32-x64` and `win32-arm64` intact.
+
+**Breaks if wrong:** a Windows machine that builds for itself has a legitimate
+`build/Release` and it would be deleted too. It is guarded on `existsSync` and
+falls back to the prebuilds either way, which is what the packaged app has
+always used.
+
+## 56. The app can tell you it is out of date, and on Windows fix it
+
+`electron-builder` publishes a `latest*.yml` feed to GitHub Releases with a
+sha512 per artifact and embeds `app-update.yml` in the package;
+`electron-updater` reads both, compares versions, downloads the one for this
+platform and checks it against that hash. None of that is re-implemented here.
+`src/main/update.ts` is the state the UI shows and the three verbs it offers -
+check, download, install - and one thing the library does not answer.
+
+**The thing it does not answer: whether this copy can install anything.** macOS
+hands the install to Squirrel, which refuses an application it cannot read a
+code signature from - which is every build made without a Developer ID. Asking
+`codesign -dv` *before* the download turns a button that always fails into one
+that says what it can do, which is open the releases page. Windows needs none of
+this: NSIS replaces an unsigned install happily.
+
+**Nothing happens automatically twice.** `autoDownload` off, because a download
+is a decision; `autoInstallOnAppQuit` off, because an app that changed while
+nobody was looking is worse than one that asked. Installing quits the process
+and every agent on the floor is a child of it, so the renderer confirms in the
+words of what is lost rather than "are you sure".
+
+**Three things the first draft had wrong**, all found by the tests:
+
+- `stop()` cleared the interval and not the delayed first check, so a test
+  process - and a quickly-quit app - was held open by a timer nobody could see.
+- `electron-updater` was imported at the top of `index.ts`. It is CommonJS and
+  loads Electron on import, which broke every one of the 49 tests that boot
+  main. It is a dynamic import inside `whenReady` now, packaged-only, wrapped in
+  a `try` - an app that cannot check for a newer version is still an app that
+  runs.
+- The harness's `app` stub had no `getVersion`. Adding one *beside* the existing
+  `isPackaged: true` was the fix; adding a second `isPackaged: false` under it -
+  which is what the first attempt did - silently flipped that flag for every
+  test in the file, and they passed for the wrong reason.
+
+**Breaks if wrong:** the feed is public GitHub - a private repo would need a
+token, and a token cannot be shipped inside an app. There must be at least one
+published release or there is nothing to compare against; `npm run release`
+builds both platforms and uploads, and wants `GH_TOKEN`.
+
+**Not verified:** an actual upgrade. That needs two published releases and a
+signed macOS build, which is the $99 this has been deferring since §55. What is
+verified is everything up to it: the feed is generated with per-artifact sha512,
+`app-update.yml` is embedded in the package, `electron-updater` is inside the
+asar, and the state machine around them is tested against a fake updater and a
+real `codesign`.
+
+
+## 57. A release is a tag, and the runners do the rest
+
+§56 left the app able to *find* a newer version. What it did not leave was a way
+to make one that did not involve one laptop having both toolchains, an unsigned
+Windows package built from macOS sources, and a `GH_TOKEN` in somebody's shell
+history. `.github/workflows/release.yml` is that: push `vX.Y.Z`, and macOS packs
+on a macOS runner and Windows on a Windows runner.
+
+**Why a matrix rather than one `--mac --win` run.** node-pty is native and its
+postinstall patch (`scripts/patch-node-pty.mjs`) is *compiled in*, so the copy
+that ships has to be built where it runs. §55 is the record of what a cross-built
+package looks like: it works, by falling through a `try/catch` to prebuilds, and
+carries the other platform's binaries as evidence.
+
+**Why a separate job creates the draft.** Two builders publishing to a release
+that does not exist yet both try to create it, and the loser's artifacts land
+nowhere anybody looks. One `gh release create --draft` up front, and both
+builders find it and upload into it. `fail-fast: false` for the same reason:
+one platform failing must not cancel the other, because a draft with half a
+release in it is still worth having.
+
+**Why the tag is checked against `package.json`.** electron-builder publishes to
+`v${version}` and does not read the tag at all. Tag `v1.2.0` with `0.1.0` still
+in `package.json` and it opens `v0.1.0`, uploads there, and reports success -
+the release you tagged stays empty and the one nobody tagged has the artifacts.
+Six lines in the `draft` job, and it is the only failure here that would
+otherwise be silent.
+
+**Why the release stays a draft.** `electron-updater` cannot see a draft, so
+nothing on anybody's machine moves until a human presses Publish. That is the
+same decision as `autoDownload = false` in §56, one level up.
+
+**Breaks if wrong:** CI has no Developer ID, so every macOS package it makes is
+unsigned and takes the `manual` path §56 describes - the button opens the
+releases page instead of installing. Signing is still the deferred $99. Windows
+NSIS installs in place unsigned, so that half is whole.
+
+**Not verified:** the workflow has never run - there are no tags on this repo
+yet, and a workflow file cannot be executed locally. What is verified is
+everything it calls: `npm test` (400 pass), `npm run build`, and
+`electron-builder --mac`, which produced both DMGs, both zips, `latest-mac.yml`
+with per-artifact sha512, and ran the `afterPack` chmod on 3 spawn-helpers.

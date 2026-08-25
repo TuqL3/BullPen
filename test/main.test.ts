@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
-import { bootMain, type Main } from './main-harness.ts'
+import { bootMain, dialogAnswer, type Main } from './main-harness.ts'
 import { DEFAULT_WORKFLOW as CHAIN } from './floors.ts'
 import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 import { toMarkdown } from '../src/main/workflow.ts'
@@ -140,9 +140,7 @@ test('a halted agent takes its blocked request off the queue with it', async () 
   assert.ok(main.last('approvals:resolved'), 'and the queue is told')
 })
 
-// Off while the shipped floor is what `write it` is being tried on: main's
-// `SHIPPED_IS_READ_ONLY` is false, and this is the test that says so.
-test.skip('the floor that ships is not written over', async () => {
+test('the floor that ships is not written over', async () => {
   // It has no file: it is in the source. Saving one used to write a file beside
   // it under the same name, which the list then dropped for being a duplicate -
   // so an edit to the shipped floor went to disk and disappeared.
@@ -203,6 +201,36 @@ test('work handed to a role, not a person, lands on somebody and on the board', 
     tasks.some((t) => t.text.includes('build it')),
     `nobody got the work: ${JSON.stringify(tasks)}`
   )
+})
+
+test('an agent holding work is not stood down without being asked', async () => {
+  // A stand-down kills the process mid-turn, and what it was doing goes with
+  // it. Idle agents are nobody's question; one holding a card is work somebody
+  // is waiting on, so the switch stops and asks - and "keep this floor" keeps
+  // the floor that is running, not a half-applied one.
+  await hire('nadia', 'ba')
+  await hire('omar', 'dev')
+  mail('nadia', { to: 'dev', subject: 'build it', body: 'the other thing' })
+  await settle()
+  const held = (await main.invoke<{ agentId: string; text: string }[]>('board:tasks')).find((t) =>
+    t.text.includes('the other thing')
+  )
+  assert.ok(held, 'the card has to be open before the question means anything')
+
+  const before = await main.invoke<{ markdown: string }>('workflow:get')
+  dialogAnswer.messageBox = 1
+  try {
+    // The shipped floor has none of the chain's roles, so every agent on it is
+    // for the door - including the one holding that card.
+    const res = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(SHIPPED[0]))
+    assert.match(res.error ?? '', /^Kept "/, 'the switch is refused, and says which floor stayed')
+  } finally {
+    dialogAnswer.messageBox = 0
+  }
+
+  assert.equal(main.pty(held.agentId).killed, false, 'the agent holding it is still up')
+  const after = await main.invoke<{ markdown: string }>('workflow:get')
+  assert.equal(after.markdown, before.markdown, 'and the floor on disk did not move')
 })
 
 test('what a turn cost, and how full the window is, come off the transcript', async () => {

@@ -170,6 +170,18 @@ export type AgentCost = {
   complete: boolean
 }
 
+/** Mirrors `src/main/update.ts`. Re-stated rather than imported: the preload is
+ *  bundled on its own and must not pull main's modules into the renderer. */
+export type UpdateState =
+  | { kind: 'dev'; version: string }
+  | { kind: 'idle'; version: string; checkedAt?: number }
+  | { kind: 'checking'; version: string }
+  | { kind: 'available'; version: string; next: string; notes?: string }
+  | { kind: 'downloading'; version: string; next: string; percent: number }
+  | { kind: 'ready'; version: string; next: string }
+  | { kind: 'manual'; version: string; next: string; url: string; why: string }
+  | { kind: 'error'; version: string; message: string }
+
 const on = <T extends unknown[]>(channel: string, fn: (...args: T) => void): (() => void) => {
   const listener = (_e: IpcRendererEvent, ...args: unknown[]) => fn(...(args as T))
   ipcRenderer.on(channel, listener)
@@ -521,6 +533,22 @@ const api = {
   gitChanges: (root: string): Promise<GitChanges> => ipcRenderer.invoke('git:changes', root),
   gitDiff: (root: string, rel: string): Promise<{ text: string; error?: string }> =>
     ipcRenderer.invoke('git:diff', root, rel),
+
+  /**
+   * The version this is, and whether there is a newer one.
+   *
+   * `kind: 'dev'` means the app is not packaged and there is nothing to check.
+   * `kind: 'manual'` means a new version exists and this copy cannot install it
+   * for itself - `updatePage()` opens where to get it.
+   */
+  update: (): Promise<UpdateState> => ipcRenderer.invoke('update:get'),
+  updateCheck: (): Promise<UpdateState> => ipcRenderer.invoke('update:check'),
+  updateDownload: (): Promise<UpdateState> => ipcRenderer.invoke('update:download'),
+  /** Quits, installs, and comes back on the new version. Ask first. */
+  updateInstall: (): Promise<boolean> => ipcRenderer.invoke('update:install'),
+  /** Opens the releases page in a browser, when installing is not on offer. */
+  updatePage: (): Promise<boolean> => ipcRenderer.invoke('update:page'),
+  onUpdate: (fn: (state: UpdateState) => void): (() => void) => on('update:state', fn),
   /** Throw away one file's changes. Irreversible: a tracked file goes back to
    *  HEAD, an untracked one is deleted. Ask before calling it. */
   /** Per-file added/deleted counts: one call that says which diffs went stale. */

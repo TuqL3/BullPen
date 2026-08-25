@@ -1,0 +1,80 @@
+name: release
+
+# Tag-driven. `npm version <patch|minor|major>` writes package.json and the
+# matching `vX.Y.Z` tag in one step, and pushing that tag is the whole release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# electron-builder uploads the packages to the release with this token, so the
+# job needs to be allowed to write one.
+permissions:
+  contents: write
+
+jobs:
+  # The draft is created once, here, so the two builders below never race to
+  # create the same release. Both of them find it and upload into it.
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # electron-builder publishes to `v${package.json version}`, not to the tag
+      # that started the run. A mismatch is not an error it reports - it quietly
+      # opens a second release nobody tagged and puts the artifacts there.
+      - name: Refuse a tag that does not match package.json
+        run: |
+          want="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::tag is $GITHUB_REF_NAME but package.json says $want" >&2
+            exit 1
+          fi
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "$GITHUB_REF_NAME already exists - re-running into it"
+          else
+            gh release create "$GITHUB_REF_NAME" --draft \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+
+  build:
+    needs: draft
+    strategy:
+      # One platform failing must not throw away the other's packages. The
+      # release is a draft either way, so half of one is still worth having.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: '--mac'
+          - os: windows-latest
+            target: '--win'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Each platform packs on its own runner rather than cross-building from
+      # one: node-pty is native, and its postinstall patch is compiled in.
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Package and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no Developer ID in CI. Left on, electron-builder picks up
+          # whatever identity the runner's keychain happens to hold and fails
+          # late; off, it packages unsigned, which is what src/main/update.ts
+          # already reports as the `manual` update path.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder ${{ matrix.target }} -p always
