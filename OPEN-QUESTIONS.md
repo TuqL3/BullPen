@@ -2066,3 +2066,36 @@ cost only because each one is the same comparison `generate_appcast` makes.
 **Not verified:** what the secret actually contains. It is a secret; the guard
 reports its character count and how many of those characters base64 has no
 meaning for, which is enough to say what to fix without printing any of it.
+
+## 66. Forty-five characters, and the terminal put the extra one there
+
+The guard added in §65 answered on `v0.1.7`, in ten seconds:
+
+```
+45 characters, 1 of them outside the base64 alphabet
+```
+
+A 44-character key with one character too many, and not at either end - the
+count is taken after trimming. That leaves a terminal artefact: `key.txt` has no
+trailing newline, so `cat` leaves zsh's reverse-video `%` at the end of the
+line, and selecting the line copies the `%` with it.
+
+The message now says **where** the stray character is, because that is what
+turns "something is wrong" into "I know what I did". At the end: a terminal
+artefact, named along with the `%`. In the middle: a line break from a wrapped
+paste. A position is not key material - "character 45 is not base64" says
+nothing about the other 44 - so this can be said out loud in a public log.
+
+It also says what to run instead:
+
+```bash
+tr -d '\n' < key.txt | pbcopy
+```
+
+which never renders the key in a terminal at all.
+
+**Not verified:** that the `%` is what this particular secret carried. One stray
+character at the end is consistent with it and with nothing else that has come
+up, but the value is a secret and the guard is deliberately unable to name it.
+If the next run still refuses the key, the count and the position will have
+changed and this explanation is wrong.

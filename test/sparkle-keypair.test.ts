@@ -140,6 +140,22 @@ test('a key that only decodes because node is lenient is refused', () => {
   }
 })
 
+test('one stray character is located, so it can be recognised', () => {
+  // "45 characters, 1 of them outside the alphabet" says something is wrong.
+  // Where it is says what it is, and a position is not key material.
+  const seed = b64(randomBytes(32))
+  // zsh prints a reverse-video "%" for a file with no trailing newline, and it
+  // comes along with the copy. This is what v0.1.7 actually hit.
+  assert.throws(() => publicKeyFromPrivate(`${seed}%`), /at the very end/)
+  assert.throws(() => publicKeyFromPrivate(`${seed}%`), /zsh prints/)
+  // A wrapped paste puts it in the middle instead.
+  const wrapped = `${seed.slice(0, 20)}\n${seed.slice(20)}`
+  assert.throws(() => publicKeyFromPrivate(wrapped), /at character 21 of 45/)
+  assert.throws(() => publicKeyFromPrivate(wrapped), /wrapped paste/)
+  // And the fix is in the message, not only the diagnosis.
+  assert.throws(() => publicKeyFromPrivate(`${seed}%`), /pbcopy/)
+})
+
 test('an unpadded key is not treated as mangled', () => {
   // Refusing a key that is merely missing its "=" would be one more false
   // alarm, and this file has raised enough of those.

@@ -80,6 +80,30 @@ function strictBase64(value) {
   return bytes.toString('base64') === padded ? bytes : null
 }
 
+/**
+ * Where the characters base64 has no meaning for are, described without
+ * quoting any of them.
+ *
+ * Positions are not key material - "character 45 is not base64" says nothing
+ * about the other 44 - and they are what turns "something is wrong" into a fix.
+ * One stray character at the end is a terminal artefact: zsh prints a reverse-
+ * video `%` when a file has no trailing newline, and it comes along with the
+ * copy. One in the middle is a line break from a wrapped paste.
+ */
+function strayReport(value) {
+  const s = value.trim()
+  const at = [...s].map((c, i) => (/[A-Za-z0-9+/=]/.test(c) ? -1 : i + 1)).filter((i) => i > 0)
+  if (at.length === 0) return ''
+
+  const where =
+    at.length === 1
+      ? at[0] === s.length
+        ? ` at the very end - a terminal artefact, such as the reverse-video "%" zsh prints for a file with no trailing newline`
+        : ` at character ${at[0]} of ${s.length} - a line break from a wrapped paste`
+      : ` at characters ${at.slice(0, 5).join(', ')}${at.length > 5 ? ', ...' : ''}`
+  return `, ${at.length} of them outside the base64 alphabet${where}`
+}
+
 /** How many characters a value carries that base64 has no meaning for. */
 const strayCount = (value) => [...value.trim()].filter((c) => !/[A-Za-z0-9+/=]/.test(c)).length
 
@@ -96,16 +120,15 @@ function privateKeyProblem(priv) {
 
   const bytes = strictBase64(priv)
   if (bytes === null) {
-    const stray = strayCount(priv)
+    const stray = strayReport(priv)
     return (
       'SPARKLE_ED_PRIVATE_KEY is not valid base64. It decodes anyway here, because ' +
       'node ignores characters outside the alphabet - which is how a mangled key ' +
       'reaches generate_appcast, whose decoder is strict and refuses it. ' +
       `${priv.trim().length} characters` +
-      (stray
-        ? `, ${stray} of them outside the base64 alphabet - a quote, a line break, or a label pasted along with the key.`
-        : ', in a length base64 cannot be.') +
-      ' Paste the key and nothing else.'
+      (stray || ', in a length base64 cannot be') +
+      '. Re-copy the key without going through a terminal: ' +
+      '`tr -d "\\n" < key.txt | pbcopy`.'
     )
   }
 

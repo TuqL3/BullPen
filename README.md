@@ -169,11 +169,18 @@ repository's Actions secrets as **`SPARKLE_ED_PRIVATE_KEY`**:
 
 ```bash
 node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys -x key.txt
+tr -d '\n' < key.txt | pbcopy   # then paste into the secret box
+rm key.txt
 ```
 
-Paste the contents of `key.txt` whole - 44 base64 characters in the format
-Sparkle exports today, nothing around them - then delete the file. It is ignored
-by git, but it is still a private key sitting in a working tree.
+**Copy it with `pbcopy`, not by selecting it in the terminal.** `key.txt` has no
+trailing newline, so `cat` leaves zsh's reverse-video `%` at the end of the
+line - and selecting that line copies the `%` too. 45 characters where 44 were
+wanted, and `generate_appcast` refuses the key after the build that was going to
+use it. A wrapped line does the same thing with a line break in the middle.
+
+Delete the file afterwards. It is ignored by git, but it is still a private key
+sitting in a working tree.
 
 Those 44 characters are the private *seed*, not a public key. They look like one
 because an ed25519 public key is 44 characters too, and telling them apart by
