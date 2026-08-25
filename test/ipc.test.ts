@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
-import { bootMain, type Main } from './main-harness.ts'
+import { bootMain, keychain, type Main } from './main-harness.ts'
 import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 import { columnFor, toMarkdown } from '../src/main/workflow.ts'
 
@@ -377,6 +377,22 @@ test('the sync and webhook channels answer without a network', async () => {
   }>('sync:status')
   assert.equal(status.hasToken, false, 'nothing signed in under a test runner')
   assert.equal(typeof status.keyring, 'boolean')
+
+  // The pane is drawn from the token's file, never from the token. Decrypting
+  // it means the keychain, and on macOS the keychain means a login-password
+  // prompt every time the app's signature has changed - which, ad-hoc signed,
+  // is every update. Opening settings used to raise one.
+  await main.invoke('sync:set', { token: 'ghp_notarealtoken' })
+  const before = keychain.decrypts
+  const signed = await main.invoke<{ hasToken: boolean; keyring: boolean }>('sync:status')
+  assert.equal(signed.hasToken, true, 'the file is there, and that is the whole question')
+  assert.equal(keychain.decrypts, before, 'and it was answered without opening the keychain')
+  assert.equal(
+    signed.keyring,
+    false,
+    'no keyring under a test runner, so the token on disk is plain - which is what the pane warns about'
+  )
+  await main.invoke('sync:set', { token: '' })
 
   await main.invoke('sync:set', { machine: 'the laptop' })
   assert.equal(

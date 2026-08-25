@@ -27,6 +27,28 @@ export const keyringWorks = (): boolean => {
   }
 }
 
+/**
+ * Whether a token is stored, and whether the OS encrypted it - read off the
+ * file, without decrypting anything.
+ *
+ * Both answers are in the first byte, and asking `safeStorage` for either one
+ * is what made opening the settings dialog raise a keychain prompt. macOS ties
+ * a keychain item's ACL to the code signature, this app is ad-hoc signed, and
+ * every build signs differently - so every update turned "look at the settings"
+ * into "type your login password". The keychain is now touched only where the
+ * token itself is needed: signing in, syncing, asking GitHub who this is.
+ */
+export function tokenOnDisk(home: string): { has: boolean; encrypted: boolean } {
+  const path = tokenPath(home)
+  if (!existsSync(path)) return { has: false, encrypted: false }
+  try {
+    const raw = readFileSync(path)
+    return { has: raw.length > 1, encrypted: raw[0] === 0x01 }
+  } catch {
+    return { has: false, encrypted: false }
+  }
+}
+
 export function readToken(home: string): string {
   const path = tokenPath(home)
   if (!existsSync(path)) return ''

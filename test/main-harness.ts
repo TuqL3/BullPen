@@ -64,6 +64,15 @@ export type Main = {
  */
 export const dialogAnswer = { messageBox: 0 }
 
+/**
+ * How often the keychain was actually reached.
+ *
+ * On macOS every one of these is a password prompt when the app's signature has
+ * changed - which, ad-hoc signed, is every build. Drawing a settings pane used
+ * to cost one; counting them is how that stays gone.
+ */
+export const keychain = { decrypts: 0 }
+
 export async function bootMain(home: string): Promise<Main> {
   const handlers = new Map<string, (...a: unknown[]) => unknown>()
   const listeners = new Map<string, (...a: unknown[]) => unknown>()
@@ -170,7 +179,10 @@ export async function bootMain(home: string): Promise<Main> {
       safeStorage: {
         isEncryptionAvailable: () => false,
         encryptString: (s: string) => Buffer.from(s, 'utf8'),
-        decryptString: (b: Buffer) => b.toString('utf8')
+        decryptString: (b: Buffer) => {
+          keychain.decrypts++
+          return b.toString('utf8')
+        }
       }
     }
   })

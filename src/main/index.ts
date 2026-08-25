@@ -1,7 +1,7 @@
 import { CLIENT_ID, awaitToken, deviceCode, type DeviceCode } from './github.ts'
 import { hostname } from 'node:os'
 import { createGist, findGist, readGist, whoAmI, writeGist } from './gist.ts'
-import { keyringWorks, readToken, writeToken } from './secret.ts'
+import { readToken, tokenOnDisk, writeToken } from './secret.ts'
 import { adopt, bundle, newer, readFloors, type Bundle } from './sync.ts'
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
@@ -2634,14 +2634,21 @@ function wire(): void {
   /** The code somebody is typing into github.com right now. */
   let pending: DeviceCode | null = null
 
+  // Reads the token's file, never the token. Drawing this pane used to decrypt
+  // it, and on macOS decrypting means the keychain, which means a password
+  // prompt on every build whose signature has changed - which is every build.
   ipcMain.handle('sync:status', () => {
     const cfg = readConfig(BULLPEN_HOME)
+    const stored = tokenOnDisk(BULLPEN_HOME)
     return {
       gist: cfg.sync?.gist ?? '',
       machine: cfg.sync?.machine ?? hostname(),
-      hasToken: Boolean(readToken(BULLPEN_HOME)),
+      hasToken: stored.has,
       user: cfg.sync?.user ?? '',
-      keyring: keyringWorks(),
+      // Whether the token that is *here* was encrypted, which is what the pane
+      // warns about. Asking `safeStorage` whether it could encrypt one is the
+      // same keychain trip this handler exists to avoid.
+      keyring: stored.encrypted,
       canSignIn: Boolean(CLIENT_ID),
       floors: Object.keys(readFloors(BULLPEN_HOME)).length
     }

@@ -255,20 +255,29 @@ function SyncPane() {
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
 
-  const read = (): void => {
+  /**
+   * `confirm` asks GitHub who the stored token belongs to - which means
+   * decrypting it, which on macOS means the keychain.
+   *
+   * Not done on mount any more. A token can be revoked from the other side and
+   * the remembered name go stale, but the cost of checking was a login-password
+   * prompt every time this pane was opened after an update: the keychain item's
+   * ACL is tied to the code signature, and an ad-hoc signed app signs
+   * differently every build. The name is confirmed after the two presses that
+   * use the token anyway, and a token revoked from the other side says so in
+   * the error from `sync now` rather than in silence.
+   */
+  const read = (confirm = false): void => {
     window.bullpen.syncStatus().then((s) => {
       setState(s)
-      // Confirm the remembered name against GitHub, once the pane is drawn.
-      // A token can be revoked from the other side, and "signed in as" is only
-      // worth showing if it is who this machine actually reaches.
-      if (s.hasToken) {
+      if (confirm && s.hasToken) {
         window.bullpen.whoAmI().then((who) => {
           if (who.login) setState((was) => (was ? { ...was, user: who.login! } : was))
         })
       }
     })
   }
-  useEffect(read, [])
+  useEffect(() => read(), [])
 
   if (!state) return <div style={{ color: 'var(--faint)' }}>reading…</div>
 
@@ -349,7 +358,7 @@ function SyncPane() {
                   setBusy('')
                   if (done.error) return setError(done.error)
                   setNote('Signed in.')
-                  read()
+                  read(true)
                 }}
               >
                 {busy === 'signin' ? 'waiting…' : 'sign in with GitHub'}
@@ -386,7 +395,7 @@ function SyncPane() {
               const gone = res.dropped?.length ? `, ${res.dropped.length} taken off` : ''
               setNote(`Down: ${res.floors} floors from ${res.from}${gone}.`)
             }
-            read()
+            read(true)
           }}
         >
           {busy === 'now' ? 'syncing…' : 'sync now'}
