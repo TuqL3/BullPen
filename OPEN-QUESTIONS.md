@@ -1842,3 +1842,48 @@ What has not been done is a first run with a hand on the mouse. To try it
 without disturbing a real setup:
 
     BULLPEN_HOME=/tmp/bp-firstrun npm run dev
+
+
+## 61. One secret, because two of them could not be kept in step
+
+Three release attempts died at the same place, and none of them died at a bug:
+`SPARKLE_ED_PUBLIC_KEY` and `SPARKLE_ED_PRIVATE_KEY` were two values a person
+had to copy separately and keep matched, and they were not matched. The guards
+built in §58 and after it caught it faster each time - a full build, then ten
+seconds - but catching it faster is not the same as it not happening.
+
+The public key is the last 32 bytes of the private key. There was never a reason
+for a human to hold both. `--print-public` derives it, the release workflow puts
+it in the packaging step's environment, and `SPARKLE_ED_PUBLIC_KEY` is gone as a
+secret. A pair that is computed cannot drift.
+
+**Why derivation is safe to trust here.** It is the same comparison Sparkle
+makes: §58 established by experiment that `generate_appcast` matches the plist
+key against the *last* 32 bytes of the private blob, and that holds for both
+lengths Sparkle accepts - 64 bytes is seed then public, 96 is the same with the
+public half repeated. A key of any other length is refused outright rather than
+half-read, because a plausible-looking public key derived from the wrong bytes
+ships inside the app and rejects every update it is offered.
+
+**What is still checked, and why it is not redundant.** The derived key is what
+goes into the packaging step; the packaged `Info.plist` is what
+`generate_appcast` actually reads. Those are the same value unless a step failed
+to receive its environment or `release/` was stale, which is exactly the kind of
+thing that produces a green build and a dead updater. The post-build `--plist`
+comparison and the `sparkle:edSignature` grep both stay.
+
+**The private key never enters the packaging step now.** Only the derived public
+key does, through a step output - it is not secret, it ships inside every build.
+
+**Breaks if wrong:** a Sparkle release that ever changes the private key layout
+so the public half is not last. The `--plist` check would catch it before an
+unsigned appcast could be published, so the failure is loud, but the fix would
+be here.
+
+**Not verified:** an actual export. `generate_keys -x` writes to the operator's
+Keychain and is theirs to run, so what has been exercised is synthesized keys of
+both accepted lengths, the `--print-public` path through `$GITHUB_OUTPUT`
+(44 characters, padding intact, one line), and the post-build comparison
+agreeing with what the derivation produced. One earlier real export measured 102
+characters, which is neither length Sparkle accepts - that is now refused with
+the expected length named rather than silently half-read.

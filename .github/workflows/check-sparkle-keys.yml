@@ -1,10 +1,9 @@
-# Are the two Sparkle secrets usable? Answered without building anything.
+# Is the Sparkle signing key usable? Answered without building anything.
 #
-# The failure this exists for is silent: generate_appcast compares the public
-# key in the packaged app against the public half inside the private key, and
-# when they disagree it writes an unsigned appcast and exits 0. Finding that out
-# through a release costs a full macOS build. This costs twenty seconds, and can
-# be run whenever the keys are rotated.
+# There is one secret, SPARKLE_ED_PRIVATE_KEY, and the public key the app ships
+# is derived from it - so the two cannot disagree. What can still be wrong is
+# the secret itself: unset, truncated, or something that is not a key. This says
+# which, in twenty seconds, and can be run whenever the key is rotated.
 name: check sparkle keys
 
 on:
@@ -15,13 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compare the public and private key
+      - name: Read the signing key
         env:
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
-          # Lengths only - never the values. Enough to tell "not set" from
+          # Length only - never the value. Enough to tell "not set" from
           # "pasted the wrong thing" without putting a key in a public log.
-          echo "public key:  ${#SPARKLE_ED_PUBLIC_KEY} characters (expected 44)"
-          echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (expected 128)"
-          node scripts/check-sparkle-keypair.mjs
+          echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 128)"
+          # The public key is not secret: it ships inside every build.
+          echo "public key derived from it: $(node scripts/check-sparkle-keypair.mjs --print-public)"
+          echo "This is the value that goes into Info.plist as SUPublicEDKey."

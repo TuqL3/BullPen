@@ -56,39 +56,34 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Both halves of one keypair. Checked before anything is built rather than
-      # after: without the public key the app ships a placeholder and silently
-      # never updates, and without the private key there is no appcast for it to
-      # read. Either way the release looks complete and updates nothing.
-      - name: Refuse to build a mac release with no signing key
+      # One secret, and the public key derived from it.
+      #
+      # There used to be two, and keeping them in step by hand is what broke
+      # every release attempt so far: generate_appcast compares the public key
+      # inside the packaged app against the public half carried in the private
+      # key, and when those disagree it writes an unsigned appcast, prints
+      # nothing and exits 0. Two values a human copies separately drift. One
+      # value and a derivation cannot.
+      #
+      # Plain node, no dependencies, so this runs before `npm ci` - a key this
+      # cannot read costs ten seconds instead of a full macOS build.
+      - name: Derive the public key from the signing key
+        id: key
         env:
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
-          # Both, then decide. Exiting on the first one costs a round trip
-          # through a whole CI run to find out the second was missing too.
-          missing=""
-          [ -n "$SPARKLE_ED_PUBLIC_KEY" ] || missing="$missing SPARKLE_ED_PUBLIC_KEY"
-          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || missing="$missing SPARKLE_ED_PRIVATE_KEY"
-          if [ -n "$missing" ]; then
-            echo "::error::empty or unset in this job:$missing"
-            echo "Set them as *repository* secrets on the repo this tag was pushed to:" >&2
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::error::secret SPARKLE_ED_PRIVATE_KEY is empty or unset in this job"
+            echo "Set it as a *repository* secret on the repo this tag was pushed to:" >&2
             echo "  https://github.com/${GITHUB_REPOSITORY}/settings/secrets/actions" >&2
-            echo "Environment secrets and Dependabot secrets are separate stores and do" >&2
-            echo "not reach this job. Org secrets must additionally grant access to this repo." >&2
+            echo "Environment and Dependabot secrets are separate stores and do not reach" >&2
+            echo "this job. Org secrets must additionally grant access to this repo." >&2
             exit 1
           fi
-
-      # Being set is not the same as being usable. generate_appcast compares the
-      # public key inside the packaged app against the public half carried in
-      # the private key, and when they disagree it writes an unsigned appcast
-      # and exits 0 - a failure that otherwise costs a full macOS build to find.
-      # Plain node, no dependencies, so this runs before `npm ci`.
-      - name: Refuse a public and private key that are not one pair
-        env:
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-        run: node scripts/check-sparkle-keypair.mjs
+          # The public key is not secret - it ships inside the app - so it can
+          # travel between steps in the clear, and the private key never has to
+          # enter the packaging step at all.
+          echo "public=$(node scripts/check-sparkle-keypair.mjs --print-public)" >> "$GITHUB_OUTPUT"
 
       - run: npm ci
 
@@ -102,17 +97,17 @@ jobs:
       - name: Package and upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          SPARKLE_ED_PUBLIC_KEY: ${{ steps.key.outputs.public }}
           # No Developer ID, and Sparkle does not need one - it validates the
           # EdDSA signature on the archive instead. The bundle is ad-hoc signed
           # in scripts/after-pack.mjs, which is all Sparkle asks for.
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --config electron-builder.config.mjs --mac -p always
 
-      # The secret was checked before the build; this checks what the build
-      # actually put in the bundle. Whitespace in the secret, a packaging step
-      # that never received it, or a stale `release/` all land here and nowhere
-      # earlier - and this is the exact value generate_appcast will compare.
+      # The derivation was checked against the secret; this checks what the
+      # build actually put in the bundle. A packaging step that never received
+      # the variable, or a stale `release/`, lands here and nowhere earlier -
+      # and this is the exact value generate_appcast will compare.
       - name: Refuse a package whose key does not match the signing key
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
@@ -147,11 +142,11 @@ jobs:
           # generate_appcast will happily write an appcast with no signature in
           # it and exit 0 - no warning, no message. An app whose Info.plist
           # carries a public key then rejects every update it is offered, so the
-          # release looks finished and updates nobody. The keypair check above
-          # covers the cause this has actually been seen to have; this is the
-          # backstop for any other reason it declines to sign.
+          # release looks finished and updates nobody. With the public key now
+          # derived rather than pasted, the cause this has actually been seen to
+          # have is gone; this is the backstop for any other reason it declines.
           if ! grep -q 'sparkle:edSignature' appcast/appcast.xml; then
-            echo "::error::appcast.xml has no sparkle:edSignature. generate_appcast signs only when the key in the app's Info.plist matches the private key it was given - check that SPARKLE_ED_PUBLIC_KEY is the key this build was packaged with." >&2
+            echo "::error::appcast.xml has no sparkle:edSignature, and the key in the bundle does match the signing key - so generate_appcast declined for some other reason. The appcast is uploaded by no step after this one." >&2
             exit 1
           fi
 

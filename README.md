@@ -164,33 +164,33 @@ npm run rebuild:sparkle          # vendors Sparkle's tools
 node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys
 ```
 
-That stores the private key in your login Keychain and prints the public key.
-Then export the private half and put both in the repository's Actions secrets:
+That stores the private key in your login Keychain. Export it and put it in the
+repository's Actions secrets as **`SPARKLE_ED_PRIVATE_KEY`**:
 
 ```bash
 node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys -x key.txt
 ```
 
-- `SPARKLE_ED_PUBLIC_KEY` - the printed public key. Packed into `Info.plist`, and
-  what the app validates every update against.
-- `SPARKLE_ED_PRIVATE_KEY` - the contents of `key.txt`. Delete the file afterwards.
+Paste the contents of `key.txt` whole - 128 base64 characters, nothing around
+them - then delete the file. It is ignored by git, but it is still a private key
+sitting in a working tree.
 
-**Both must come from the same key.** `generate_appcast` reads `SUPublicEDKey`
-out of the app bundle it is signing and compares it against the public half
-carried inside the private key. When those disagree it writes an appcast with
-**no signature in it and exits 0** - no warning, no message. An app carrying a
-public key then rejects every update it is offered, and nothing anywhere says
-why.
+**That is the only secret.** The public key the app ships is derived from it at
+build time and is never stored anywhere. That is deliberate: a public key and a
+private key kept in two boxes and copied by hand drift apart, and
+`generate_appcast` answers a drifted pair by writing an appcast with **no
+signature in it and exiting 0** - no warning, no message. An app carrying a
+public key then rejects every update it is offered and nothing says why.
+Derived, the two cannot disagree.
 
-Two guards stand in front of that. `scripts/check-sparkle-keypair.mjs` runs
-before anything is built and refuses two secrets that are not one pair; the
-release step then greps the generated appcast for `sparkle:edSignature` and
-fails rather than publishing one that updates nobody.
+To see what the key resolves to without building anything, run the **check
+sparkle keys** workflow from the Actions tab. It prints the key's length and the
+public key derived from it, never the key itself.
 
-The mistake worth naming: `SUPublicEDKey` is what the key is *called* in
-`Info.plist`. What goes in the secret is the 44-character value beside it.
-
-Without both secrets the macOS job stops before it builds anything.
+Two guards still stand behind the derivation: after packaging, the key inside
+the built `.app` is compared against the signing key, and after signing, the
+generated appcast is checked for `sparkle:edSignature`. Without the secret, the
+macOS job stops before it builds anything.
 
 ### Building by hand
 

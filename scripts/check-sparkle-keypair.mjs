@@ -19,8 +19,17 @@
  * Nothing here prints key material - only lengths and a verdict.
  */
 
-/** Where the public half sits inside the 96-byte private blob. */
+/** Where the public half sits inside the private blob. */
 const PUBLIC_KEY_BYTES = 32
+
+/**
+ * What Sparkle accepts a private key to decode to.
+ *
+ * Its own words, when handed anything else: "Imported key must be 64 bytes or
+ * 96 bytes (for the older format) decoded." 96 is what `generate_keys -x`
+ * writes today - 128 base64 characters.
+ */
+const PRIVATE_KEY_BYTES = [64, 96]
 
 /** What `electron-sparkle-updater` writes when no key was given at pack time. */
 const PLACEHOLDER = 'SPARKLE_ED_PUBLIC_KEY_PLACEHOLDER'
@@ -68,6 +77,36 @@ export function keypairProblem(pub, priv) {
 }
 
 /**
+ * The public half of a Sparkle private key.
+ *
+ * There is no second secret to keep in step with this one, and that is the
+ * point: a public key and a private key held apart drift, and when they drift
+ * `generate_appcast` says nothing and ships an appcast that validates against
+ * neither. Derived, they cannot disagree.
+ *
+ * The last 32 bytes, established by experiment rather than by reading: with a
+ * packaged app's plist pinned to one key, a private blob carrying that key at
+ * bytes 32..64 was refused and one carrying it at 64..96 was signed. That holds
+ * for both lengths Sparkle accepts - 64 bytes is seed then public, 96 is the
+ * same with the public half repeated.
+ *
+ * Throws rather than returning a wrong answer: a key this cannot read is a
+ * release that must not be built, not one that should quietly go unsigned.
+ */
+export function publicKeyFromPrivate(priv) {
+  if (!priv || !priv.trim()) throw new Error('SPARKLE_ED_PRIVATE_KEY is empty')
+  const bytes = Buffer.from(priv.trim(), 'base64')
+  if (!PRIVATE_KEY_BYTES.includes(bytes.length)) {
+    throw new Error(
+      `SPARKLE_ED_PRIVATE_KEY decodes to ${bytes.length} bytes; Sparkle accepts ` +
+        `${PRIVATE_KEY_BYTES.join(' or ')}. The file generate_keys -x writes is ` +
+        '128 base64 characters - paste it whole, and nothing around it.'
+    )
+  }
+  return bytes.subarray(bytes.length - PUBLIC_KEY_BYTES).toString('base64')
+}
+
+/**
  * The public key a packaged app actually carries.
  *
  * Worth asking separately from the secret it came from: whitespace, a partial
@@ -85,6 +124,18 @@ export function publicKeyInBundle(plistPath, run) {
 // Run directly. `--plist <Info.plist>` checks the key the app was packaged
 // with; without it, the key as the secret arrived.
 if (process.argv[1] && process.argv[1].endsWith('check-sparkle-keypair.mjs')) {
+  // `--print-public` is how the release workflow gets a public key at all:
+  // there is no secret holding one.
+  if (process.argv.includes('--print-public')) {
+    try {
+      process.stdout.write(publicKeyFromPrivate(process.env.SPARKLE_ED_PRIVATE_KEY ?? ''))
+      process.exit(0)
+    } catch (err) {
+      console.error(`::error::${err.message}`)
+      process.exit(1)
+    }
+  }
+
   const at = process.argv.indexOf('--plist')
   let pub = process.env.SPARKLE_ED_PUBLIC_KEY ?? ''
   let where = 'SPARKLE_ED_PUBLIC_KEY'
