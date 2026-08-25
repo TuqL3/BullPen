@@ -80,10 +80,23 @@ jobs:
             echo "this job. Org secrets must additionally grant access to this repo." >&2
             exit 1
           fi
+          # Assigned on its own line, and not inlined into the echo below.
+          # `echo "public=$(cmd)"` reports the exit status of *echo*, so a
+          # derivation that threw would leave this step green with an empty
+          # output - and an empty output packages the placeholder, which is not
+          # discovered until a ten-minute build has already finished. That is
+          # exactly how v0.1.3 failed.
+          public=$(node scripts/check-sparkle-keypair.mjs --print-public)
+          if [ -z "$public" ]; then
+            echo "::error::the derivation produced an empty public key" >&2
+            echo "signing key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 128)" >&2
+            exit 1
+          fi
           # The public key is not secret - it ships inside the app - so it can
           # travel between steps in the clear, and the private key never has to
           # enter the packaging step at all.
-          echo "public=$(node scripts/check-sparkle-keypair.mjs --print-public)" >> "$GITHUB_OUTPUT"
+          echo "public=$public" >> "$GITHUB_OUTPUT"
+          echo "derived a ${#public}-character public key from a ${#SPARKLE_ED_PRIVATE_KEY}-character signing key"
 
       - run: npm ci
 
@@ -102,7 +115,16 @@ jobs:
           # EdDSA signature on the archive instead. The bundle is ad-hoc signed
           # in scripts/after-pack.mjs, which is all Sparkle asks for.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --config electron-builder.config.mjs --mac -p always
+        run: |
+          # The other end of the same wire. The step above proves a key was
+          # derived; this proves it arrived here, before ten minutes are spent
+          # packaging the placeholder instead.
+          if [ -z "$SPARKLE_ED_PUBLIC_KEY" ]; then
+            echo "::error::SPARKLE_ED_PUBLIC_KEY did not reach the packaging step" >&2
+            exit 1
+          fi
+          echo "packaging with a ${#SPARKLE_ED_PUBLIC_KEY}-character public key"
+          npx electron-builder --config electron-builder.config.mjs --mac -p always
 
       # The derivation was checked against the secret; this checks what the
       # build actually put in the bundle. A packaging step that never received

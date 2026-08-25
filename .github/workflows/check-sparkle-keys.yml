@@ -21,6 +21,11 @@ jobs:
           # Length only - never the value. Enough to tell "not set" from
           # "pasted the wrong thing" without putting a key in a public log.
           echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 128)"
+          # Assigned on its own line. Inlined into an echo, a derivation that
+          # threw would leave this step green - and a check that passes on a
+          # broken key is worse than no check. Same mistake cost the v0.1.3
+          # release a full build.
+          public=$(node scripts/check-sparkle-keypair.mjs --print-public)
           # The public key is not secret: it ships inside every build.
-          echo "public key derived from it: $(node scripts/check-sparkle-keypair.mjs --print-public)"
+          echo "public key derived from it: $public"
           echo "This is the value that goes into Info.plist as SUPublicEDKey."

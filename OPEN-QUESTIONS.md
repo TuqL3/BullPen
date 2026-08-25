@@ -1929,3 +1929,45 @@ is verified at both ends and assumed in the middle.
 and Linux a `.desktop` entry with `inode/directory`. Neither is written; the
 `open-file` event does not fire on either platform, so nothing there breaks - it
 simply does nothing.
+
+## 63. A green step that produced nothing, and the build that trusted it
+
+`v0.1.3` packaged the placeholder public key and only said so after the mac
+build had finished. The derivation step before it was green.
+
+```bash
+echo "public=$(node scripts/check-sparkle-keypair.mjs --print-public)" >> "$GITHUB_OUTPUT"
+```
+
+Under `set -e` that line reports the exit status of `echo`, not of the command
+substitution inside it. The node script threw, printed its `::error::` to
+stderr, and the step wrote `public=` and exited 0. An empty value then reaches
+`electron-builder.config.mjs`, where `process.env.SPARKLE_ED_PUBLIC_KEY?.trim()
+|| undefined` falls back to undefined and `electron-sparkle-updater` writes its
+placeholder - which is what the post-build `--plist` check found ten minutes
+later.
+
+Measured rather than assumed:
+
+```
+--- inlined into echo ---     --- assigned on its own line ---
+boom                          boom
+public=                       exit=1
+REACHED-END
+exit=0
+```
+
+Both workflows now assign on their own line. The release job additionally
+refuses an empty derived key by name, and the packaging step refuses to start
+if the variable did not reach it - the two ends of the same wire, so a future
+failure names which end broke instead of costing a build to find out.
+
+**Lengths are printed, values are not.** The derived public key is not secret -
+it ships inside every build - and is printed in full; the signing key appears
+only as a character count.
+
+**What this does not fix:** the signing key itself. The derivation threw, and
+the reason is in that step's log - `SPARKLE_ED_PRIVATE_KEY` is very likely still
+the 102-character value measured earlier, which is neither of the two lengths
+Sparkle accepts. The next run fails in ten seconds with the count in the log
+instead of after a full build.
