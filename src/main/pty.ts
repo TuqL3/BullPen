@@ -51,6 +51,26 @@ export function trimTail(past: string, chunk: string, max = TAIL): string {
 }
 
 /**
+ * Say what a failed spawn actually means, when it means the CLI is not there.
+ *
+ * Every agent on the floor is a `claude` process, so a machine without the CLI
+ * fails at the first one - and the operator meets it as the first-run dialog
+ * refusing the directory they just picked. node-pty reports the missing binary
+ * as `File not found: <path>`, and on Windows with the path blank: it walks
+ * PATH looking for that exact filename and hands back an empty string. Neither
+ * version names the directory, and neither names the one thing to do about it,
+ * so the reading is "that folder is wrong" - which it is not.
+ */
+export function spawnFailure(cmd: string, err: unknown): Error {
+  const why = err instanceof Error ? err.message : String(err)
+  if (!/file not found|enoent/i.test(why)) return err instanceof Error ? err : new Error(why)
+  return new Error(
+    `${cmd} is not on PATH - install the Claude CLI first (npm i -g @anthropic-ai/claude-code), ` +
+      `then pick the directory again. The directory itself is fine.`
+  )
+}
+
+/**
  * One real pseudo-terminal per agent. Nothing is simulated: every agent is the
  * same `claude` process you would run by hand, just parented by Bullpen.
  */
@@ -80,16 +100,21 @@ export class PtyManager extends EventEmitter {
     // Direct spawn. A /bin/sh wrapper that closes inherited descriptors was
     // tried and reverted - see defect B in OPEN-QUESTIONS.md for what it fixed,
     // how it broke, and why it is not worth a broken launcher.
-    const pty = spawn(cmd, spec.args ?? [], {
-      name: 'xterm-256color',
-      cwd: spec.cwd,
-      cols: spec.cols ?? 120,
-      rows: spec.rows ?? 32,
-      // cleanEnv strips CLAUDE_CODE_*: if Bullpen was itself launched from a
-      // Claude Code session, the inherited child-session marker turns the
-      // agent's transcript off, which removes the context and cost data.
-      env: { ...cleanEnv(process.env), ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
-    })
+    let pty: IPty
+    try {
+      pty = spawn(cmd, spec.args ?? [], {
+        name: 'xterm-256color',
+        cwd: spec.cwd,
+        cols: spec.cols ?? 120,
+        rows: spec.rows ?? 32,
+        // cleanEnv strips CLAUDE_CODE_*: if Bullpen was itself launched from a
+        // Claude Code session, the inherited child-session marker turns the
+        // agent's transcript off, which removes the context and cost data.
+        env: { ...cleanEnv(process.env), ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
+      })
+    } catch (err) {
+      throw spawnFailure(cmd, err)
+    }
 
     const cols = spec.cols ?? 120
     const rows = spec.rows ?? 32

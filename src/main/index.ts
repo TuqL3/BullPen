@@ -1258,7 +1258,7 @@ function startGod(cwd: string, size: { cols: number; rows: number }): ReturnType
   const id = dispatchId()
   approvals.setSandbox(id, cwd)
   standing.add(id)
-  return spawnAgent({ id, cwd, cmd: 'claude', args: [], role: wf.dispatch, ...size })
+  return spawnAgent({ id, cwd, args: [], role: wf.dispatch, ...size })
 }
 
 /**
@@ -1360,7 +1360,7 @@ function startFixed(
   mkdirSync(cwd, { recursive: true })
   approvals.setSandbox(id, cwd)
   standing.add(id)
-  return spawnAgent({ id, cwd, cmd: 'claude', args: [], role, ...size })
+  return spawnAgent({ id, cwd, args: [], role, ...size })
 }
 
 /**
@@ -1693,7 +1693,6 @@ function wire(): void {
       const state = spawnAgent({
         id: nameId(name),
         cwd,
-        cmd: 'claude',
         args: [],
         cols: 100,
         rows: 30,
@@ -2137,7 +2136,6 @@ function wire(): void {
       const state = spawnAgent({
         id: nameId(name),
         cwd,
-        cmd: 'claude',
         args: [],
         cols: 100,
         rows: 30,
@@ -2470,8 +2468,6 @@ function wire(): void {
       const bad = checkWorkspace(target, app.getPath('home'))
       if (bad) return { error: bad }
 
-      writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), godCwd: target })
-
       // Only the ones who work where dispatch works: they move with it, and
       // stopping them here rather than leaving it to `fixed:ensure` means the
       // floor is never briefly a boss in the new directory and an analyst in
@@ -2482,7 +2478,13 @@ function wire(): void {
       }
       await stop(dispatchId())
       try {
-        return { ...startGod(target, size), name: wf.roles[wf.dispatch]?.fixed?.name ?? dispatchId() }
+        const state = startGod(target, size)
+        // Saved only once the CLI is actually up. Written before the spawn, a
+        // machine with no `claude` on PATH recorded the directory as chosen and
+        // never showed the first-run dialog again: every later launch failed the
+        // same way with the reason going nowhere but the console.
+        writeConfig(BULLPEN_HOME, { ...readConfig(BULLPEN_HOME), godCwd: target })
+        return { ...state, name: wf.roles[wf.dispatch]?.fixed?.name ?? dispatchId() }
       } catch (err) {
         return { error: err instanceof Error ? err.message : String(err) }
       }

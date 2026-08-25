@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { trimTail } from '../src/main/pty.ts'
+import { spawnFailure, trimTail } from '../src/main/pty.ts'
 
 /**
  * Applying a floor reloads the window and leaves the agents that have a place
@@ -32,4 +32,30 @@ test('the backlog keeps the end of what was printed, cut at a line', () => {
   assert.ok(tail.length <= 200, `grew to ${tail.length}`)
   assert.ok(tail.endsWith('line 499\n'), 'and the newest is the part that is kept')
   assert.ok(!tail.includes('line 0\n'), 'the oldest is gone')
+})
+
+/**
+ * A machine with no `claude` on PATH meets this as the first-run dialog: the
+ * operator picks a directory and gets `File not found:` back, with nothing
+ * after the colon on Windows, printed under the box they just typed a path
+ * into. Every reading of that message blames the directory.
+ */
+test('a missing CLI is reported as a missing CLI, not as a bad directory', () => {
+  // What node-pty's Windows path actually throws: it searches PATH for the
+  // exact filename, finds nothing, and interpolates the empty string.
+  const win = spawnFailure('claude.cmd', new Error('File not found: '))
+  assert.match(win.message, /claude\.cmd is not on PATH/)
+  assert.match(win.message, /install the Claude CLI first/i)
+  assert.match(win.message, /directory itself is fine/)
+
+  // The Unix wording of the same thing.
+  assert.match(spawnFailure('claude', new Error('spawn claude ENOENT')).message, /not on PATH/)
+  assert.match(spawnFailure('claude', 'File not found: /usr/bin/claude').message, /not on PATH/)
+
+  // Anything else is somebody else's problem and is handed back untouched -
+  // rewriting an unrelated failure as "install the CLI" sends the operator off
+  // installing something they already have.
+  const other = new Error('cwd does not exist')
+  assert.equal(spawnFailure('claude', other), other)
+  assert.match(spawnFailure('claude', 'Cannot launch conpty').message, /conpty/)
 })
