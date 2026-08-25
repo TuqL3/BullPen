@@ -1712,8 +1712,8 @@ function PanelToggle({
  * that do draw are the three steps: there is one, it is coming down, it is
  * ready to go on.
  *
- * On macOS none of the three ever arrive: Sparkle draws its own window for the
- * whole sequence, so this stays empty there by design rather than by omission.
+ * On macOS only the first arrives: main reads the appcast itself to find that
+ * a newer version exists, and clicking hands the rest to Sparkle's own window.
  */
 function UpdateChip({ state }: { state: UpdateState | null }) {
   if (!state) return null

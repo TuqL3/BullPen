@@ -4,6 +4,7 @@ import {
   ED_KEY_PLACEHOLDER,
   Updates,
   isNewer,
+  newestIn,
   sparkleFeed,
   type SparkleBridge,
   type UpdateState
@@ -129,6 +130,69 @@ test('on macOS the verbs go to Sparkle, and the state stops at idle', () => {
 
   assert.equal(u.install(), true)
   assert.equal(bridge.installs, 1)
+})
+
+/** An appcast, as `generate_appcast` writes one. */
+const appcast = (...versions: string[]): string =>
+  `<?xml version="1.0" standalone="yes"?><rss version="2.0"><channel><title>BullPen</title>` +
+  versions
+    .map(
+      (v) =>
+        `<item><title>${v}</title><sparkle:version>${v}</sparkle:version>` +
+        `<sparkle:shortVersionString>${v}</sparkle:shortVersionString>` +
+        `<enclosure url="https://x/${v}.zip" sparkle:edSignature="sig"/></item>`
+    )
+    .join('') +
+  `</channel></rss>`
+
+test('the newest item wins, whatever order the appcast lists them in', () => {
+  assert.equal(newestIn(appcast('0.1.8')), '0.1.8')
+  assert.equal(newestIn(appcast('0.1.3', '0.1.8', '0.1.7')), '0.1.8')
+  assert.equal(newestIn('<rss></rss>'), '', 'an appcast offering nothing offers nothing')
+})
+
+/**
+ * The failure this exists for: on macOS every way the updater breaks is silent.
+ * A 404 feed - which is what an unpublished draft release serves - left this app
+ * sitting on 0.1.1 while eight versions shipped, and the window said nothing
+ * because "nothing to say" and "cannot reach the feed" drew the same thing.
+ */
+test('macOS reads the appcast itself, and says so when it cannot', async () => {
+  const armed = (): { u: Updates; bridge: ReturnType<typeof fakeBridge> } => {
+    const bridge = fakeBridge()
+    const u = new Updates('0.1.1')
+    u.attachSparkle(bridge.bridge, (k) =>
+      ({ SUFeedURL: 'https://x/appcast.xml', SUPublicEDKey: 'abc' })[k] ?? null
+    )
+    return { u, bridge }
+  }
+
+  const found: string[] = []
+  const { u, bridge } = armed()
+  u.on('found', (v: string) => found.push(v))
+  await u.probe(async (url) => {
+    assert.equal(url, 'https://x/appcast.xml', 'the feed the bundle names, not a second copy')
+    return { ok: true, status: 200, text: async () => appcast('0.1.3', '0.1.8') }
+  })
+  assert.deepEqual(u.get(), { kind: 'available', version: '0.1.1', next: '0.1.8', notes: undefined })
+  assert.deepEqual(found, ['0.1.8'], 'and the notification goes out once')
+
+  // The chip's click is the only download verb the renderer has, and on macOS
+  // it must reach Sparkle rather than an updater that is not attached.
+  await u.download()
+  assert.equal(bridge.checks, 1)
+
+  // A draft release, a private repo, a moved asset: all of them are this.
+  const dead = armed().u
+  await dead.probe(async () => ({ ok: false, status: 404, text: async () => 'Not Found' }))
+  const s = dead.get()
+  assert.equal(s.kind, 'error')
+  assert.match('message' in s ? s.message : '', /404/)
+
+  // Nothing newer is still an answer, and it is not an alarm.
+  const same = armed().u
+  await same.probe(async () => ({ ok: true, status: 200, text: async () => appcast('0.1.1') }))
+  assert.equal(same.get().kind, 'idle')
 })
 
 test('a mac build with no key in it says so instead of pretending to watch', () => {
