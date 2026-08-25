@@ -175,12 +175,20 @@ node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys -x key.txt
   what the app validates every update against.
 - `SPARKLE_ED_PRIVATE_KEY` - the contents of `key.txt`. Delete the file afterwards.
 
-Use the file `generate_keys -x` writes, not a key made another way:
-`generate_appcast` accepts a wrongly-shaped key, writes an appcast with **no
-signature in it, and exits 0**. An app carrying the public key then rejects every
-update it is offered, and nothing anywhere says why. The workflow greps the
-generated appcast for `sparkle:edSignature` and fails the release rather than
-publishing one that updates nobody.
+**Both must come from the same key.** `generate_appcast` reads `SUPublicEDKey`
+out of the app bundle it is signing and compares it against the public half
+carried inside the private key. When those disagree it writes an appcast with
+**no signature in it and exits 0** - no warning, no message. An app carrying a
+public key then rejects every update it is offered, and nothing anywhere says
+why.
+
+Two guards stand in front of that. `scripts/check-sparkle-keypair.mjs` runs
+before anything is built and refuses two secrets that are not one pair; the
+release step then greps the generated appcast for `sparkle:edSignature` and
+fails rather than publishing one that updates nobody.
+
+The mistake worth naming: `SUPublicEDKey` is what the key is *called* in
+`Info.plist`. What goes in the secret is the 44-character value beside it.
 
 Without both secrets the macOS job stops before it builds anything.
 

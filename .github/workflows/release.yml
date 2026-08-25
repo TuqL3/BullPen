@@ -79,6 +79,17 @@ jobs:
             exit 1
           fi
 
+      # Being set is not the same as being usable. generate_appcast compares the
+      # public key inside the packaged app against the public half carried in
+      # the private key, and when they disagree it writes an unsigned appcast
+      # and exits 0 - a failure that otherwise costs a full macOS build to find.
+      # Plain node, no dependencies, so this runs before `npm ci`.
+      - name: Refuse a public and private key that are not one pair
+        env:
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: node scripts/check-sparkle-keypair.mjs
+
       - run: npm ci
 
       # Fetches Sparkle.framework and compiles the bridge against this project's
@@ -124,11 +135,12 @@ jobs:
 
           # generate_appcast will happily write an appcast with no signature in
           # it and exit 0 - no warning, no message. An app whose Info.plist
-          # carries SUPublicEDKey then rejects every update it is offered, so
-          # the release looks finished and updates nobody. Checked rather than
-          # trusted.
+          # carries a public key then rejects every update it is offered, so the
+          # release looks finished and updates nobody. The keypair check above
+          # covers the cause this has actually been seen to have; this is the
+          # backstop for any other reason it declines to sign.
           if ! grep -q 'sparkle:edSignature' appcast/appcast.xml; then
-            echo "::error::appcast.xml has no sparkle:edSignature - the private key was not in the format generate_appcast expects (use the file written by \`generate_keys -x\`)" >&2
+            echo "::error::appcast.xml has no sparkle:edSignature. generate_appcast signs only when the key in the app's Info.plist matches the private key it was given - check that SPARKLE_ED_PUBLIC_KEY is the key this build was packaged with." >&2
             exit 1
           fi
 

@@ -1676,6 +1676,30 @@ and the release looks complete. The workflow greps for the signature and fails
 rather than publishing that, but the key itself has to be the file
 `generate_keys -x` writes.
 
+**Why an appcast comes out unsigned, settled by experiment.** `generate_appcast`
+signs only when the public key in the packaged app's `Info.plist` matches the
+public half carried inside the private key it was handed. Mismatched, it writes
+the item, omits `sparkle:edSignature`, prints nothing and exits 0. Three runs
+pinned it down: the same key file that `sign_update` signs the same zip with
+produced no signature through `generate_appcast` while the plist held the
+packaging placeholder; rebuilding with a plist key drawn from the same pair made
+the signature appear; and with the plist pinned, a private blob carrying that
+key at bytes 32..64 was refused while one carrying it at bytes 64..96 was
+signed. So the comparison is against the **last 32 bytes** of the private blob,
+and that is what `scripts/check-sparkle-keypair.mjs` compares - in a second,
+before a build, instead of after one.
+
+The first guess was wrong and is worth recording as wrong: the binary's own help
+text calls the private key "the private EdDSA string (128 characters)", and a
+128-character key was already in hand and still did not sign. Key *shape* was
+never the problem.
+
+Ed25519 as Sparkle does it is not interchangeable with the standard: it uses
+orlp/ed25519, whose 64 bytes are an expanded key rather than seed + public, so a
+signature made with a hand-built key does not verify against a public key derived
+the ordinary way. That is why the keypair check compares stored bytes and does
+not try to verify a signature.
+
 **Not verified:** the signature. Making a Sparkle key means writing one into the
 operator's login Keychain, which is theirs to do, not this session's - so the end
 of the chain was exercised with a synthesized ed25519 key instead, and that is
@@ -1699,13 +1723,15 @@ Sparkle's own scheduler, armed once with `setAutomaticChecks(true)` and paced by
 button wired to `checkForUpdates()` would open that same window on demand, and
 it is the one thing worth adding here if anybody ever asks for it.
 
-**What the first run proved.** `v0.1.1` reached the remote and the workflow
+**What the first two runs proved.** `v0.1.1` reached the remote and the workflow
 ran. It stopped where it was built to stop: the secrets had been added as
 *environment* secrets, which are a separate store and never reach a job that
 does not declare `environment:`, so `SPARKLE_ED_PUBLIC_KEY` arrived empty and the
-guard refused to build. That is the guard working, not the pipeline failing -
-nothing was packaged, and no release was published with an updater that could
-not update. The steps past it have still never executed.
+guard refused to build. Moved to repository secrets, the second run built the
+whole macOS package and stopped at the appcast: the two secrets were not two
+halves of one key, so nothing was signed. Both stops are the guards working
+rather than the pipeline failing - no release has been published with an updater
+that could not update. `gh release upload` has still never executed.
 
 **Why `rebuild:sparkle` names its compiler.** node-gyp's generated Makefile
 takes the compiler from `CC ?= cc`, and `cc` has been a name for the system C
