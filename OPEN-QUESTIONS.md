@@ -1753,3 +1753,59 @@ first on `PATH` and no environment set.
 
 The script only ever runs on macOS - Sparkle is a macOS framework and
 `fetch-sparkle.sh` is bash - so a hard macOS path costs nothing elsewhere.
+
+
+## 59. A packaged mac app cannot find `claude`, and says nothing about it
+
+The first time this app was installed rather than run from a terminal, its
+terminal tab was blank. Nothing errored. The pty was real, node-pty was fine,
+the window drew - and every agent exited immediately having printed nothing.
+
+`launchd` hands a GUI process `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else.
+It does not read a login shell, so nothing a shell rc file puts on `PATH` is
+there. `claude` on this machine lives in `~/.local/bin`, which is on `PATH` in
+every terminal and on none of launchd's four directories. Run from a terminal
+the app inherits a working `PATH` and everything is fine, which is why this
+survived every test until somebody double-clicked it.
+
+**Why it is invisible rather than loud.** node-pty's `spawn` does not fail: a
+pty is allocated, a child is forked, and it is the *child* that cannot exec.
+The parent sees a normal pty that closes. Measured, with `PATH` cut down to
+launchd's:
+
+    EXIT code=1 signal=0 output=""
+
+An empty string is exactly what a terminal renders as a blank pane. There is no
+error anywhere to surface, because from the app's side nothing failed.
+
+**The fix** is the one every Mac developer tool arrives at: ask the login shell
+what `PATH` is, once, at startup, before anything is spawned. `-i` so it reads
+the rc file where `PATH` is actually set, `-l` so it reads the profile.
+`loginShellPath` in `src/main/ctx.ts`; taken as a union with the `PATH` already
+there rather than a replacement, because Electron and the launcher put things on
+it too. Bounded by a timeout, packaged builds only, non-Windows only.
+
+The answer is read from between two markers rather than from the last line of
+output: an interactive shell prints whatever the rc file feels like printing -
+a version notice, a greeting, half a prompt - and any of it lands on stdout
+beside the answer.
+
+**Not a Sparkle regression**, though it was found immediately after one. It has
+been true of every macOS package this project has ever produced; nobody had
+installed one before.
+
+**Two false leads, recorded because both looked conclusive.** `node-pty` was
+first reproduced failing with `posix_spawnp failed` inside the packaged app -
+which was an artifact of the test: requiring node-pty by a path that already
+said `app.asar.unpacked` makes its own `.replace('app.asar', 'app.asar.unpacked')`
+produce `app.asar.unpacked.unpacked`, and no helper is there. Loaded the way the
+app loads it, through the asar path, it spawns fine. Then the first end-to-end
+attempt showed no agent starting at all, which was a fresh `BULLPEN_HOME`: with
+no `godCwd` chosen the window stops at the setup screen and spawns nobody.
+Seeded with one, the packaged app under launchd's `PATH` starts Michael and the
+`claude` process is alive.
+
+**Breaks if wrong:** a shell whose rc file is slow past the timeout, or which
+does not take `-ilc`, leaves the old `PATH` and the old blank tab - logged, not
+guessed at. A user whose `claude` is only a shell *alias* is not helped by this
+and cannot be: an alias is not a file, and `execvp` cannot see one.

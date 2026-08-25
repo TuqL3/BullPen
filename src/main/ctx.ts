@@ -175,3 +175,70 @@ export function cleanEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
   return out
 }
+
+/**
+ * A macOS app launched from Finder inherits none of your shell's PATH.
+ *
+ * `launchd` hands a GUI process `/usr/bin:/bin:/usr/sbin:/sbin` and nothing
+ * else, so every agent Bullpen starts looks for `claude` in four directories it
+ * was never installed into. node-pty spawns fine - the pty is real - and the
+ * child then exits 1 having printed nothing, which arrives in the window as a
+ * terminal tab that is simply blank. Nothing reports an error, because from the
+ * app's side nothing failed.
+ *
+ * The fix every Mac developer tool ends up writing: ask the login shell what it
+ * thinks PATH is. `-i` so it reads the rc file where PATH is actually set, `-l`
+ * so it reads the profile too.
+ *
+ * ponytail: shelling out to the user's shell rather than taking a dependency on
+ * `shell-env`/`fix-path`, which is what those packages do in more lines than
+ * this. Ceiling: it runs the rc file, so a slow prompt costs startup time -
+ * capped by the timeout, once per launch, and only in a packaged app.
+ */
+const MARK = '__BULLPEN_PATH__'
+
+/**
+ * Pull PATH out of a login shell's output.
+ *
+ * Between markers rather than "the last line", because an interactive shell
+ * prints whatever the rc file feels like printing - version notices, a fortune,
+ * half a prompt - and any of it can land on stdout beside the answer.
+ */
+export function pathFromShell(out: string): string | null {
+  const start = out.indexOf(MARK)
+  if (start === -1) return null
+  const end = out.indexOf(MARK, start + MARK.length)
+  if (end === -1) return null
+  const path = out.slice(start + MARK.length, end).trim()
+  // A PATH with no absolute directory in it is not a PATH, whatever it is.
+  return path.includes('/') ? path : null
+}
+
+/**
+ * Everything in `shell`, then anything `current` had that it did not mention.
+ *
+ * A union rather than a replacement: the shell's answer is the better one, but
+ * Electron and the launcher put things on PATH too, and dropping those to fix a
+ * different problem trades one missing binary for another.
+ */
+export function mergePath(shell: string, current: string): string {
+  const seen = new Set<string>()
+  return [...shell.split(':'), ...current.split(':')]
+    .filter((d) => d && !seen.has(d) && (seen.add(d), true))
+    .join(':')
+}
+
+/** The login shell's PATH, or null when it cannot be asked. */
+export function loginShellPath(
+  run: (cmd: string, args: string[]) => string,
+  shell = process.env.SHELL
+): string | null {
+  if (!shell) return null
+  try {
+    return pathFromShell(run(shell, ['-ilc', `printf %s%s%s '${MARK}' "$PATH" '${MARK}'`]))
+  } catch {
+    // A shell that errors, hangs past the timeout, or does not take `-ilc` is
+    // not worth failing a launch over. The app keeps the PATH it was given.
+    return null
+  }
+}

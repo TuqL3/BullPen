@@ -24,7 +24,7 @@ import { bannerModel, configuredModel } from './climodel.ts'
 import { newToken, Webhooks } from './webhook.ts'
 import { plistValue, Updates, type UpdateState } from './update.ts'
 import { newMeter, update as updateCost, type Cost, type Meter } from './cost.ts'
-import { lastAssistantText, readCtx, type Ctx } from './ctx.ts'
+import { lastAssistantText, loginShellPath, mergePath, readCtx, type Ctx } from './ctx.ts'
 import {
   floorPath,
   publishTasks,
@@ -35,7 +35,7 @@ import {
   dropBrief,
   type FloorAgent
 } from './god.ts'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { routeCard } from './cards.ts'
 import { dryRun } from './dryrun.ts'
 import { DEFAULT_WORKFLOW, NEW_FLOOR, PRESETS, STARTER } from './presets.ts'
@@ -3738,6 +3738,18 @@ app.whenReady().then(async () => {
   // addresses its operator as "boss" has mail to "boss" reach the ask-me queue
   // rather than the dead letters.
   hive.reserved = { human: wf.human, hire: wf.hire, board: BOARD_PARTY }
+
+  // Before anything is spawned. A packaged mac app is handed launchd's PATH -
+  // four system directories - and `claude` is in none of them, so every agent
+  // would exit 1 having printed nothing and the terminal tab would just be
+  // blank. See loginShellPath in ctx.ts for why this asks a shell.
+  if (app.isPackaged && process.platform !== 'win32') {
+    const shellPath = loginShellPath((cmd, args) =>
+      execFileSync(cmd, args, { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })
+    )
+    if (shellPath) process.env.PATH = mergePath(shellPath, process.env.PATH ?? '')
+    else console.error('[bullpen] could not read PATH from the login shell; agents may not start')
+  }
 
   approvals.setTheme(readConfig(BULLPEN_HOME).mode ?? 'light')
   await approvals.start()
