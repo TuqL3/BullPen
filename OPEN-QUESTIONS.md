@@ -2128,39 +2128,61 @@ from a mangled key and had until now been indistinguishable from one.
 point in the next run settles the first; the local clipboard check settles the
 second; neither needs a tag.
 
-## 68. Windows: `claude.cmd` reaches ConPTY, and nobody has watched it land
+## 68. Windows: two installers, two filenames, one of them unspawnable — RESOLVED
 
 The first-run dialog on Windows refused every directory with `File not found:`
-and nothing after the colon. Two separate faults, one message:
+and nothing after the colon. Three faults behind one message.
 
-1. `pty.ts` already defaults to `claude.cmd` on `win32`, and all four
-   `spawnAgent` call sites in `index.ts` passed `cmd: 'claude'` over the top of
-   it. node-pty's Windows path (`path_util.cc:54`) walks `Path` testing the
-   exact filename with no `PATHEXT` expansion, so a global npm install - which
-   lays down `claude.cmd` and `claude.ps1`, never a bare `claude` - was never
-   going to match. The overrides are gone; the platform default stands.
-2. The message itself named neither the directory nor the fix, and appeared
-   directly under the box the operator had just typed a path into, so it read
-   as "that folder is wrong". `spawnFailure()` now says the CLI is missing and
-   that the directory is fine.
+**1. The name.** `pty.ts` defaulted to `claude.cmd` on `win32`, and all four
+`spawnAgent` call sites in `index.ts` passed `cmd: 'claude'` over the top of it.
+node-pty walks `Path` testing the exact filename with no `PATHEXT` expansion
+(`path_util.cc:54`), so a bare `claude` was never going to match anything an
+installer writes.
 
-**Assumed, not verified: that ConPTY will actually start a `.cmd`.** node-pty
-resolves the file, then `PtyConnect` hands a command line to `CreateProcessW`,
-and `CreateProcessW` does not execute batch files - it needs `cmd.exe /c`.
-Fault 1 may therefore turn `File not found:` into `%1 is not a valid Win32
-application` rather than into a running agent. No Windows machine was available
-to run it.
+**2. The file.** Fixing 1 alone would have moved the failure rather than
+removed it, and this was tagged unverified in the first pass. It is verified
+now, by reading rather than by running: node-pty calls
 
-If that is what happens, the fix is in `PtyManager.spawn` and nowhere else:
-spawn `cmd.exe` with `['/c', 'claude', ...args]` on `win32`. It is deliberately
-not written blind - a launcher wrapped in a shell that turns out not to have
-needed one is the defect B trade all over again.
+```c
+CreateProcessW(nullptr, mutableCommandline.get(), ...)   // conpty.cc:413
+```
 
-**What is verified:** the message. `test/pty.test.ts` covers both wordings
-node-pty produces and asserts an unrelated failure is handed back untouched.
+with `lpApplicationName` NULL, and `CreateProcessW` loads images. A `.cmd` is
+not one. So `claude.cmd` passes node-pty's own `file_exists` check in
+`startProcess` and then dies inside `connect()` with `Cannot create process` -
+and `connect()` is called synchronously from the `WindowsPtyAgent` constructor
+(`windowsPtyAgent.ts:117`), so the throw does reach the `try` around `spawn`.
 
-**Also changed, same report:** `god:move` wrote `godCwd` into the config before
-spawning. On a machine with no CLI that recorded the directory as chosen, so the
-first-run dialog never appeared again and every later launch failed into
-`console.error` with the reason going nowhere. The write now happens only after
-the spawn succeeds.
+The two installers do not write the same file: the native installer writes
+`claude.exe`, a global npm install writes `claude.cmd` and `claude.ps1` and no
+`.exe` at all. `resolveCli()` picks whichever is on PATH, `.exe` first, and
+wraps a `.cmd` in `cmd.exe /d /c`, which is the only way a batch file runs.
+
+**Why null and not a fallback.** With nothing installed, `cmd.exe /d /c
+claude.cmd` spawns perfectly well - cmd.exe is always there - and paints
+`'claude.cmd' is not recognized` inside an agent pane. The pty came up, so
+nothing above it knows to say anything. `resolveCli` returns null instead and
+`spawn` throws `missingCli()`.
+
+**3. The message, and where it appeared.** It named neither the directory nor
+the fix, and sat under the box the operator had just typed a path into.
+`missingCli()` says the CLI is missing and that the directory is fine.
+
+**Verified:** `test/pty.test.ts` covers `resolveCli` across both installers,
+both installed at once, neither installed, an empty PATH, an explicit command,
+an explicit script, and Unix; and `spawnFailure` across both wordings node-pty
+produces plus an unrelated failure it must hand back untouched.
+
+**Not verified:** that a real agent comes up in a real ConPTY on a real Windows
+machine. Everything above is read off node-pty's source and the `CreateProcessW`
+contract. No Windows machine was available. What is left to be wrong is the
+behaviour of the pair, not the choice of filename.
+
+**Two holes that made this permanent, both closed.** `god:move` wrote `godCwd`
+into the config before spawning, so a failed first run still recorded the
+directory as chosen and the dialog never appeared again - it is written after
+the spawn succeeds now. And the renderer's boot path put the reason into
+`console.error` and nothing else, so a machine that lost the CLI after setup
+opened to an empty window with no explanation; it now reopens the first-run
+dialog carrying the reason.
+

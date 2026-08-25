@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawnFailure, trimTail } from '../src/main/pty.ts'
+import { resolveCli, spawnFailure, trimTail } from '../src/main/pty.ts'
 
 /**
  * Applying a floor reloads the window and leaves the agents that have a place
@@ -58,4 +58,58 @@ test('a missing CLI is reported as a missing CLI, not as a bad directory', () =>
   const other = new Error('cwd does not exist')
   assert.equal(spawnFailure('claude', other), other)
   assert.match(spawnFailure('claude', 'Cannot launch conpty').message, /conpty/)
+})
+
+/**
+ * Windows installs the CLI two ways, and node-pty can only spawn one of them.
+ * `CreateProcessW` is handed the command line with `lpApplicationName` NULL and
+ * loads images; a `.cmd` is not an image, so it reaches the call only to fail
+ * there. Getting this wrong is invisible on the machine it is written on.
+ */
+test('the CLI is launched by whichever name Windows has it under', () => {
+  const PATH = 'C:\\Windows\\System32;C:\\Users\\x\\.local\\bin'
+  const only = (installed: string) => (p: string) => p.endsWith(installed)
+
+  // Native installer: a real image, spawned directly, no interpreter.
+  assert.deepEqual(resolveCli(undefined, [], 'win32', PATH, only('claude.exe')), {
+    // The bare name, not the resolved path: node-pty looks it up again itself,
+    // and two lookups that can disagree is one too many.
+    file: 'claude.exe',
+    args: []
+  })
+
+  // Global npm install: a batch shim, which needs cmd.exe or it dies at
+  // CreateProcessW. `/d` so a machine with an AutoRun key does not run it.
+  assert.deepEqual(resolveCli(undefined, ['--foo'], 'win32', PATH, only('claude.cmd')), {
+    file: 'cmd.exe',
+    args: ['/d', '/c', 'claude.cmd', '--foo']
+  })
+
+  // .exe wins when both are there: it is one process instead of two.
+  assert.equal(resolveCli(undefined, [], 'win32', PATH, () => true)?.file, 'claude.exe')
+
+  // Nothing installed is null, not a guess. `cmd.exe /d /c claude.cmd` would
+  // spawn happily - cmd.exe is always there - and paint `is not recognized`
+  // inside an agent pane, where the app cannot see it to explain it.
+  assert.equal(resolveCli(undefined, [], 'win32', PATH, () => false), null)
+  assert.equal(resolveCli(undefined, [], 'win32', '', () => true), null)
+
+  // An explicit command is taken as given, and still wrapped if it is a script.
+  assert.deepEqual(resolveCli('pwsh.exe', ['-v'], 'win32', PATH, () => false), {
+    file: 'pwsh.exe',
+    args: ['-v']
+  })
+  assert.deepEqual(resolveCli('other.BAT', [], 'win32', PATH, () => false), {
+    file: 'cmd.exe',
+    args: ['/d', '/c', 'other.BAT']
+  })
+
+  // Unix is left to execvp, which does its own lookup and reports a miss as
+  // ENOENT - which spawnFailure already reads. A second lookup here could only
+  // disagree with it.
+  assert.deepEqual(resolveCli(undefined, [], 'linux', '/usr/bin:/bin', () => false), {
+    file: 'claude',
+    args: []
+  })
+  assert.deepEqual(resolveCli(undefined, [], 'darwin', '', () => false), { file: 'claude', args: [] })
 })

@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { spawn, type IPty } from 'node-pty'
 import { platform } from 'node:os'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { cleanEnv } from './ctx.ts'
 import { feed, newWatch, type TrustWatch } from './trust.ts'
 
@@ -51,23 +53,82 @@ export function trimTail(past: string, chunk: string, max = TAIL): string {
 }
 
 /**
- * Say what a failed spawn actually means, when it means the CLI is not there.
+ * The names the Claude CLI is installed under on Windows, best first.
+ *
+ * The native installer writes `claude.exe`; a global npm install writes
+ * `claude.cmd` and `claude.ps1` and no `.exe` at all. Neither is wrong, and a
+ * machine has one or the other.
+ */
+const WIN_CLI = ['claude.exe', 'claude.cmd', 'claude.bat']
+
+/**
+ * What to hand node-pty for the CLI on this platform.
+ *
+ * Only one of the two Windows installs can be spawned directly. node-pty calls
+ * `CreateProcessW` with `lpApplicationName` NULL and the command line in
+ * `lpCommandLine` (`src/win/conpty.cc:413`), and `CreateProcessW` loads
+ * images - a batch file is not one. So `claude.cmd` gets past node-pty's own
+ * PATH check only to die at the call itself, with `Cannot create process`. A
+ * batch file needs an interpreter, so it gets one.
+ *
+ * Null means nothing is installed, and it has to be null rather than a best
+ * guess: `cmd.exe /d /c claude.cmd` spawns perfectly well on a machine with no
+ * CLI, because cmd.exe is always there. The operator would get
+ * `'claude.cmd' is not recognized` painted inside an agent pane - a pty that
+ * came up, so nothing above here would know to say anything.
+ *
+ * Pure, and told the platform, the PATH and the existence check rather than
+ * reading them: the machine this is wrong on is never the one it is written on.
+ */
+export function resolveCli(
+  cmd: string | undefined,
+  args: string[],
+  os: string,
+  path: string,
+  exists: (p: string) => boolean
+): { file: string; args: string[] } | null {
+  // execvp does this lookup itself, and reports a miss as ENOENT, which
+  // spawnFailure already reads. Probing here would only disagree with it.
+  if (os !== 'win32') return { file: cmd ?? 'claude', args }
+  const dirs = path.split(';').filter(Boolean)
+  const file = cmd ?? WIN_CLI.find((name) => dirs.some((dir) => exists(join(dir, name))))
+  if (!file) return null
+  if (!/\.(cmd|bat)$/i.test(file)) return { file, args }
+  // ponytail: `/d` skips whatever AutoRun the registry holds. Ceiling - cmd.exe
+  // re-parses the line, so a `%` or a `^` inside an argument means something to
+  // it. Every caller passes `args: []`; the day one does not, quote it there.
+  return { file: 'cmd.exe', args: ['/d', '/c', file, ...args] }
+}
+
+/**
+ * The one sentence worth printing when the CLI is not installed.
  *
  * Every agent on the floor is a `claude` process, so a machine without the CLI
  * fails at the first one - and the operator meets it as the first-run dialog
- * refusing the directory they just picked. node-pty reports the missing binary
- * as `File not found: <path>`, and on Windows with the path blank: it walks
- * PATH looking for that exact filename and hands back an empty string. Neither
- * version names the directory, and neither names the one thing to do about it,
- * so the reading is "that folder is wrong" - which it is not.
+ * refusing the directory they just picked. Naming the directory is what the
+ * underlying errors do not do, and under a box someone has just typed a path
+ * into, anything else reads as "that folder is wrong".
  */
-export function spawnFailure(cmd: string, err: unknown): Error {
-  const why = err instanceof Error ? err.message : String(err)
-  if (!/file not found|enoent/i.test(why)) return err instanceof Error ? err : new Error(why)
+export function missingCli(cmd: string): Error {
   return new Error(
     `${cmd} is not on PATH - install the Claude CLI first (npm i -g @anthropic-ai/claude-code), ` +
       `then pick the directory again. The directory itself is fine.`
   )
+}
+
+/**
+ * Say what a failed spawn actually means, when it means the CLI is not there.
+ *
+ * node-pty reports a missing binary as `File not found: <path>`, and on Windows
+ * with the path blank: it walks PATH for that exact filename and hands back an
+ * empty string. Anything else is somebody else's failure and goes back
+ * untouched - rewriting one as "install the CLI" sends the operator off
+ * installing something they already have.
+ */
+export function spawnFailure(cmd: string, err: unknown): Error {
+  const why = err instanceof Error ? err.message : String(err)
+  if (!/file not found|enoent/i.test(why)) return err instanceof Error ? err : new Error(why)
+  return missingCli(cmd)
 }
 
 /**
@@ -96,13 +157,16 @@ export class PtyManager extends EventEmitter {
   spawn(spec: AgentSpec): AgentState {
     if (this.ptys.has(spec.id)) throw new Error(`agent ${spec.id} already running`)
 
-    const cmd = spec.cmd ?? (platform() === 'win32' ? 'claude.cmd' : 'claude')
-    // Direct spawn. A /bin/sh wrapper that closes inherited descriptors was
-    // tried and reverted - see defect B in OPEN-QUESTIONS.md for what it fixed,
-    // how it broke, and why it is not worth a broken launcher.
+    // Direct spawn on Unix. A /bin/sh wrapper that closes inherited descriptors
+    // was tried and reverted - see defect B in OPEN-QUESTIONS.md for what it
+    // fixed, how it broke, and why it is not worth a broken launcher. The
+    // cmd.exe on the Windows side is not that: a .cmd has no other way to run.
+    const target = resolveCli(spec.cmd, spec.args ?? [], platform(), process.env.PATH ?? '', existsSync)
+    if (!target) throw missingCli('claude')
+    const cmd = target.file
     let pty: IPty
     try {
-      pty = spawn(cmd, spec.args ?? [], {
+      pty = spawn(cmd, target.args, {
         name: 'xterm-256color',
         cwd: spec.cwd,
         cols: spec.cols ?? 120,

@@ -168,6 +168,8 @@ export default function App() {
   const [menuModel, setMenuModel] = useState<string | null>(null)
   // Set on first run only: the suggested workspace, awaiting an answer.
   const [setupCwd, setSetupCwd] = useState<string | null>(null)
+  /** Why the last attempt to bring the floor up failed, for the dialog to say. */
+  const [bootError, setBootError] = useState('')
   // The work tree opens files and the editor shows them; they are separate
   // panels the operator can put in different columns, so the open file lives
   // above both rather than inside either.
@@ -387,6 +389,15 @@ export default function App() {
         // stops working, and it says so - but silence would look like nothing
         // was ever meant to be there.
         console.error('[bullpen] could not start the standing agents:', err)
+        // Console-only was how a machine that lost the CLI after setup opened
+        // to an empty window with the reason nowhere a human would look. The
+        // first-run dialog is what to show: it already carries the reason, and
+        // what it offers - fix the CLI, press the button again - is the whole
+        // of what there is to do about it.
+        if (!cancelled) {
+          setBootError(err instanceof Error ? err.message : String(err))
+          setSetupCwd(setup.cwd)
+        }
       }
     })()
     return () => {
@@ -1243,7 +1254,9 @@ export default function App() {
         />
       )}
 
-      {setupCwd !== null && <FirstRun suggested={setupCwd} onChoose={chooseGodHome} />}
+      {setupCwd !== null && (
+        <FirstRun suggested={setupCwd} note={bootError} onChoose={chooseGodHome} />
+      )}
     </div>
   )
 }
@@ -1389,9 +1402,12 @@ function Icon({
  */
 function FirstRun({
   suggested,
+  note,
   onChoose
 }: {
   suggested: string
+  /** Why the floor did not come up, when this is a retry rather than a first run. */
+  note?: string
   onChoose: (dir: string) => Promise<string | null>
 }) {
   const boss = roleName(dispatchRole())
@@ -1400,7 +1416,7 @@ function FirstRun({
     .map(([, def]) => def.fixed?.name ?? '')
     .filter(Boolean)
   const [dir, setDir] = useState(suggested)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(note ?? '')
   const [busy, setBusy] = useState(false)
 
   const go = async (): Promise<void> => {
