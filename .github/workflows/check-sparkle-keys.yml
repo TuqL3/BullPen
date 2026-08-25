@@ -1,0 +1,27 @@
+# Are the two Sparkle secrets usable? Answered without building anything.
+#
+# The failure this exists for is silent: generate_appcast compares the public
+# key in the packaged app against the public half inside the private key, and
+# when they disagree it writes an unsigned appcast and exits 0. Finding that out
+# through a release costs a full macOS build. This costs twenty seconds, and can
+# be run whenever the keys are rotated.
+name: check sparkle keys
+
+on:
+  workflow_dispatch:
+
+jobs:
+  keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the public and private key
+        env:
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          # Lengths only - never the values. Enough to tell "not set" from
+          # "pasted the wrong thing" without putting a key in a public log.
+          echo "public key:  ${#SPARKLE_ED_PUBLIC_KEY} characters (expected 44)"
+          echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (expected 128)"
+          node scripts/check-sparkle-keypair.mjs

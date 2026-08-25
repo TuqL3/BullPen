@@ -67,15 +67,45 @@ export function keypairProblem(pub, priv) {
         'generate_keys -x writes the private one.'
 }
 
-// Run directly: read the two secrets from the environment and say yes or no.
+/**
+ * The public key a packaged app actually carries.
+ *
+ * Worth asking separately from the secret it came from: whitespace, a partial
+ * paste, or a packaging step that never received the variable all end here, and
+ * this is the value generate_appcast will compare against.
+ */
+export function publicKeyInBundle(plistPath, run) {
+  try {
+    return run('plutil', ['-extract', 'SUPublicEDKey', 'raw', '-o', '-', plistPath]).trim()
+  } catch {
+    return ''
+  }
+}
+
+// Run directly. `--plist <Info.plist>` checks the key the app was packaged
+// with; without it, the key as the secret arrived.
 if (process.argv[1] && process.argv[1].endsWith('check-sparkle-keypair.mjs')) {
-  const why = keypairProblem(
-    process.env.SPARKLE_ED_PUBLIC_KEY ?? '',
-    process.env.SPARKLE_ED_PRIVATE_KEY ?? ''
-  )
+  const at = process.argv.indexOf('--plist')
+  let pub = process.env.SPARKLE_ED_PUBLIC_KEY ?? ''
+  let where = 'SPARKLE_ED_PUBLIC_KEY'
+
+  if (at !== -1) {
+    const plist = process.argv[at + 1]
+    const { execFileSync } = await import('node:child_process')
+    pub = publicKeyInBundle(plist, (cmd, args) =>
+      execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    )
+    where = `SUPublicEDKey in ${plist}`
+    if (!pub) {
+      console.error(`::error::${plist} has no SUPublicEDKey - this build was not packaged with one`)
+      process.exit(1)
+    }
+  }
+
+  const why = keypairProblem(pub, process.env.SPARKLE_ED_PRIVATE_KEY ?? '')
   if (why) {
-    console.error(`::error::${why}`)
+    console.error(`::error::${why.replace('SPARKLE_ED_PUBLIC_KEY', where)}`)
     process.exit(1)
   }
-  console.log('Sparkle keypair: public key matches the private key')
+  console.log(`Sparkle keypair: ${where} matches the private key`)
 }

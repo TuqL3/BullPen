@@ -109,6 +109,17 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --config electron-builder.config.mjs --mac -p always
 
+      # The secret was checked before the build; this checks what the build
+      # actually put in the bundle. Whitespace in the secret, a packaging step
+      # that never received it, or a stale `release/` all land here and nowhere
+      # earlier - and this is the exact value generate_appcast will compare.
+      - name: Refuse a package whose key does not match the signing key
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          plist=$(ls -d release/mac-universal/*.app/Contents/Info.plist | head -1)
+          node scripts/check-sparkle-keypair.mjs --plist "$plist"
+
       # Sparkle updates out of the zips, so only the zips go to generate_appcast.
       # Pointed at a staging directory rather than at `release/` because that
       # also holds the dmgs, and generate_appcast would write a second appcast

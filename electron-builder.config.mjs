@@ -40,7 +40,14 @@ const FEED = 'https://github.com/TuqL3/BullPen/releases/latest/download/appcast.
  * failure: `npm run rebuild:sparkle` has to have run before this can pack.
  */
 const sparkle = onMac
-  ? sparkleBuilderConfig({ feedUrl: FEED, publicEdKey: process.env.SPARKLE_ED_PUBLIC_KEY })
+  ? sparkleBuilderConfig({
+      feedUrl: FEED,
+      // Trimmed. A secret pasted into GitHub's box keeps whatever whitespace
+      // came with it, and that whitespace goes into Info.plist verbatim - where
+      // generate_appcast compares the value character for character against the
+      // key it is signing with, and declines to sign without saying so.
+      publicEdKey: process.env.SPARKLE_ED_PUBLIC_KEY?.trim() || undefined
+    })
   : null
 
 export default {
