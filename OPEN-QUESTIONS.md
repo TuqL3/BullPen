@@ -1966,8 +1966,37 @@ failure names which end broke instead of costing a build to find out.
 it ships inside every build - and is printed in full; the signing key appears
 only as a character count.
 
-**What this does not fix:** the signing key itself. The derivation threw, and
-the reason is in that step's log - `SPARKLE_ED_PRIVATE_KEY` is very likely still
-the 102-character value measured earlier, which is neither of the two lengths
-Sparkle accepts. The next run fails in ten seconds with the count in the log
-instead of after a full build.
+**What this does not fix:** the signing key itself. It ran on `v0.1.4` and
+failed in ten seconds with the byte count in the log, which is what it is for.
+The count was 32, and what that means is §64 - not the 102 characters guessed
+here before the guard was able to answer.
+
+## 64. The key in the secret was the one that gets printed
+
+`v0.1.4` failed in ten seconds:
+
+```
+Error: SPARKLE_ED_PRIVATE_KEY decodes to 32 bytes; Sparkle accepts 64 or 96.
+```
+
+32 bytes is an ed25519 **public** key. `generate_keys` prints the public half to
+the terminal and never prints the private one - that goes into the login
+Keychain, and only `generate_keys -x <file>` writes it anywhere a person can
+copy it from. So the value on screen is the obvious thing to paste, and it is
+the wrong one.
+
+The error now says that, rather than repeating the byte count and the expected
+lengths at somebody who has already read them once.
+
+**The hole this also closed.** `keypairProblem` checked only that the private
+key was long enough to end in 32 bytes. A public key ends in itself, so the
+public key in *both* secrets would have compared equal and been reported as a
+matching pair - a guard passing on the one input that cannot sign anything.
+Both entry points now share one length check against the lengths Sparkle
+actually accepts.
+
+**Not fixed here, because it is not a code problem:** the secret. The fix is to
+run `generate_keys -x <file>`, paste the 128 characters that file holds, and
+delete the file - it is a private key, and it belongs in the Keychain and the
+GitHub secret box, nowhere else. `check sparkle keys` answers whether it took,
+in twenty seconds and without cutting a tag.

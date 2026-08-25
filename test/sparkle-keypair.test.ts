@@ -90,3 +90,19 @@ test('the derived key is what the keypair check then agrees with', () => {
   const priv = b64(Buffer.concat([randomBytes(64), randomBytes(32)]))
   assert.equal(keypairProblem(publicKeyFromPrivate(priv), priv), null)
 })
+
+test('a public key pasted into the private secret is named as such', () => {
+  // What actually happened on v0.1.4. `generate_keys` prints the public key to
+  // the screen and never prints the private one, so the value on screen is the
+  // obvious thing to copy - and it is the wrong one.
+  const pub = randomBytes(32)
+  assert.throws(() => publicKeyFromPrivate(b64(pub)), /length of an ed25519 public key/)
+  assert.throws(() => publicKeyFromPrivate(b64(pub)), /generate_keys -x/)
+})
+
+test('a public key in both secrets is refused, not called a match', () => {
+  // A public key ends in itself, so a last-32-bytes comparison alone would call
+  // this a matching pair and wave through a release nothing can sign.
+  const pub = randomBytes(32)
+  assert.match(keypairProblem(b64(pub), b64(pub)) ?? '', /decodes to 32 bytes/)
+})

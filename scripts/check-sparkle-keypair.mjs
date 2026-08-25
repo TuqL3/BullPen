@@ -35,6 +35,33 @@ const PRIVATE_KEY_BYTES = [64, 96]
 const PLACEHOLDER = 'SPARKLE_ED_PUBLIC_KEY_PLACEHOLDER'
 
 /**
+ * A reason a private key cannot be used, or null when it can.
+ *
+ * Length is the whole test, and it names the mistake that has actually been
+ * made: 32 bytes is an ed25519 *public* key. That is the value `generate_keys`
+ * prints to the screen, and it is the obvious thing to copy - the private key
+ * is never printed at all. It lives in the Keychain and only `generate_keys -x`
+ * writes it out.
+ */
+function privateKeyProblem(priv) {
+  if (!priv || !priv.trim()) return 'SPARKLE_ED_PRIVATE_KEY is empty'
+
+  const bytes = Buffer.from(priv.trim(), 'base64')
+  if (PRIVATE_KEY_BYTES.includes(bytes.length)) return null
+
+  return (
+    `SPARKLE_ED_PRIVATE_KEY decodes to ${bytes.length} bytes; Sparkle accepts ` +
+    `${PRIVATE_KEY_BYTES.join(' or ')}. ` +
+    (bytes.length === PUBLIC_KEY_BYTES
+      ? 'That is the length of an ed25519 public key - the value generate_keys ' +
+        'prints to the screen. The private key is never printed: it lives in the ' +
+        'Keychain, and `generate_keys -x <file>` exports it as 128 base64 characters.'
+      : 'The file generate_keys -x writes is 128 base64 characters - paste it ' +
+        'whole, and nothing around it.')
+  )
+}
+
+/**
  * A reason the pair cannot work, or null when it can.
  *
  * Returns the reason rather than throwing so the caller decides what a failure
@@ -56,11 +83,14 @@ export function keypairProblem(pub, priv) {
     )
   }
 
-  const privBytes = Buffer.from(priv.trim(), 'base64')
-  if (privBytes.length < PUBLIC_KEY_BYTES) {
-    return `SPARKLE_ED_PRIVATE_KEY decodes to ${privBytes.length} bytes, which is too short to be a key`
-  }
+  // Length first, and against the lengths Sparkle accepts rather than merely
+  // "long enough to end in 32 bytes". A public key pasted into the private
+  // secret ends in itself, so the comparison below would call that a match and
+  // wave through a release that cannot be signed.
+  const badPrivate = privateKeyProblem(priv)
+  if (badPrivate) return badPrivate
 
+  const privBytes = Buffer.from(priv.trim(), 'base64')
   const carried = privBytes.subarray(privBytes.length - PUBLIC_KEY_BYTES)
   if (carried.equals(pubBytes)) return null
 
@@ -94,15 +124,9 @@ export function keypairProblem(pub, priv) {
  * release that must not be built, not one that should quietly go unsigned.
  */
 export function publicKeyFromPrivate(priv) {
-  if (!priv || !priv.trim()) throw new Error('SPARKLE_ED_PRIVATE_KEY is empty')
+  const problem = privateKeyProblem(priv)
+  if (problem) throw new Error(problem)
   const bytes = Buffer.from(priv.trim(), 'base64')
-  if (!PRIVATE_KEY_BYTES.includes(bytes.length)) {
-    throw new Error(
-      `SPARKLE_ED_PRIVATE_KEY decodes to ${bytes.length} bytes; Sparkle accepts ` +
-        `${PRIVATE_KEY_BYTES.join(' or ')}. The file generate_keys -x writes is ` +
-        '128 base64 characters - paste it whole, and nothing around it.'
-    )
-  }
   return bytes.subarray(bytes.length - PUBLIC_KEY_BYTES).toString('base64')
 }
 
