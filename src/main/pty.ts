@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { spawn, type IPty } from 'node-pty'
 import { platform } from 'node:os'
 import { existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { cleanEnv } from './ctx.ts'
 import { feed, newWatch, type TrustWatch } from './trust.ts'
@@ -60,6 +61,121 @@ export function trimTail(past: string, chunk: string, max = TAIL): string {
  * machine has one or the other.
  */
 const WIN_CLI = ['claude.exe', 'claude.cmd', 'claude.bat']
+
+/**
+ * Where Windows keeps the PATH a shell started right now would see.
+ *
+ * Machine first, then user: that is the order Windows itself composes them in,
+ * and a duplicate later in the list never wins anyway.
+ */
+const PATH_KEYS = [
+  'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment',
+  'HKCU\\Environment'
+]
+
+/**
+ * The PATH out of one `reg query <key> /v Path`.
+ *
+ * A process holds the environment it was handed at start, and Bullpen is
+ * launched from Explorer - whose own environment is a snapshot taken at login.
+ * So a CLI installed after login is invisible to the app however correctly the
+ * installer wrote PATH, and the first-run dialog prints "install the Claude CLI
+ * first" at an operator who has just done exactly that. Signing out fixes it,
+ * which is not something a dialog can ask for.
+ *
+ * The registry is where every installer writes and every new shell reads, so
+ * it answers for any install directory rather than the two the default
+ * installers happen to use. This is the Windows half of what
+ * `pathFromLoginShell` does on macOS, and for the same reason.
+ *
+ * The value is usually `REG_EXPAND_SZ` and holds `%USERPROFILE%` unexpanded -
+ * a literal `%USERPROFILE%\.local\bin` on PATH matches no directory at all.
+ * An unset variable is left standing, which is what Windows does with one too.
+ *
+ * Pure, and told the output rather than running `reg` itself: a parser that
+ * can only be exercised on Windows is a parser nobody exercises.
+ */
+export function regPath(out: string | null, env: NodeJS.ProcessEnv): string {
+  // `Path` is one line, its value runs to the end of it, and reg pads the
+  // columns with spaces - so the type is the anchor, not the whitespace.
+  const line = (out ?? '').split(/\r?\n/).find((l) => /^\s*Path\s+REG_(EXPAND_)?SZ\s/i.test(l))
+  if (!line) return ''
+  const value = line.replace(/^\s*Path\s+REG_(EXPAND_)?SZ\s+/i, '').trimEnd()
+  return value.replace(/%([^%]+)%/g, (whole, name: string) => {
+    const hit = Object.keys(env).find((k) => k.toLowerCase() === name.toLowerCase())
+    return hit && env[hit] ? env[hit] : whole
+  })
+}
+
+/**
+ * Ask the registry what PATH is, and take silence for an answer.
+ *
+ * `reg.exe` ships with Windows, so this is a lookup rather than a dependency.
+ * It exits non-zero when the value is not there, which lands here as a throw
+ * and leaves the caller with the inherited PATH it already had - a registry
+ * that cannot be read must never be worse than not looking.
+ *
+ * ponytail: read on every spawn rather than cached. Two `reg` calls cost a few
+ * tens of milliseconds against a process launch that is already happening, and
+ * a cache would hold exactly the stale answer this function exists to avoid.
+ */
+export function registryPath(env: NodeJS.ProcessEnv): string {
+  return PATH_KEYS.map((key) => {
+    try {
+      return regPath(
+        execFileSync('reg.exe', ['query', key, '/v', 'Path'], {
+          encoding: 'utf8',
+          timeout: 5000,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }),
+        env
+      )
+    } catch {
+      return ''
+    }
+  })
+    .filter(Boolean)
+    .join(';')
+}
+
+/**
+ * One search path out of several, in the order given, without repeats.
+ *
+ * Earlier wins: the PATH Bullpen was launched with comes first, so an operator
+ * who started it from a shell holding a particular claude still gets that one.
+ * The registry follows, then the two directories the default installers use -
+ * a net for an installer that writes a directory into PATH and gets no further.
+ *
+ * Trailing separators and case are normalised for the comparison only. A
+ * duplicated directory is another `existsSync` on every spawn and a PATH that
+ * grows each time something reads and rewrites it.
+ */
+export function winSearchPath(paths: string[]): string {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const dir of paths.flatMap((p) => p.split(';'))) {
+    if (!dir) continue
+    const key = dir.replace(/\\+$/, '').toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(dir)
+  }
+  return out.join(';')
+}
+
+/**
+ * Set PATH on an environment under the name that environment already uses.
+ *
+ * Windows spells it `Path`, and `process.env` only looks case-insensitive
+ * because Node proxies it - spread it into a plain object and the literal key
+ * is what survives. Adding `PATH` next to an existing `Path` hands the child
+ * two of them, and which one wins is the child's business, not ours.
+ */
+export function withPath(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
+  return { ...env, [key]: path }
+}
 
 /**
  * What to hand node-pty for the CLI on this platform.
@@ -161,7 +277,25 @@ export class PtyManager extends EventEmitter {
     // was tried and reverted - see defect B in OPEN-QUESTIONS.md for what it
     // fixed, how it broke, and why it is not worth a broken launcher. The
     // cmd.exe on the Windows side is not that: a .cmd has no other way to run.
-    const target = resolveCli(spec.cmd, spec.args ?? [], platform(), process.env.PATH ?? '', existsSync)
+    // The same search path decides what is found and what the child can find:
+    // resolving against one PATH and spawning with another is how a CLI passes
+    // the check here and reports itself missing one process down.
+    const os = platform()
+    const home = process.env.USERPROFILE ?? ''
+    const appdata = process.env.APPDATA ?? ''
+    const search =
+      os === 'win32'
+        ? winSearchPath([
+            process.env.PATH ?? '',
+            registryPath(process.env),
+            // Last, and only as a net: an empty root would join to a relative
+            // `.local\bin`, which probes against whatever directory the app
+            // happens to be sitting in.
+            home ? join(home, '.local', 'bin') : '',
+            appdata ? join(appdata, 'npm') : ''
+          ])
+        : (process.env.PATH ?? '')
+    const target = resolveCli(spec.cmd, spec.args ?? [], os, search, existsSync)
     if (!target) throw missingCli('claude')
     const cmd = target.file
     let pty: IPty
@@ -174,7 +308,11 @@ export class PtyManager extends EventEmitter {
         // cleanEnv strips CLAUDE_CODE_*: if Bullpen was itself launched from a
         // Claude Code session, the inherited child-session marker turns the
         // agent's transcript off, which removes the context and cost data.
-        env: { ...cleanEnv(process.env), ...spec.env, BULLPEN_AGENT_ID: spec.id } as Record<string, string>
+        env: {
+          ...(search ? withPath(cleanEnv(process.env), search) : cleanEnv(process.env)),
+          ...spec.env,
+          BULLPEN_AGENT_ID: spec.id
+        } as Record<string, string>
       })
     } catch (err) {
       throw spawnFailure(cmd, err)

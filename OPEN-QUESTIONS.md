@@ -2186,3 +2186,57 @@ the spawn succeeds now. And the renderer's boot path put the reason into
 opened to an empty window with no explanation; it now reopens the first-run
 dialog carrying the reason.
 
+
+## Defect: "claude is not on PATH" right after installing the CLI (Windows)
+
+**Symptom.** Operator runs the Claude installer, opens Bullpen, and the
+first-run dialog still refuses with `claude is not on PATH`. Reported on
+v0.1.15 with `claude.exe` sitting in `C:\Users\Admin\.local\bin` and
+`where.exe claude` finding it from PowerShell.
+
+**Cause.** A process holds the environment it was handed at start. Bullpen is
+launched from Explorer, and Explorer's own environment is a snapshot taken at
+login - so a CLI installed after login is invisible to the app however
+correctly the installer wrote PATH. PowerShell sees it because PowerShell
+started afterwards. Signing out fixes it, which is not something a dialog can
+ask for.
+
+**Fix.** `registryPath()` reads PATH out of
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` and
+`HKCU\Environment` through `reg.exe` - where every installer writes and every
+new shell reads. `winSearchPath()` merges that with the inherited PATH and,
+last, the two directories the default installers use. Earlier source wins the
+position, so an operator who launched Bullpen from a shell holding a particular
+claude still gets that one; the registry only ever adds. The merged string is
+used for the lookup *and* written into the child's environment via
+`withPath()` - resolving against one PATH and spawning with another is how a
+CLI passes the check and then reports itself missing one process down.
+
+The registry is what makes this general. An earlier version of the fix only
+appended `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`; those are a guess that
+holds for the default installers and breaks for `npm config set prefix`, for
+winget/scoop/choco, and for anyone who put `claude.exe` somewhere of their own.
+They are kept only as a net for an installer that creates a directory and
+fails to record it.
+
+**Still not covered:** a CLI installed into a directory that is on no PATH at
+all, in the registry or anywhere else. No lookup can find that one. `spec.cmd`
+already takes an explicit path, but nothing in the first-run dialog offers to
+set it - that would be the fix, and it is renderer work that has not been done.
+
+**Assumed, and what breaks if wrong:** that `reg.exe` is present and prints the
+columns this parser expects (`Path    REG_EXPAND_SZ    <value>`). If it is
+absent or reformatted, `registryPath()` returns empty and the caller keeps the
+inherited PATH - the defect comes back, nothing new breaks. Unexpanded `%VAR%`
+is expanded from the app's own environment; a variable defined only in the
+registry stays literal and contributes a directory that matches nothing.
+
+**Verified:** `test/pty.test.ts` covers `regPath` across REG_SZ and
+REG_EXPAND_SZ, an undefined variable, an error reply, a null reply, and a
+`PathExt` line that must not be mistaken for `Path`; and `winSearchPath` across
+ordering, duplicates by trailing slash and case, empty sources, and the
+end-to-end case where the inherited PATH misses the CLI and the merged one
+finds it.
+
+**Not verified:** that this runs on a real Windows machine. No Windows machine
+was available; `reg.exe` output format is taken from its documented layout.

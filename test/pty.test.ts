@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { resolveCli, spawnFailure, trimTail } from '../src/main/pty.ts'
+import { join } from 'node:path'
+import { regPath, resolveCli, spawnFailure, trimTail, winSearchPath, withPath } from '../src/main/pty.ts'
 
 /**
  * Applying a floor reloads the window and leaves the agents that have a place
@@ -112,4 +113,80 @@ test('the CLI is launched by whichever name Windows has it under', () => {
     args: []
   })
   assert.deepEqual(resolveCli(undefined, [], 'darwin', '', () => false), { file: 'claude', args: [] })
+})
+
+/**
+ * The bug this exists for: the operator installs the CLI, the installer writes
+ * PATH correctly, and Bullpen still refuses the directory - because the app
+ * inherited its environment from Explorer, which took its own snapshot at
+ * login. Nothing on the machine is wrong; the running process is just old.
+ *
+ * The registry is the answer rather than a list of likely directories: it is
+ * where the installer wrote and where a new shell reads, so it holds for an
+ * install anywhere, not only the two paths the default installers use.
+ */
+test('the search path is read where installers write it, not where the app was born', () => {
+  const env = { USERPROFILE: 'C:\\Users\\Admin', SystemRoot: 'C:\\Windows' }
+
+  // What `reg query HKCU\Environment /v Path` prints. The value runs to the
+  // end of its line and may hold spaces, so the type is the anchor.
+  const out = [
+    '',
+    'HKEY_CURRENT_USER\\Environment',
+    '    Path    REG_EXPAND_SZ    %USERPROFILE%\\.local\\bin;C:\\Program Files\\Git\\cmd',
+    ''
+  ].join('\r\n')
+  assert.equal(regPath(out, env), 'C:\\Users\\Admin\\.local\\bin;C:\\Program Files\\Git\\cmd')
+
+  // REG_SZ as well as REG_EXPAND_SZ - the machine key is often the plain one.
+  assert.equal(regPath('    Path    REG_SZ    C:\\Windows\\System32', env), 'C:\\Windows\\System32')
+
+  // A variable nothing defines is left standing, which is what Windows does
+  // with one. Swallowing it would silently shorten PATH by a directory.
+  assert.equal(regPath('    Path    REG_EXPAND_SZ    %NOPE%\\bin', env), '%NOPE%\\bin')
+
+  // No value, no key, no reg.exe at all: the caller keeps the PATH it had. A
+  // registry that cannot be read must never be worse than not looking.
+  assert.equal(regPath('ERROR: The system was unable to find the specified registry key', env), '')
+  assert.equal(regPath(null, env), '')
+
+  // Another value whose name merely starts with Path is not this one.
+  assert.equal(regPath('    PathExt    REG_SZ    .COM;.EXE', env), '')
+})
+
+/**
+ * Several sources, one PATH: whoever came first keeps the position, so an
+ * operator who launched Bullpen from a shell holding a particular claude still
+ * gets that one, and the registry only ever adds.
+ */
+test('the sources are merged in order, without repeats', () => {
+  const stale = 'C:\\Windows\\System32'
+  const fresh = 'C:\\Windows\\System32;C:\\Users\\Admin\\.local\\bin'
+
+  assert.equal(winSearchPath([stale, fresh]), fresh)
+  assert.equal(winSearchPath(['a;b', 'c'], ), 'a;b;c')
+
+  // Trailing separators and case are the same directory, not two.
+  assert.equal(winSearchPath(['C:\\bin', 'C:\\bin\\', 'c:\\BIN']), 'C:\\bin')
+
+  // Empty sources vanish rather than leaving `;;`, which Windows reads as the
+  // working directory - a claude.exe dropped next to a project would win.
+  assert.equal(winSearchPath(['', stale, '', '']), stale)
+  assert.equal(winSearchPath([]), '')
+
+  // And the CLI the registry knows about is now found, where the inherited
+  // PATH alone missed it.
+  const at = (p: string) => p === join('C:\\Users\\Admin\\.local\\bin', 'claude.exe')
+  assert.equal(resolveCli(undefined, [], 'win32', stale, at), null)
+  assert.equal(resolveCli(undefined, [], 'win32', winSearchPath([stale, fresh]), at)?.file, 'claude.exe')
+})
+
+/**
+ * Windows spells it `Path`. Spread `process.env` into a plain object and that
+ * literal key survives, so writing `PATH` beside it hands the child two.
+ */
+test('the search path is written under the name the environment already uses', () => {
+  assert.deepEqual(withPath({ Path: 'a', HOME: 'h' }, 'b'), { Path: 'b', HOME: 'h' })
+  assert.deepEqual(withPath({ PATH: 'a' }, 'b'), { PATH: 'b' })
+  assert.deepEqual(withPath({ HOME: 'h' }, 'b'), { HOME: 'h', PATH: 'b' })
 })
