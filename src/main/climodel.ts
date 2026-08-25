@@ -86,11 +86,23 @@ export function bannerModel(output: string, models: Model[]): string | null {
   // through the middle of it, and `Claude Code` arrives bold - which is to say
   // with a reset sequence sitting between it and its own version number.
   const plain = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-  const box = /Claude Code\s+v[\d.]+([\s\S]{0,240})/.exec(plain)
+  // `\s*`, not `\s+`. The name and the version are two cells of a drawn box
+  // and what sits between them is a cursor move, not a space - so stripping the
+  // escapes leaves `Claude Codev2.1.245` with nothing in the middle at all.
+  // Demanding whitespace here is why this returned null for every real agent
+  // and the model menu ticked nothing.
+  const box = /Claude Code\s*v[\d.]+([\s\S]{0,240})/.exec(plain)
   if (!box) return null
   const window = box[1]
+  // Longest first, and a model's own banner name ahead of its menu label:
+  // `Opus 5 (1M context)` contains `Opus 5`, and the shorter match is a
+  // different context window sold at a different price.
   const named = [...models]
-    .sort((a, b) => b.label.length - a.label.length)
-    .find((m) => window.includes(m.label))
+    .flatMap((m) => [
+      ...(m.banner ? [{ id: m.id, text: m.banner }] : []),
+      { id: m.id, text: m.label }
+    ])
+    .sort((a, b) => b.text.length - a.text.length)
+    .find((m) => window.includes(m.text))
   return named?.id ?? null
 }

@@ -178,6 +178,20 @@ function measureCell(): { w: number; h: number } {
 }
 
 /**
+ * The pane a terminal actually lives in.
+ *
+ * Not `document.querySelector('section')`, which is what every spawn used to
+ * measure: each panel is wrapped in a `<section data-pane>`, so the first one
+ * in the document is whichever panel the operator dragged left - the roster, at
+ * about 230px, which is 30 columns. The CLI then drew its whole first screen
+ * 30 columns wide and nothing corrected it, because the *element* never
+ * changed size and the ResizeObserver had nothing to fire on. Switching tabs
+ * fixed it, which is the reveal path below.
+ */
+export const termPane = (): Element | null =>
+  document.querySelector('[data-term-pane]') ?? document.querySelector('section')
+
+/**
  * The dimensions a new agent's pty should start at, taken from the pane it will
  * live in. Falls back to a conventional 80x24 rather than to a guess that could
  * be absurd - a wrong size here is exactly what garbles the CLI's first paint.
@@ -189,6 +203,25 @@ export function paneSize(el: Element | null): { cols: number; rows: number } {
   return {
     cols: Math.max(20, Math.floor((box.width - 20) / w)),
     rows: Math.max(6, Math.floor(box.height / h))
+  }
+}
+
+/**
+ * Fit one terminal again and tell its pty. For a pty that was replaced.
+ *
+ * A restart - a new model, a new directory - hands the same host element a
+ * brand new process, which starts at whatever size it was spawned with and is
+ * never told otherwise: the element did not move, so nothing here fires. This
+ * is the one call that says "the thing on the other end is new, measure again".
+ */
+export function refit(id: string): void {
+  const entry = terms.get(id)
+  if (!entry) return
+  try {
+    entry.fit.fit()
+    window.bullpen.resize(id, entry.term.cols, entry.term.rows)
+  } catch {
+    // Not laid out yet. The reveal effect fits it when its tab comes back.
   }
 }
 

@@ -20,10 +20,12 @@ import { engineFor } from '../../engines'
 import type { Dispatch, Question, Report, UpdateState, WorkflowInfo } from '../../preload/index'
 import {
   paneSize,
+  refit,
   setTerminalFontSize,
   setTerminalTheme,
   disposeTerminal,
   TerminalDeck,
+  termPane,
   writeToTerminal
 } from './Terminal'
 import { getPrefs, setPrefs, type Prefs } from './prefs'
@@ -369,7 +371,7 @@ export default function App() {
       const setup = await window.bullpen.godSetup()
       if (cancelled) return
       if (!setup.chosen) return setSetupCwd(setup.cwd)
-      const { cols, rows } = paneSize(document.querySelector('section'))
+      const { cols, rows } = paneSize(termPane())
       try {
         const g = await window.bullpen.ensureGod({ cols, rows })
         if (!cancelled) adoptGod(g)
@@ -493,7 +495,7 @@ export default function App() {
     try {
       // Start the pty at the size of the pane it will appear in, so the CLI's
       // first paint is not drawn to a width the terminal never actually had.
-      const { cols, rows } = paneSize(document.querySelector('section'))
+      const { cols, rows } = paneSize(termPane())
       const state = await window.bullpen.spawn({
         id,
         cwd: d.cwd.trim(),
@@ -577,7 +579,7 @@ export default function App() {
     )
       return
     setMoveError('')
-    const { cols, rows } = paneSize(document.querySelector('section'))
+    const { cols, rows } = paneSize(termPane())
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return setMoveError(res.error)
     adoptGod(res)
@@ -594,7 +596,7 @@ export default function App() {
    * conversations do not survive it, which is why the dialog says so first.
    */
   const restartFloor = async (): Promise<void> => {
-    const { cols, rows } = paneSize(document.querySelector('section'))
+    const { cols, rows } = paneSize(termPane())
     await window.bullpen.stopFixed()
     adoptGod(await window.bullpen.ensureGod({ cols, rows }))
     for (const a of await window.bullpen.ensureFixed({ cols, rows })) adopt(a, a.role)
@@ -618,7 +620,7 @@ export default function App() {
 
   /** First run: accept a workspace for the floor and bring it up in there. */
   const chooseGodHome = async (dir: string): Promise<string | null> => {
-    const { cols, rows } = paneSize(document.querySelector('section'))
+    const { cols, rows } = paneSize(termPane())
     const res = await window.bullpen.moveGod(dir, { cols, rows })
     if ('error' in res) return res.error
     adoptGod(res)
@@ -712,7 +714,7 @@ export default function App() {
    * only the roster knows.
    */
   const restart = async (a: Agent, change?: { cwd?: string; args?: string[] }): Promise<void> => {
-    const { cols, rows } = paneSize(document.querySelector('section'))
+    const { cols, rows } = paneSize(termPane())
     const cwd = change?.cwd?.trim() || a.cwd
     // Its own arguments unless it is being changed onto others. They used to be
     // dropped here: an agent hired on `--model haiku` came back on whatever the
@@ -748,6 +750,11 @@ export default function App() {
       window.bullpen.setRole(a.id, a.role)
       select(a.id)
       setTab('terminal')
+      // The host element did not move, so nothing else measures it - and the
+      // process on the other end of it is a new one, started at whatever size
+      // it was spawned with. Say the size once, out loud, on the next frame:
+      // the pane may be mid-layout while the tab is still changing.
+      requestAnimationFrame(() => refit(a.id))
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : String(e))
     }
@@ -769,7 +776,7 @@ export default function App() {
     if (!window.confirm(`${what}\n\nThe CLI reads both of these once, at startup, so this restarts it. What it has said so far stays in the terminal; what it remembers does not.`)) {
       return
     }
-    const { cols, rows } = paneSize(document.querySelector('section'))
+    const { cols, rows } = paneSize(termPane())
     try {
       const state = await window.bullpen.restart({
         id: a.id,
@@ -799,6 +806,11 @@ export default function App() {
       window.bullpen.setRole(a.id, a.role)
       select(a.id)
       setTab('terminal')
+      // The host element did not move, so nothing else measures it - and the
+      // process on the other end of it is a new one, started at whatever size
+      // it was spawned with. Say the size once, out loud, on the next frame:
+      // the pane may be mid-layout while the tab is still changing.
+      requestAnimationFrame(() => refit(a.id))
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : String(e))
     }
@@ -976,7 +988,9 @@ export default function App() {
             ))}
           </nav>
 
-          <section style={S.panel}>
+          {/* Marked, because this is the pane a pty is sized from and there are
+              several `<section>`s on screen - see `termPane`. */}
+          <section data-term-pane="" style={S.panel}>
             {/* The terminal stays mounted: unmounting it would drop scrollback. */}
             <div style={{ height: '100%', display: tab === 'terminal' ? 'block' : 'none' }}>
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}

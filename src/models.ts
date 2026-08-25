@@ -19,6 +19,17 @@ export type Model = {
   /** The one line under the name. Context window, what it is for. */
   note: string
   /**
+   * What this model calls itself in the CLI's startup box, when that is not
+   * the label.
+   *
+   * Only needed where the two disagree: Bullpen writes `Opus 5 · 1M` because a
+   * menu has one line to say it in, and the CLI writes `Opus 5 (1M context)`.
+   * Without this the banner read matches the shorter `Opus 5` and ticks the
+   * wrong row - the same model, but not the same context window, and not the
+   * same bill.
+   */
+  banner?: string
+  /**
    * Shown without asking. Everything else is behind `more`.
    *
    * Nine chips is not a choice, it is a table - and the answer almost always
@@ -40,7 +51,12 @@ export const CLAUDE_MODELS: Model[] = [
   { id: 'claude-opus-5', label: 'Opus 5', note: 'the default here', common: true },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', note: 'cheaper than Opus, 1M context', common: true },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: '200K context - cheapest, fastest', common: true },
-  { id: 'claude-opus-5[1m]', label: 'Opus 5 · 1M', note: 'Opus 5 with the 1M context window' },
+  {
+    id: 'claude-opus-5[1m]',
+    label: 'Opus 5 · 1M',
+    note: 'Opus 5 with the 1M context window',
+    banner: 'Opus 5 (1M context)'
+  },
   { id: 'claude-fable-5', label: 'Fable 5', note: 'most capable, and priced above Opus' },
   { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'the one before Opus 5' },
   { id: 'claude-opus-4-7', label: 'Opus 4.7', note: '' },

@@ -165,10 +165,27 @@ test("the CLI's own settings answer for an agent started with no flag", () => {
 test('the startup banner answers for an agent that has taken no turn', () => {
   const banner =
     '\u001b[1mClaude Code\u001b[0m v2.1.241\n Opus 5 (1M context) with xhigh effort · Claude Max\n ~/Projects\n'
-  assert.equal(bannerModel(banner, CLAUDE_MODELS), 'claude-opus-5')
+  assert.equal(
+    bannerModel(banner, CLAUDE_MODELS),
+    'claude-opus-5[1m]',
+    'the CLI writes "Opus 5 (1M context)" where the menu writes "Opus 5 · 1M" - same model, ' +
+      'different context window, and the shorter match ticked the wrong row'
+  )
 
   const pinned = 'Claude Code v2.1.241\n Opus 5 · 1M with xhigh effort\n'
   assert.equal(bannerModel(pinned, CLAUDE_MODELS), 'claude-opus-5[1m]', 'the longer name wins')
+
+  // The real thing, captured off a pty. The box is drawn cell by cell, so what
+  // sits between the name and the version is a cursor move rather than a space:
+  // strip the escapes and it reads `Claude Codev2.1.245`, with nothing in the
+  // middle. A `\s+` here matched none of it, which is why every agent's menu
+  // said "the CLI's default" and ticked nothing.
+  const drawn =
+    ' \u001b[48;2;0;0;0m▛███▛█\u001b[12G\u001b[39m\u001b[49m\u001b[1mClaude Code' +
+    '\u001b[24G\u001b[22m\u001b[38;2;153;153;153mv2.1.245\n' +
+    '\u001b[1B\u001b[38;2;215;119;87m▝▜\u001b[48;2;0;0;0m█████\u001b[49m█▀\u001b[12G' +
+    '\u001b[38;2;153;153;153mOpus 5 (1M context) with xhigh effort · Claude Max\n'
+  assert.equal(bannerModel(drawn, CLAUDE_MODELS), 'claude-opus-5[1m]', 'no space, still the box')
 
   assert.equal(bannerModel('Claude Code v2.1.241\n Sonnet 5\n', CLAUDE_MODELS), 'claude-sonnet-5')
 
