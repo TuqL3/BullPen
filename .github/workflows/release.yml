@@ -89,7 +89,7 @@ jobs:
           public=$(node scripts/check-sparkle-keypair.mjs --print-public)
           if [ -z "$public" ]; then
             echo "::error::the derivation produced an empty public key" >&2
-            echo "signing key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 128)" >&2
+            echo "signing key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 44 in the current format)" >&2
             exit 1
           fi
           # The public key is not secret - it ships inside the app - so it can

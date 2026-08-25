@@ -171,9 +171,14 @@ repository's Actions secrets as **`SPARKLE_ED_PRIVATE_KEY`**:
 node_modules/electron-sparkle-updater/native/vendor/bin/generate_keys -x key.txt
 ```
 
-Paste the contents of `key.txt` whole - 128 base64 characters, nothing around
-them - then delete the file. It is ignored by git, but it is still a private key
-sitting in a working tree.
+Paste the contents of `key.txt` whole - 44 base64 characters in the format
+Sparkle exports today, nothing around them - then delete the file. It is ignored
+by git, but it is still a private key sitting in a working tree.
+
+Those 44 characters are the private *seed*, not a public key. They look like one
+because an ed25519 public key is 44 characters too, and telling them apart by
+eye is not possible. `generate_keys -p` prints the public half if you need to
+compare.
 
 **That is the only secret.** The public key the app ships is derived from it at
 build time and is never stored anywhere. That is deliberate: a public key and a

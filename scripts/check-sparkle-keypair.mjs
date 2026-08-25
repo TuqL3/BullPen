@@ -1,9 +1,10 @@
 /**
- * Are the two Sparkle secrets two halves of one keypair?
+ * The public key a Sparkle signing key belongs to, and whether a packaged app
+ * carries it.
  *
  * `generate_appcast` reads `SUPublicEDKey` out of the app bundle inside the
- * archive and compares it against the public half carried in the private key it
- * was handed. When they disagree it writes the appcast **without a signature,
+ * archive and compares it against the public half of the private key it was
+ * handed. When they disagree it writes the appcast **without a signature,
  * prints nothing, and exits 0** - and an app that carries `SUPublicEDKey` then
  * rejects every update it is ever offered. The release looks finished and
  * updates nobody.
@@ -11,37 +12,60 @@
  * That mismatch costs a full macOS build to discover. This is the same
  * comparison, made in a second, before anything is packaged.
  *
- * Which 32 bytes hold the public half was settled by experiment rather than by
- * reading: with the app's plist pinned to one key, a private blob carrying that
- * key at bytes 32..64 was refused and one carrying it at bytes 64..96 was
- * signed. The last 32 bytes are what Sparkle looks at.
- *
- * Nothing here prints key material - only lengths and a verdict.
+ * Nothing here prints key material - only lengths and a verdict. The public key
+ * is not key material: it ships inside every build.
  */
 
-/** Where the public half sits inside the private blob. */
+import { createPrivateKey, createPublicKey } from 'node:crypto'
+
+/** An ed25519 public key, and also the seed a private key is stored as. */
 const PUBLIC_KEY_BYTES = 32
 
 /**
  * What Sparkle accepts a private key to decode to.
  *
- * Its own words, when handed anything else: "Imported key must be 64 bytes or
- * 96 bytes (for the older format) decoded." 96 is what `generate_keys -x`
- * writes today - 128 base64 characters.
+ * 32 is the format `generate_keys -x` writes today, and its own help is the
+ * source: "if the private key is generated in the new format (i.e. the key file
+ * after base64 decoding is 32 bytes), then the exported key file is the base64
+ * encoding of the private seed."
+ *
+ * 64 and 96 are the older format, where the public half is appended to the key
+ * material rather than derived from it. Sparkle still imports both.
  */
-const PRIVATE_KEY_BYTES = [64, 96]
+const PRIVATE_KEY_BYTES = [PUBLIC_KEY_BYTES, 64, 96]
 
 /** What `electron-sparkle-updater` writes when no key was given at pack time. */
 const PLACEHOLDER = 'SPARKLE_ED_PUBLIC_KEY_PLACEHOLDER'
 
+/** The fixed PKCS#8 header for a raw Ed25519 seed - OID 1.3.101.112. */
+const PKCS8_ED25519 = Buffer.from('302e020100300506032b657004220420', 'hex')
+
+/**
+ * The public key belonging to a 32-byte seed.
+ *
+ * Standard EdDSA key generation, which is what Sparkle means by "the seed can
+ * be used to create the private/public keypair with other tools that support
+ * EdDSA signing". Checked against the RFC 8032 test vectors rather than taken
+ * on trust - Sparkle *signs* with orlp/ed25519, whose nonce derivation node
+ * cannot reproduce, and it would be easy to assume key generation diverges too.
+ * It does not.
+ */
+function publicKeyFromSeed(seed) {
+  const priv = createPrivateKey({
+    key: Buffer.concat([PKCS8_ED25519, seed]),
+    format: 'der',
+    type: 'pkcs8'
+  })
+  return Buffer.from(createPublicKey(priv).export({ format: 'jwk' }).x, 'base64url')
+}
+
 /**
  * A reason a private key cannot be used, or null when it can.
  *
- * Length is the whole test, and it names the mistake that has actually been
- * made: 32 bytes is an ed25519 *public* key. That is the value `generate_keys`
- * prints to the screen, and it is the obvious thing to copy - the private key
- * is never printed at all. It lives in the Keychain and only `generate_keys -x`
- * writes it out.
+ * Length is the whole test. It cannot tell a 32-byte seed from a 32-byte public
+ * key - they are the same shape - so that mistake is caught in
+ * `keypairProblem` instead, by the value being identical to the public key it
+ * is supposed to be checked against.
  */
 function privateKeyProblem(priv) {
   if (!priv || !priv.trim()) return 'SPARKLE_ED_PRIVATE_KEY is empty'
@@ -51,26 +75,51 @@ function privateKeyProblem(priv) {
 
   return (
     `SPARKLE_ED_PRIVATE_KEY decodes to ${bytes.length} bytes; Sparkle accepts ` +
-    `${PRIVATE_KEY_BYTES.join(' or ')}. ` +
-    (bytes.length === PUBLIC_KEY_BYTES
-      ? 'That is the length of an ed25519 public key - the value generate_keys ' +
-        'prints to the screen. The private key is never printed: it lives in the ' +
-        'Keychain, and `generate_keys -x <file>` exports it as 128 base64 characters.'
-      : 'The file generate_keys -x writes is 128 base64 characters - paste it ' +
-        'whole, and nothing around it.')
+    `${PRIVATE_KEY_BYTES.join(', ')}. The file \`generate_keys -x <file>\` writes ` +
+    'is 44 base64 characters in the current format - paste it whole, and nothing ' +
+    'around it.'
   )
 }
 
 /**
- * A reason the pair cannot work, or null when it can.
+ * The public half of a Sparkle private key.
+ *
+ * There is no second secret to keep in step with this one, and that is the
+ * point: a public key and a private key held apart drift, and when they drift
+ * `generate_appcast` says nothing and ships an appcast that validates against
+ * neither. Derived, they cannot disagree.
+ *
+ * Two shapes, because Sparkle has two formats. A 32-byte key is a seed and the
+ * public key is computed from it. A 64- or 96-byte key carries its public half
+ * in its last 32 bytes - established by experiment rather than by reading: with
+ * a packaged app's plist pinned to one key, a 96-byte blob carrying that key at
+ * bytes 32..64 was refused and one carrying it at 64..96 was signed.
+ *
+ * Throws rather than returning a wrong answer: a key this cannot read is a
+ * release that must not be built, not one that should quietly go unsigned.
+ */
+export function publicKeyFromPrivate(priv) {
+  const problem = privateKeyProblem(priv)
+  if (problem) throw new Error(problem)
+
+  const bytes = Buffer.from(priv.trim(), 'base64')
+  const pub =
+    bytes.length === PUBLIC_KEY_BYTES
+      ? publicKeyFromSeed(bytes)
+      : bytes.subarray(bytes.length - PUBLIC_KEY_BYTES)
+  return pub.toString('base64')
+}
+
+/**
+ * A reason the app's key and the signing key cannot work together, or null.
  *
  * Returns the reason rather than throwing so the caller decides what a failure
  * looks like, and so this is a plain function to test.
  */
 export function keypairProblem(pub, priv) {
-  if (!pub) return 'SPARKLE_ED_PUBLIC_KEY is empty'
-  if (!priv) return 'SPARKLE_ED_PRIVATE_KEY is empty'
-  if (pub === PLACEHOLDER) {
+  if (!pub || !pub.trim()) return 'SPARKLE_ED_PUBLIC_KEY is empty'
+  if (!priv || !priv.trim()) return 'SPARKLE_ED_PRIVATE_KEY is empty'
+  if (pub.trim() === PLACEHOLDER) {
     return `SPARKLE_ED_PUBLIC_KEY is the literal placeholder "${PLACEHOLDER}"`
   }
 
@@ -83,51 +132,27 @@ export function keypairProblem(pub, priv) {
     )
   }
 
-  // Length first, and against the lengths Sparkle accepts rather than merely
-  // "long enough to end in 32 bytes". A public key pasted into the private
-  // secret ends in itself, so the comparison below would call that a match and
-  // wave through a release that cannot be signed.
+  // A seed and a public key are both 32 bytes, so length cannot tell them
+  // apart - but the public key pasted into the private secret is the same
+  // value twice, and that can be said plainly instead of as a mismatch.
+  if (pub.trim() === priv.trim()) {
+    return (
+      'SPARKLE_ED_PRIVATE_KEY holds the public key. `generate_keys` prints the ' +
+      'public half to the screen and never prints the private one - that lives in ' +
+      'the Keychain, and `generate_keys -x <file>` writes it out.'
+    )
+  }
+
   const badPrivate = privateKeyProblem(priv)
   if (badPrivate) return badPrivate
 
-  const privBytes = Buffer.from(priv.trim(), 'base64')
-  const carried = privBytes.subarray(privBytes.length - PUBLIC_KEY_BYTES)
-  if (carried.equals(pubBytes)) return null
+  if (publicKeyFromPrivate(priv) === pub.trim()) return null
 
-  // Worth telling apart: a private key that carries the public key somewhere
-  // else has a layout this does not know about, and that is a different bug
-  // from the two secrets simply belonging to different keypairs.
-  const elsewhere = privBytes.includes(pubBytes)
-  return elsewhere
-    ? 'SPARKLE_ED_PRIVATE_KEY contains the public key, but not in its last 32 bytes - ' +
-        'this key has a layout generate_appcast will not match against Info.plist'
-    : 'SPARKLE_ED_PUBLIC_KEY and SPARKLE_ED_PRIVATE_KEY are not two halves of one keypair. ' +
-        'Re-export both from the same key: generate_keys prints the public half, ' +
-        'generate_keys -x writes the private one.'
-}
-
-/**
- * The public half of a Sparkle private key.
- *
- * There is no second secret to keep in step with this one, and that is the
- * point: a public key and a private key held apart drift, and when they drift
- * `generate_appcast` says nothing and ships an appcast that validates against
- * neither. Derived, they cannot disagree.
- *
- * The last 32 bytes, established by experiment rather than by reading: with a
- * packaged app's plist pinned to one key, a private blob carrying that key at
- * bytes 32..64 was refused and one carrying it at 64..96 was signed. That holds
- * for both lengths Sparkle accepts - 64 bytes is seed then public, 96 is the
- * same with the public half repeated.
- *
- * Throws rather than returning a wrong answer: a key this cannot read is a
- * release that must not be built, not one that should quietly go unsigned.
- */
-export function publicKeyFromPrivate(priv) {
-  const problem = privateKeyProblem(priv)
-  if (problem) throw new Error(problem)
-  const bytes = Buffer.from(priv.trim(), 'base64')
-  return bytes.subarray(bytes.length - PUBLIC_KEY_BYTES).toString('base64')
+  return (
+    'SPARKLE_ED_PUBLIC_KEY and SPARKLE_ED_PRIVATE_KEY are not two halves of one ' +
+    'keypair. `generate_keys -p` prints the public key belonging to the key in ' +
+    'the Keychain; `generate_keys -x <file>` writes that key out.'
+  )
 }
 
 /**

@@ -1968,35 +1968,50 @@ only as a character count.
 
 **What this does not fix:** the signing key itself. It ran on `v0.1.4` and
 failed in ten seconds with the byte count in the log, which is what it is for.
-The count was 32, and what that means is §64 - not the 102 characters guessed
-here before the guard was able to answer.
+The count was 32 - and the guard was wrong to refuse it. See §64.
 
-## 64. The key in the secret was the one that gets printed
+## 64. The guard refused the only format Sparkle still exports
 
-`v0.1.4` failed in ten seconds:
+`v0.1.4` and `v0.1.5` both died in ten seconds on the same line:
 
 ```
 Error: SPARKLE_ED_PRIVATE_KEY decodes to 32 bytes; Sparkle accepts 64 or 96.
 ```
 
-32 bytes is an ed25519 **public** key. `generate_keys` prints the public half to
-the terminal and never prints the private one - that goes into the login
-Keychain, and only `generate_keys -x <file>` writes it anywhere a person can
-copy it from. So the value on screen is the obvious thing to paste, and it is
-the wrong one.
+The key was correct. The check was not. `generate_keys -h` says so plainly, and
+reading it was worth more than three tags:
 
-The error now says that, rather than repeating the byte count and the expected
-lengths at somebody who has already read them once.
+> if the private key is generated in the new format (i.e. the key file after
+> base64 decoding is **32 bytes**), then the exported key file is the base64
+> encoding of the **private seed**
 
-**The hole this also closed.** `keypairProblem` checked only that the private
-key was long enough to end in 32 bytes. A public key ends in itself, so the
-public key in *both* secrets would have compared equal and been reported as a
-matching pair - a guard passing on the one input that cannot sign anything.
-Both entry points now share one length check against the lengths Sparkle
-actually accepts.
+32 bytes is the current format. `PRIVATE_KEY_BYTES = [64, 96]` came from a
+Sparkle *import* error - "Imported key must be 64 bytes or 96 bytes (for the
+older format)" - which describes what `-f` accepts, not what `-x` writes. Two
+lengths that were never the whole list, taken as the whole list.
 
-**Not fixed here, because it is not a code problem:** the secret. The fix is to
-run `generate_keys -x <file>`, paste the 128 characters that file holds, and
-delete the file - it is a private key, and it belongs in the Keychain and the
-GitHub secret box, nowhere else. `check sparkle keys` answers whether it took,
-in twenty seconds and without cutting a tag.
+**A seed is not a public half, so the derivation had to change.** 64- and
+96-byte keys carry the public key in their last 32 bytes and it can be sliced
+off. A 32-byte seed carries nothing: the public key is computed from it, by
+standard EdDSA key generation.
+
+That is not obvious in this codebase, because §58 established that Sparkle
+signs with orlp/ed25519 and node cannot verify its signatures - from which
+"node cannot derive its keys either" is an easy and wrong inference. Key
+generation is RFC 8032 and node does it. Pinned by the RFC 8032 §7.1 vectors in
+`test/sparkle-keypair.test.ts`, so the inference cannot be made again quietly.
+
+**What can no longer be told apart.** A 32-byte seed and a 32-byte public key
+are the same shape, so length cannot catch a public key pasted into the private
+secret - the mistake §64 previously accused the operator of. Only one case is
+still detectable: the same value in both, which is now reported as itself.
+
+**Wrong twice, recorded once.** The 102 characters guessed in §63 and the
+"public key pasted by mistake" of the first §64 were both invented to explain a
+failure whose cause was in a help text nobody had opened. Both are struck; this
+is what happened.
+
+**Not verified:** that this repo's actual key derives to the public key its
+Keychain holds. `generate_keys -p` prints that value and would settle it in a
+second, but it reads the operator's Keychain and is theirs to run. What is
+verified is the derivation itself, against RFC 8032.

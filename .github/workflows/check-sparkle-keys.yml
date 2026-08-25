@@ -20,7 +20,7 @@ jobs:
         run: |
           # Length only - never the value. Enough to tell "not set" from
           # "pasted the wrong thing" without putting a key in a public log.
-          echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 128)"
+          echo "private key: ${#SPARKLE_ED_PRIVATE_KEY} characters (generate_keys -x writes 44 in the current format)"
           # Assigned on its own line. Inlined into an echo, a derivation that
           # threw would leave this step green - and a check that passes on a
           # broken key is worse than no check. Same mistake cost the v0.1.3
