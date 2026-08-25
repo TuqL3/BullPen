@@ -1,6 +1,6 @@
 {
   "name": "bullpen",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local multi-agent harness for Claude Code",
   "license": "MIT",
   "type": "module",
