@@ -398,6 +398,42 @@ export default function App() {
     return window.bullpen.onUpdate(setUpdate)
   }, [])
 
+  /**
+   * "Open With - Bullpen" on a folder, from Finder.
+   *
+   * A directory is what an agent is given, so a folder arriving here is a
+   * workspace looking for somebody to work in it. If a agent already has that
+   * directory, this is a request to look at them; if nobody does, it is the
+   * wizard with the workspace already filled in.
+   *
+   * Pulled rather than pushed. A cold launch delivers the folder before this
+   * component exists, so main holds a queue and only nudges - see `open-file`
+   * in src/main/index.ts. `store()` rather than `agents` so this subscribes
+   * once instead of re-running on every roster change.
+   */
+  useEffect(() => {
+    const take = async (): Promise<void> => {
+      const dirs = await window.bullpen.pendingOpen()
+      const unknown: string[] = []
+      for (const dir of dirs) {
+        const here = store().agents.find((a) => a.cwd === dir)
+        if (here) {
+          setTab('terminal')
+          store().select(here.id)
+        } else {
+          unknown.push(dir)
+        }
+      }
+      // The wizard is one dialog, so several new folders at once can only
+      // become one agent. The first is the one that opens it; the rest are
+      // dropped rather than queued behind a modal nobody asked to sit through.
+      const first = unknown[0]
+      if (first) setAdding({ project: first.split('/').filter(Boolean).pop() ?? '', cwd: first })
+    }
+    void take()
+    return window.bullpen.onOpenPath(() => void take())
+  }, [])
+
   // Agents read the floor from a file, so it has to be rewritten whenever the
   // roster or anyone's status changes. Main skips the write when nothing moved.
   useEffect(() => {

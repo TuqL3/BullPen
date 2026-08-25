@@ -170,6 +170,34 @@ export default {
     // SUFeedURL, SUPublicEDKey and the localization list. The key is a
     // placeholder until the release workflow injects the real one.
     ...(sparkle?.mac ?? {}),
+    /**
+     * "Open With → BullPen" on a folder.
+     *
+     * A folder is what this app is about: it is an agent's working directory,
+     * which is the one thing every agent must be given. `fileAssociations`
+     * cannot express it - that key is a list of extensions, and a directory has
+     * none - so this is the raw plist entry.
+     *
+     * `LSHandlerRank: Alternate` means "can open this, is not claiming it".
+     * Owner or Default would make Bullpen the handler for every folder on the
+     * machine, which is what happens instead of double-clicking into them.
+     *
+     * Spread *over* `sparkle.mac` and merged with its `extendInfo` rather than
+     * beside it: a plain `extendInfo` key here would replace Sparkle's, taking
+     * SUFeedURL and SUPublicEDKey with it, and an app with no feed does not
+     * report that it has no feed - it just never updates again.
+     */
+    extendInfo: {
+      ...(sparkle?.mac?.extendInfo ?? {}),
+      CFBundleDocumentTypes: [
+        {
+          CFBundleTypeName: 'Folder',
+          CFBundleTypeRole: 'Editor',
+          LSItemContentTypes: ['public.folder'],
+          LSHandlerRank: 'Alternate'
+        }
+      ]
+    },
     // Per-platform on purpose: `sparkleBuilderConfig` returns this at the top
     // level, where it would apply to the Windows package too and fail trying to
     // copy a macOS framework into it.

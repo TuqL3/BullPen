@@ -1887,3 +1887,45 @@ both accepted lengths, the `--print-public` path through `$GITHUB_OUTPUT`
 agreeing with what the derivation produced. One earlier real export measured 102
 characters, which is neither length Sparkle accepts - that is now refused with
 the expected length named rather than silently half-read.
+
+## 62. "Open With → BullPen" on a folder
+
+A folder is the one thing every agent must be given, so Finder should be able to
+hand one over. `fileAssociations` cannot say it - that key is a list of
+extensions and a directory has none - so `electron-builder.config.mjs` writes the
+raw `CFBundleDocumentTypes` entry claiming the `public.folder` UTI.
+
+**`LSHandlerRank: Alternate`**, not Owner or Default. Owner would make BullPen
+the handler for every folder on the machine, which is what happens instead of
+double-clicking into them.
+
+**The clobber that was avoided:** `extendInfo` is merged over Sparkle's, not
+written beside it. A plain `extendInfo` key there replaces the whole dictionary,
+taking `SUFeedURL` and `SUPublicEDKey` with it - and an app with no feed does not
+report that it has no feed, it silently never updates again. Checked on the
+built plist: both Sparkle keys survive alongside the new document type.
+
+**The renderer pulls, the main process only nudges.** `open-file` queues the
+path and emits `open:waiting` with no payload; the renderer answers with
+`open:pending`, which drains the queue. Pushing the path instead means a window
+reload re-reads a queue that was already handled and reopens the wizard on a
+folder the user dealt with ten minutes ago.
+
+A folder that an agent is already working in selects that agent rather than
+opening the wizard, matched on `cwd` exactly - a parent or a child of an agent's
+directory is treated as a new one.
+
+**Verified:** `lsregister -f` on the built bundle, then `lsregister -dump`, shows
+`claimed UTIs: public.folder` under BullPen's entry. The registration was undone
+with `lsregister -u` afterwards so a path under `release/` is not left in the
+LaunchServices database.
+
+**Not verified:** the click itself. Actually choosing BullPen from Finder's
+Open With menu and watching the wizard fill in is not something that can be
+driven headlessly, so the chain from LaunchServices to `open-file` to the queue
+is verified at both ends and assumed in the middle.
+
+**macOS only.** Windows would need argv parsing plus the single-instance lock,
+and Linux a `.desktop` entry with `inode/directory`. Neither is written; the
+`open-file` event does not fire on either platform, so nothing there breaks - it
+simply does nothing.

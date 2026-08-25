@@ -4,7 +4,7 @@ import { createGist, findGist, readGist, whoAmI, writeGist } from './gist.ts'
 import { keyringWorks, readToken, writeToken } from './secret.ts'
 import { adopt, bundle, newer, readFloors, type Bundle } from './sync.ts'
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
@@ -204,6 +204,50 @@ const send = (channel: string, ...args: unknown[]): void => {
   if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
   win.webContents.send(channel, ...args)
 }
+
+/**
+ * Folders macOS has asked this app to open, and nobody has taken yet.
+ *
+ * "Open With - Bullpen" on a folder is a directory looking for an agent, which
+ * is the one thing every agent has to be given. The plist entry that puts
+ * Bullpen in that menu is in electron-builder.config.mjs.
+ *
+ * One queue and one way out of it, because the two ways a folder arrives are
+ * not the same. On a cold launch macOS delivers the path before there is a
+ * window, let alone a renderer with a listener attached; while the app is
+ * running it arrives at any moment. So main only ever *nudges* - the renderer
+ * pulls with `open:pending`, and pulling is what empties the queue.
+ *
+ * Pushing the path and queueing it as well was the first version, and it opened
+ * the same folder twice: once on the push, and again the next time anything
+ * reloaded the window and drained a queue that still held it.
+ */
+let openQueue: string[] = []
+
+/**
+ * Registered at module scope, not inside `whenReady`: the event that carries
+ * the folder a cold launch was started for fires before the app is ready, and a
+ * listener added afterwards never hears it.
+ *
+ * Files are dropped rather than guessed at. Only `public.folder` is declared,
+ * so a file here means somebody dragged one onto the dock icon, and a directory
+ * is the only thing the floor knows what to do with.
+ */
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  try {
+    if (!statSync(path).isDirectory()) return
+  } catch {
+    return
+  }
+  openQueue.push(path)
+  // A nudge, not the path: whoever is listening comes and takes the queue.
+  send('open:waiting')
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore()
+    win.focus()
+  }
+})
 
 /**
  * Spawn one agent: sandbox it, give it a mailbox and a view of the floor, and
@@ -2488,6 +2532,16 @@ function wire(): void {
    * last one takes the whole app down with it - every agent on the floor is a
    * child of this process - so the renderer asks before calling it.
    */
+  /**
+   * What was asked for before anything could listen. Drained, not read: a
+   * folder handed over twice opens two wizards for one directory.
+   */
+  ipcMain.handle('open:pending', () => {
+    const paths = openQueue
+    openQueue = []
+    return paths
+  })
+
   ipcMain.handle('update:get', () => updates.get())
   ipcMain.handle('update:check', () => updates.check())
   ipcMain.handle('update:download', () => updates.download())

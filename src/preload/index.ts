@@ -541,6 +541,15 @@ const api = {
    * download and install, so there is nothing here for the title bar to say.
    * The three-step sequence below is the Windows one.
    */
+  /**
+   * Folders macOS was asked to open with Bullpen - "Open With" on a directory.
+   *
+   * Pulled rather than pushed, and draining: a cold launch delivers the folder
+   * before this window exists, so there is nothing to push it at. `onOpenPath`
+   * is only a nudge saying the queue is worth reading again.
+   */
+  pendingOpen: (): Promise<string[]> => ipcRenderer.invoke('open:pending'),
+  onOpenPath: (fn: () => void): (() => void) => on('open:waiting', fn),
   update: (): Promise<UpdateState> => ipcRenderer.invoke('update:get'),
   updateCheck: (): Promise<UpdateState> => ipcRenderer.invoke('update:check'),
   updateDownload: (): Promise<UpdateState> => ipcRenderer.invoke('update:download'),
