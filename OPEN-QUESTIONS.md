@@ -2240,3 +2240,21 @@ finds it.
 
 **Not verified:** that this runs on a real Windows machine. No Windows machine
 was available; `reg.exe` output format is taken from its documented layout.
+
+## Defect: the first-run dialog trapped the window (Windows)
+
+**Symptom.** With the CLI not found, the first-run dialog cannot be dismissed -
+by design, there is no default directory worth imposing - and its backdrop
+covered the minimise, full-screen and close buttons too. On Windows the frame
+is ours (`frame: false`), so those three are the only ones there are: the
+window could not be closed with a mouse at all.
+
+**Fix.** The three window controls moved into one wrapper at `zIndex: 70`,
+above the settings backdrop (60) and a row menu (61), carrying the title bar's
+background so they do not read as glyphs floating on the dim. A dialog may
+refuse to be dismissed; closing a window is not the dialog's to refuse.
+
+**Assumed:** that 70 stays the top of the stack. Nothing else in the renderer
+goes past 61 today, and anything added above it would take the close button
+back - there is no test that would catch it, because the renderer has no DOM
+tests at all (every suite here is main-process).

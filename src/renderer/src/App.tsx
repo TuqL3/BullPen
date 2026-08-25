@@ -1897,36 +1897,41 @@ function TitleBar({
         <Icon name="gear" />
       </button>
       {/* On macOS the native traffic lights already do all three, and drawing
-          a second set beside them is the wrong thing everywhere. */}
+          a second set beside them is the wrong thing everywhere.
+
+          Kept above every modal, and carrying its own background so it does
+          not read as three glyphs floating on the dim. A dialog is free to
+          refuse to be dismissed - the first-run one is, deliberately - but
+          minimising and closing a window are the operating system's, not the
+          dialog's. A machine without the CLI met that dialog and could not
+          get out of it with a mouse at all. */}
       {!window.bullpen.isMac && (
-        <button
-          title="minimise"
-          aria-label="minimise window"
-          style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          onClick={() => window.bullpen.minimize()}
-        >
-          <Icon name="min" />
-        </button>
-      )}
-      {!window.bullpen.isMac && (
-        <button
-          title="full screen"
-          aria-label="toggle full screen"
-          style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          onClick={() => window.bullpen.toggleFullscreen()}
-        >
-          <Icon name="full" />
-        </button>
-      )}
-      {!window.bullpen.isMac && (
-        <button
-          title="close"
-          aria-label="close window"
-          style={{ ...S.iconBtn, ...S.closeBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          onClick={() => window.bullpen.closeWindow()}
-        >
-          <Icon name="close" />
-        </button>
+        <div style={S.winCtl as React.CSSProperties}>
+          <button
+            title="minimise"
+            aria-label="minimise window"
+            style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            onClick={() => window.bullpen.minimize()}
+          >
+            <Icon name="min" />
+          </button>
+          <button
+            title="full screen"
+            aria-label="toggle full screen"
+            style={{ ...S.iconBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            onClick={() => window.bullpen.toggleFullscreen()}
+          >
+            <Icon name="full" />
+          </button>
+          <button
+            title="close"
+            aria-label="close window"
+            style={{ ...S.iconBtn, ...S.closeBtn, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            onClick={() => window.bullpen.closeWindow()}
+          >
+            <Icon name="close" />
+          </button>
+        </div>
       )}
     </div>
   )
@@ -2104,6 +2109,18 @@ const S: Record<string, React.CSSProperties> = {
   // Closing is the one titlebar action with no undo, so it does not look like
   // the toggles beside it.
   closeBtn: { color: 'var(--danger)', marginRight: 4 },
+  // Above every overlay in the app - the settings backdrop sits at 60 and a row
+  // menu at 61. `position` is what makes zIndex mean anything, and the title bar
+  // sets no stacking context of its own, so this competes at the root. The gap
+  // repeats the title bar's, so nothing moves by wrapping the three.
+  winCtl: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    position: 'relative',
+    zIndex: 70,
+    background: 'var(--panel)'
+  } as React.CSSProperties,
   body: { display: 'flex', minHeight: 0, overflow: 'hidden' },
   // Floor on the left, command centre on the right - the windowed layout.
   bodyWithFloor: { display: 'grid', gridTemplateColumns: '204px 1.35fr 1fr', minHeight: 0 },
