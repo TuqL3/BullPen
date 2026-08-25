@@ -2258,3 +2258,36 @@ refuse to be dismissed; closing a window is not the dialog's to refuse.
 goes past 61 today, and anything added above it would take the close button
 back - there is no test that would catch it, because the renderer has no DOM
 tests at all (every suite here is main-process).
+
+## Defect: v0.1.16 found the CLI and node-pty looked for it again
+
+**Symptom.** v0.1.17 still printed `claude is not on PATH` on the machine the
+registry fix was written for, with `claude.exe` sitting in
+`C:\Users\Admin\.local\bin` and that directory on the registry PATH.
+
+**Cause.** `resolveCli` handed node-pty the bare name `claude.exe`, and for a
+relative filename node-pty resolves it itself with
+`GetEnvironmentVariableW(L"Path")` (`src/win/path_util.cc:62`) - *this
+process's* environment, not the env passed to `spawn`. So every directory the
+registry contributed was thrown away and the stale PATH was asked a second
+time. `startProcess` then failed its own `file_exists` and threw
+`File not found: `, which `spawnFailure` correctly reads as a missing CLI.
+The check here passed and the spawn one line later disagreed with it.
+
+The comment that argued for the bare name - "node-pty looks it up again itself,
+and two lookups that can disagree is one too many" - had the conclusion exactly
+backwards: two lookups against two different PATHs is precisely a disagreement.
+
+**Fix.** `resolveCli` returns the full path it found. `PathIsRelativeW` is then
+false and node-pty uses it as given; `argsToCommandLine` quotes a path with
+spaces on its way into the command line. An explicit `spec.cmd` is still passed
+through untouched.
+
+This also steps around a bug in that walk: it pushes only substrings preceding
+a `;`, so the last directory on PATH is never searched - and appended
+directories are exactly the ones that land there.
+
+**Assumed:** that `argsToCommandLine`'s quoting is right for a path with
+spaces (it quotes any argument containing one, and doubles backslashes only
+before a quote). Nothing here has a quote in it. If that is wrong, a CLI under
+`C:\Program Files\...` fails to spawn while one under a space-free path works.

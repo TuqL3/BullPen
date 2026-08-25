@@ -187,11 +187,26 @@ export function withPath(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEn
  * PATH check only to die at the call itself, with `Cannot create process`. A
  * batch file needs an interpreter, so it gets one.
  *
+ * What comes back is the full path, never the bare name. node-pty does its own
+ * lookup for a relative filename, and it does it with
+ * `GetEnvironmentVariableW(L"Path")` (`src/win/path_util.cc:62`) - this
+ * process's own environment, not the env handed to `spawn`. So handing it
+ * `claude.exe` throws away everything found here and asks the stale PATH
+ * again, which is the whole defect. An absolute path takes
+ * `PathIsRelativeW` false and is used as given. It also steps around a bug in
+ * that walk: the loop pushes only what precedes a `;`, so the last directory
+ * on PATH is never searched - and appended directories are exactly the ones
+ * that land there.
+ *
  * Null means nothing is installed, and it has to be null rather than a best
  * guess: `cmd.exe /d /c claude.cmd` spawns perfectly well on a machine with no
  * CLI, because cmd.exe is always there. The operator would get
  * `'claude.cmd' is not recognized` painted inside an agent pane - a pty that
  * came up, so nothing above here would know to say anything.
+ *
+ * An explicit `cmd` is passed through untouched: the operator naming a command
+ * is naming one, and second-guessing it here is how `pwsh.exe` becomes a path
+ * to something else.
  *
  * Pure, and told the platform, the PATH and the existence check rather than
  * reading them: the machine this is wrong on is never the one it is written on.
@@ -207,7 +222,8 @@ export function resolveCli(
   // spawnFailure already reads. Probing here would only disagree with it.
   if (os !== 'win32') return { file: cmd ?? 'claude', args }
   const dirs = path.split(';').filter(Boolean)
-  const file = cmd ?? WIN_CLI.find((name) => dirs.some((dir) => exists(join(dir, name))))
+  const found = WIN_CLI.map((name) => dirs.map((dir) => join(dir, name)).find(exists)).find(Boolean)
+  const file = cmd ?? found
   if (!file) return null
   if (!/\.(cmd|bat)$/i.test(file)) return { file, args }
   // ponytail: `/d` skips whatever AutoRun the registry holds. Ceiling - cmd.exe

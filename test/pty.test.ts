@@ -68,14 +68,17 @@ test('a missing CLI is reported as a missing CLI, not as a bad directory', () =>
  * there. Getting this wrong is invisible on the machine it is written on.
  */
 test('the CLI is launched by whichever name Windows has it under', () => {
-  const PATH = 'C:\\Windows\\System32;C:\\Users\\x\\.local\\bin'
-  const only = (installed: string) => (p: string) => p.endsWith(installed)
+  const BIN = 'C:\\Users\\x\\.local\\bin'
+  const PATH = `C:\\Windows\\System32;${BIN}`
+  const only = (installed: string) => (p: string) => p === join(BIN, installed)
 
   // Native installer: a real image, spawned directly, no interpreter.
   assert.deepEqual(resolveCli(undefined, [], 'win32', PATH, only('claude.exe')), {
-    // The bare name, not the resolved path: node-pty looks it up again itself,
-    // and two lookups that can disagree is one too many.
-    file: 'claude.exe',
+    // The full path, never the bare name. node-pty resolves a relative
+    // filename against `GetEnvironmentVariableW(L"Path")` - this process's own
+    // environment, not the env handed to spawn - so a bare name throws away
+    // everything found here and asks the stale PATH again.
+    file: join(BIN, 'claude.exe'),
     args: []
   })
 
@@ -83,11 +86,14 @@ test('the CLI is launched by whichever name Windows has it under', () => {
   // CreateProcessW. `/d` so a machine with an AutoRun key does not run it.
   assert.deepEqual(resolveCli(undefined, ['--foo'], 'win32', PATH, only('claude.cmd')), {
     file: 'cmd.exe',
-    args: ['/d', '/c', 'claude.cmd', '--foo']
+    args: ['/d', '/c', join(BIN, 'claude.cmd'), '--foo']
   })
 
   // .exe wins when both are there: it is one process instead of two.
-  assert.equal(resolveCli(undefined, [], 'win32', PATH, () => true)?.file, 'claude.exe')
+  assert.equal(resolveCli(undefined, [], 'win32', PATH, () => true)?.file, join('C:\\Windows\\System32', 'claude.exe'))
+
+  // The first directory on PATH wins, not the first that happens to be probed.
+  assert.equal(resolveCli(undefined, [], 'win32', PATH, only('claude.exe'))?.file, join(BIN, 'claude.exe'))
 
   // Nothing installed is null, not a guess. `cmd.exe /d /c claude.cmd` would
   // spawn happily - cmd.exe is always there - and paint `is not recognized`
@@ -178,7 +184,10 @@ test('the sources are merged in order, without repeats', () => {
   // PATH alone missed it.
   const at = (p: string) => p === join('C:\\Users\\Admin\\.local\\bin', 'claude.exe')
   assert.equal(resolveCli(undefined, [], 'win32', stale, at), null)
-  assert.equal(resolveCli(undefined, [], 'win32', winSearchPath([stale, fresh]), at)?.file, 'claude.exe')
+  assert.equal(
+    resolveCli(undefined, [], 'win32', winSearchPath([stale, fresh]), at)?.file,
+    join('C:\\Users\\Admin\\.local\\bin', 'claude.exe')
+  )
 })
 
 /**
