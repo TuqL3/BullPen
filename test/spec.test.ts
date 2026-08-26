@@ -140,7 +140,7 @@ test('the rules the writer is given are rules the linter enforces', () => {
       'a brief writing somewhere talks-to refuses',
       { ...w, talksTo: { ...w.talksTo, god: ['you'] } }
     ],
-    ['thresholds out of range', { ...w, reuseBelowPct: 90, hireAbovePct: 10 }]
+    ['thresholds out of range', { ...w, hireAbovePct: 0 }]
   ]
   for (const [what, broken] of breaks) {
     assert.ok(lint(broken).length > 0, `lint let "${what}" through, but the writer is told it is a rule`)

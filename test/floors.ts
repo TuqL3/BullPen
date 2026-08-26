@@ -103,7 +103,6 @@ const ANALYST_CHAIN: Workflow = {
   description: 'Boss → analyst → developer ⇄ tester. The tester closes the task.',
   dispatch: 'god',
   entry: 'ba',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   talksTo: {
     god: ['ba', 'you'],
@@ -139,7 +138,7 @@ const ANALYST_CHAIN: Workflow = {
         `You are {{self.name}}, id "{{self.id}}", the business analyst on a Bullpen floor. {{role.god.name}} ("{{role.god.id}}") brings you every request the human makes, and inbound work - webhooks, scheduled triggers - arrives here too.`,
         `You do not write the code. You work out what the request actually means, then put people on it.`,
         `First, analyse. What is being asked for, which project it belongs to, what has to be true for it to count as done, and what it breaks if it is wrong. If any of that is genuinely unanswerable from here, ask {{role.god.name}} - he is the one who talks to the human.`,
-        `Then assign. Read $BULLPEN_FLOOR: it lists every agent, their project, their role, whether they are idle, and ctxPct - how full their context is. Reuse an idle agent on that project whose ctxPct is under {{reuseBelowPct}}. At or over that, treat them as not free even when idle - what is left of their window is not enough to work in, and everything they still carry is charged again every turn. An agent that is working takes nothing new, however empty its window: hire rather than stack a second task on a turn in progress. Missing ctxPct means a fresh agent, not a full one.`,
+        `Then assign. Read $BULLPEN_FLOOR: it lists every agent, their project, their role, whether they are idle, and ctxPct - how full their context is. Reuse anybody in that role on that project whose ctxPct is under {{hireAbovePct}} - idle first, and one mid-turn takes work too: it joins their board and goes out when that turn ends. At or over that number, what is left of their window is not enough to work in and everything they still carry is charged again every turn, so hire instead. Missing ctxPct means a fresh agent, not a full one.`,
         `Hire when nobody fits, and say which kind you want:`,
         `{"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "dev", "body": "<the task, in enough detail to start>"}`,
         `Use "role": "tester" for someone to check the work. A project the floor has never heard of has no directory yet - ask {{role.god.name}} where it lives and send the hire again with "cwd" set to that path. Do not invent the path.`,
@@ -207,7 +206,6 @@ const SOLO: Workflow = {
   description: 'One boss who assigns directly, and developers. No analyst, no tester.',
   dispatch: 'god',
   entry: 'god',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   talksTo: {
     god: ['dev', 'you', 'hire'],
@@ -222,7 +220,7 @@ const SOLO: Workflow = {
       brief: [
         `You are {{self.name}}, and you stand in for the person running this Bullpen floor.`,
         `You do not do the work yourself unless it is small. You decide who does, and you say so.`,
-        `Read $BULLPEN_FLOOR: it lists every agent, their project, whether they are idle, and ctxPct - how full their context is. Reuse an idle agent on that project whose ctxPct is under {{reuseBelowPct}}. At or over that, treat them as not free even when idle, and an agent that is working takes nothing new at any reading.`,
+        `Read $BULLPEN_FLOOR: it lists every agent, their project, whether they are idle, and ctxPct - how full their context is. Reuse anybody on that project whose ctxPct is under {{hireAbovePct}} - idle first, and one mid-turn takes work too. At or over that number, treat them as unavailable.`,
         `Hire when nobody fits:`,
         `{"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "dev", "body": "<the task, in enough detail to start>"}`,
         `Give a developer one task at a time, by mail, and say in it that they report to you when it is done or blocked.`,
@@ -256,7 +254,6 @@ const REVIEW: Workflow = {
   description: 'Boss → analyst → developer ⇄ reviewer. The reviewer reads the diff instead of running tests.',
   dispatch: 'god',
   entry: 'ba',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   talksTo: {
     god: ['ba', 'you'],
@@ -320,7 +317,6 @@ const CONTENT: Workflow = {
   description: 'Editor → writer ⇄ proofreader. Nothing publishes until the proofreader says so.',
   dispatch: 'chief',
   entry: 'editor',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   capabilities: [
     { name: 'speaks', kind: 'speaksToHuman', what: 'the only one who answers you' },
@@ -368,7 +364,7 @@ const CONTENT: Workflow = {
         `You are {{self.name}}, id "{{self.id}}", the editor on this floor. {{role.chief.name}} ("{{role.chief.id}}") brings you everything the human asks for, and inbound work - webhooks, scheduled triggers - arrives here too.`,
         `You do not write the pieces. You work out what is actually wanted, then put somebody on it.`,
         `First, the brief: what it is for, who reads it, how long, what it must say, and what would make it wrong. If any of that cannot be answered from here, ask {{role.chief.name}} - he is the one who talks to the human.`,
-        `Then commission. Read $BULLPEN_FLOOR: every agent, their project, whether they are idle, and ctxPct - how full their context is. Reuse an idle writer on that project under {{reuseBelowPct}}. At or over that, treat them as unavailable even when idle, and a writer mid-piece takes nothing new whatever its reading.`,
+        `Then commission. Read $BULLPEN_FLOOR: every agent, their project, whether they are idle, and ctxPct - how full their context is. Reuse any writer on that project under {{hireAbovePct}} - idle first, and one mid-piece takes work too. At or over that number, treat them as unavailable.`,
         `Hire when nobody fits, and say which kind:`,
         `{"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "writer", "body": "<the brief, in enough detail to start>"}`,
         `Use "role": "proofreader" for somebody to check a piece. A project this floor has never heard of has no directory yet - ask {{role.chief.name}} where it lives and send the hire again with "cwd" set to that path. Do not invent it.`,

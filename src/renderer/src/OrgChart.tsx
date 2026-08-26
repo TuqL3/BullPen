@@ -1733,7 +1733,7 @@ function Summary({
 
   const num = (
     label: string,
-    key: 'reuseBelowPct' | 'hireAbovePct',
+    key: 'hireAbovePct',
     hint: string
   ): React.ReactElement => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }} title={hint}>
@@ -1806,14 +1806,9 @@ function Summary({
       <div style={S.rule} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px' }}>
         {num(
-          'give it to one under',
-          'reuseBelowPct',
-          'work goes to whoever is idle - how much of its window one may already have used and still take it. At or over this, somebody new is hired instead, and an agent mid-turn is never given a second task however empty its window'
-        )}
-        {num(
           'hire past',
           'hireAbovePct',
-          'the ceiling the briefs quote. Work is handed out on "give it to one under", so this only bites when it is the lower of the two'
+          'how much of its window an agent may already have used and still take work. Below it, work goes to whoever is in the role - idle first, and one mid-turn joins their board rather than being interrupted. At or over it, what is left is too little to work in and somebody new is hired'
         )}
       </div>
 

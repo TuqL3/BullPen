@@ -22,7 +22,6 @@ const CHAIN = {
   description: 'boss to analyst to developer to tester',
   dispatch: 'god',
   entry: 'ba',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   roles: {
     god: { can: ['speaksToHuman'], label: 'the boss', fixed: { id: 'michael', name: 'Michael' }, brief: '' },
@@ -58,7 +57,6 @@ const SOLO = {
   description: 'one boss, hired hands',
   dispatch: 'god',
   entry: 'god',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   roles: {
     god: {

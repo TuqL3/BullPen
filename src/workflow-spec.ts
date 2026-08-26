@@ -66,7 +66,7 @@ export const ROLE_FIELDS = ['agent', 'can', 'does', 'talks to'] as const
 /** Bare `- word` lines the parser reads inside a role. */
 export const ROLE_FLAGS = ['hireable', 'dispatch', 'entry'] as const
 /** `- key:` lines the parser reads above the first role. */
-export const HEADER_FIELDS = ['reuse below', 'hire above'] as const
+export const HEADER_FIELDS = ['hire above'] as const
 /** Placeholders `renderBrief` fills in. `<name>` stands for any role. */
 export const PLACEHOLDERS = [
   '{{self.id}}',
@@ -74,7 +74,6 @@ export const PLACEHOLDERS = [
   '{{reportTo}}',
   '{{role.<name>.id}}',
   '{{role.<name>.name}}',
-  '{{reuseBelowPct}}',
   '{{hireAbovePct}}'
 ] as const
 
@@ -98,7 +97,7 @@ export function generatorBrief(rules: string, example = ''): string {
       'THE LANGUAGE OF THE FILE',
       'Write everything a person reads in the language the request came in. The name, the description, role labels, `- does:`, capability names, column labels, the ` · when <why>` on a card rule, and every brief: the operator\'s language, whatever that is.',
       'Keep these in English, because they are matched as text rather than read:',
-      '- The field and section names themselves - `## capabilities`, `## roles`, `## board`, `## card rules`, `## briefs`, `- can:`, `- talks to:`, `- does:`, `- agent:`, `- cli:`, `- cwd:`, `- dispatch`, `- entry`, `- hireable`, `- reuse below:`, `- hire above:`.',
+      '- The field and section names themselves - `## capabilities`, `## roles`, `## board`, `## card rules`, `## briefs`, `- can:`, `- talks to:`, `- does:`, `- agent:`, `- cli:`, `- cwd:`, `- dispatch`, `- entry`, `- hireable`, `- hire above:`.',
       '- The kind in brackets after a capability: `(speaksToHuman)`, `(assigns)`, `(builds)`, `(checks)`.',
       '- The purpose in brackets after a column: `(start)`, `(working)`, `(waiting)`, `(stuck)`, `(done)`.',
       '- Column **keys**, and the `opens a card` / `closes it` a card rule can say. A card is stored under its key and a rule is matched against it, so both are ASCII and English: `- asked: câu hỏi đã nhận #a3e3ff (start)` is a key the board can store and a label the operator can read.',

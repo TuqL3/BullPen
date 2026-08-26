@@ -273,9 +273,17 @@ export type Workflow = {
   dispatch: string
   /** The role inbound work - webhooks, schedules - goes to. Often not dispatch. */
   entry: string
-  /** Reuse an idle agent under this much context, in percent. */
-  reuseBelowPct: number
-  /** Over this much, treat an idle agent as unavailable. */
+  /**
+   * At or over this much context, an agent is no use for the next piece of
+   * work and a new one is hired. The floor's one number.
+   *
+   * There were two - `reuseBelowPct` above it, for "somebody idle under this
+   * takes work". That second number only meant anything while work was typed
+   * straight at whoever was free: once the card became a queue and a busy
+   * agent could be given the next job without losing the one in hand, "idle"
+   * stopped being a threshold and went back to being a preference. Two numbers
+   * to keep in step, one of which decided nothing.
+   */
   hireAbovePct: number
   /** The capabilities this floor has words for. */
   capabilities: CapabilityDef[]
@@ -733,7 +741,11 @@ export function refuseMail(w: Workflow, from: string, to: string): string | null
  * `{{self.id}}` / `{{self.name}}` - the agent being spawned.
  * `{{reportTo}}`                  - whoever the work comes back to.
  * `{{role.<name>.id}}` / `.name`  - a fixed role's agent, by role name.
- * `{{reuseBelowPct}}`, `{{hireAbovePct}}`
+ * `{{hireAbovePct}}`               - the one context number this floor has.
+ *
+ * `{{reuseBelowPct}}` is still filled, undocumented, with the same number: the
+ * floor had two of them once and a brief on disk that still names the old one
+ * would otherwise put `{{reuseBelowPct}}` verbatim into a real system prompt.
  *
  * An unknown placeholder is left standing rather than blanked: a brief that
  * reads `{{role.qa.id}}` in the agent's own terminal is a bug someone can see,
@@ -745,29 +757,31 @@ export type Candidate = { id: string; role: string; idle: boolean; ctxPct?: numb
 /**
  * Who takes a task handed to a role rather than to a person.
  *
- * Only somebody idle and under `reuseBelowPct` - the floor's "give it to one
- * under" number - takes work, emptiest window first. An agent mid-turn is not
- * a candidate at any reading: interrupting one to stack a second task on it is
- * how a floor loses the first. Anything at or over the number is treated the
- * same as busy. Nobody eligible is not an error - it means hire, which is the
- * caller's job.
+ * Anybody in the role with room left, idle first and emptiest first within
+ * that. Nobody eligible is not an error - it means hire, which is the caller's
+ * job.
  *
- * `hireAbovePct` is the ceiling the briefs quote and the wizard shows, and on
- * a floor that ordered its two numbers it is the wider of them - so the lower
- * of the pair is the one that decides. Taken as the lower rather than assumed
- * to be `reuseBelowPct`, because `thresholds-ordered` is a law a floor may
- * ship without: reuse 90 over hire 10 would otherwise hand work to an agent
- * the same floor calls unavailable.
+ * There used to be two questions and two numbers: `pickForRole` for somebody
+ * idle under `reuseBelowPct`, then `roomForRole` for anybody under
+ * `hireAbovePct`. The first was written when work was typed straight at
+ * whoever took it, where a second task landing mid-turn cost the first. Work
+ * is queued on the taker's own card now, so a busy agent can hold the next
+ * job without losing the one in hand - and "idle" went back to being a
+ * preference rather than a threshold. What is left is one number: at or over
+ * it, a window has too little room to work in, and that is a hire.
  *
  * An agent with no reading yet has not completed a turn, which is empty rather
  * than full: a fresh hire must be usable on the turn after it is made.
  */
 export function pickForRole(w: Workflow, role: string, staff: Candidate[]): string | null {
-  const ceiling = Math.min(w.reuseBelowPct, w.hireAbovePct)
-  const free = staff.filter((a) => a.role === role && a.idle && (a.ctxPct ?? 0) < ceiling)
-  if (!free.length) return null
-  const emptiest = [...free].sort((a, b) => (a.ctxPct ?? 0) - (b.ctxPct ?? 0))
-  return emptiest[0].id
+  const room = staff.filter((a) => a.role === role && (a.ctxPct ?? 0) < w.hireAbovePct)
+  if (!room.length) return null
+  // Idle before busy, then emptiest: of two who can both take it, the one not
+  // mid-turn starts sooner and the one with more window left finishes.
+  const order = [...room].sort(
+    (a, b) => Number(b.idle) - Number(a.idle) || (a.ctxPct ?? 0) - (b.ctxPct ?? 0)
+  )
+  return order[0].id
 }
 
 export function renderBrief(
@@ -784,7 +798,10 @@ export function renderBrief(
     if (key === 'self.id') return vars.id
     if (key === 'self.name') return vars.name ?? vars.id
     if (key === 'reportTo') return vars.reportTo ?? ''
-    if (key === 'reuseBelowPct') return String(w.reuseBelowPct)
+    // Kept, undocumented, for briefs written before the floor had one number.
+    // A brief on disk that still says it would otherwise put `{{reuseBelowPct}}`
+    // verbatim into a real agent's system prompt.
+    if (key === 'reuseBelowPct') return String(w.hireAbovePct)
     if (key === 'hireAbovePct') return String(w.hireAbovePct)
     // The role's own words first, then the floor's - the narrower answer wins,
     // so a writer with its own `tone` is not overruled by the house one. Both
@@ -1076,8 +1093,8 @@ export function lint(w: Workflow, rules?: Rules): string[] {
     }
   }
 
-  if (on('thresholds-ordered') && !(w.reuseBelowPct > 0 && w.reuseBelowPct <= w.hireAbovePct && w.hireAbovePct <= 100)) {
-    bad.push('Context thresholds must satisfy 0 < reuseBelowPct <= hireAbovePct <= 100.')
+  if (on('thresholds-ordered') && !(w.hireAbovePct > 0 && w.hireAbovePct <= 100)) {
+    bad.push('The hire threshold must satisfy 0 < hireAbovePct <= 100.')
   }
 
   // The starter is a form with the answers left out, and the blanks look like
@@ -1227,7 +1244,6 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
       : {}),
     dispatch: typeof o.dispatch === 'string' ? o.dispatch : Object.keys(roles)[0] ?? '',
     entry: typeof o.entry === 'string' ? o.entry : typeof o.dispatch === 'string' ? o.dispatch : '',
-    reuseBelowPct: pct(o.reuseBelowPct, 50),
     hireAbovePct: pct(o.hireAbovePct, 70)
   }
   return { workflow }
@@ -1248,7 +1264,6 @@ export function parseWorkflow(raw: unknown): { workflow: Workflow } | { error: s
  * # my-floor
  * One line about how work moves here.
  *
- * - reuse below: 50
  * - hire above: 70
  *
  * ## roles
@@ -1681,7 +1696,6 @@ const HOW_SECTION = /^how (it|this floor) works\b/i
       talksTo,
       dispatch,
       entry: entry || dispatch,
-      reuseBelowPct: num(field(header, 'reuse below'), 50),
       hireAbovePct: num(field(header, 'hire above'), 70),
       capabilities: declared,
       columns,
@@ -1729,7 +1743,7 @@ const firstLine = (brief: string): string =>
 export function toMarkdown(w: Workflow): string {
   const out: string[] = [`# ${w.name}`]
   if (w.description) out.push('', w.description)
-  out.push('', `- reuse below: ${w.reuseBelowPct}`, `- hire above: ${w.hireAbovePct}`)
+  out.push('', `- hire above: ${w.hireAbovePct}`)
   if (w.human !== HUMAN_PARTY) out.push(`- human address: ${w.human}`)
   if (w.hire !== HIRE_PARTY) out.push(`- hire address: ${w.hire}`)
   if (w.voice) out.push(`- reports to you: ${w.voice}`)
@@ -1740,7 +1754,7 @@ export function toMarkdown(w: Workflow): string {
   if (w.hires) out.push(`- hires: ${w.hires}`)
 
   // After the header fields, never before them: everything under a `##` belongs
-  // to that section, and a summary written above `- reuse below:` takes the
+  // to that section, and a summary written above `- hire above:` takes the
   // whole header with it.
   if (w.summary?.trim()) out.push('', '## how it works', '', w.summary.trim())
 

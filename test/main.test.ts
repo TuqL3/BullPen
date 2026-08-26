@@ -203,6 +203,69 @@ test('work handed to a role, not a person, lands on somebody and on the board', 
   )
 })
 
+/**
+ * A role is not a project. "The tester" on a floor running three repos is three
+ * people, and the pool never said so: a developer in one repo handing a build
+ * over got whichever tester was idle, including one standing in a checkout that
+ * does not contain the code it was asked to run. From the outside that is a
+ * tester that does not work, which is how it was reported.
+ */
+test('work handed to a role stays inside the project it came from', async () => {
+  await hire('pia', 'ba')
+  // The wrong-repo tester first, so the old pool - which picked the emptiest
+  // idle one and knew nothing about projects - would answer with it.
+  await hire('tess-seo', 'tester')
+  await hire('tess-blogs', 'tester')
+  // The renderer holds the only complete picture, so this is where projects
+  // come from - the same call the roster makes on every change.
+  await main.invoke('floor:publish', [
+    { id: 'pia', name: 'Pia', project: 'blogs', cwd: work, status: 'running', activity: 'idle', role: 'ba', pid: 1 },
+    { id: 'tess-blogs', name: 'Tess', project: 'blogs', cwd: work, status: 'running', activity: 'idle', role: 'tester', pid: 2 },
+    { id: 'tess-seo', name: 'Tess S', project: 'seo', cwd: work, status: 'running', activity: 'idle', role: 'tester', pid: 3 }
+  ])
+
+  mail('pia', { to: 'tester', subject: 'check it', body: 'the blogs build' })
+  await settle()
+
+  assert.ok(
+    inbox('tess-blogs').some((m) => m.subject.includes('check it')),
+    'the tester in the same repo is the one that gets it'
+  )
+  assert.equal(
+    inbox('tess-seo').filter((m) => m.subject.includes('check it')).length,
+    0,
+    'and the one standing in another repo never sees it'
+  )
+})
+
+/**
+ * Mail to a role is how work is handed over and also how one agent answers
+ * another, and a card was opened for both. One task came to fifty-four cards
+ * that way: the board, which is the one screen that says what the floor is
+ * doing, filled up with a conversation about a single job.
+ */
+test('answering a role delivers the message without opening another card', async () => {
+  await hire('nia', 'ba')
+  await hire('dex', 'dev')
+  mail('nia', { to: 'dev', subject: 'build the exporter', body: 'the thing' })
+  await settle()
+  const opened = await main.invoke<{ id: string; text: string }[]>('board:tasks')
+  assert.ok(
+    opened.some((t) => t.text.includes('build the exporter')),
+    'the hand-over itself still opens one'
+  )
+
+  mail('nia', { to: 'dev', subject: 're: build the exporter', body: 'one correction to it' })
+  await settle()
+
+  const after = await main.invoke<{ id: string }[]>('board:tasks')
+  assert.equal(after.length, opened.length, 'the reply is not a second job')
+  // Whoever the floor put it in front of - the point is that it went, not who
+  // took it. A message the board ignores must still reach somebody.
+  const sent = main.last('hive:deliver')?.[0] as { to: string; msg: { subject: string } }
+  assert.match(sent?.msg?.subject ?? '', /^re:/, 'and it is still delivered')
+})
+
 test('an agent holding work is not stood down without being asked', async () => {
   // A stand-down kills the process mid-turn, and what it was doing goes with
   // it. Idle agents are nobody's question; one holding a card is work somebody

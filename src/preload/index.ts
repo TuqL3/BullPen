@@ -60,7 +60,6 @@ export type WorkflowInfo = {
   summary?: string
   dispatch: string
   entry: string
-  reuseBelowPct: number
   hireAbovePct: number
   roles: Record<
     string,

@@ -884,7 +884,6 @@ This heading names nobody, so it stays inside the builder's brief.
 
   assert.equal(w.dispatch, 'boss')
   assert.equal(w.entry, 'boss')
-  assert.equal(w.reuseBelowPct, 40)
   assert.equal(w.roles.boss.fixed?.id, 'chief')
   assert.equal(w.roles.boss.does, 'hands the work out and is the only one who reports to you')
   assert.equal(w.roles.builder.does, 'writes the code and reports when it is done')
@@ -1329,11 +1328,45 @@ test('a floor keeps the agents it has a role for, and no others', () => {
 })
 
 /**
+ * The floor had two context numbers once. Every floor saved to disk while it
+ * did still carries `- reuse below:` in its markdown and `{{reuseBelowPct}}`
+ * in its briefs, and neither may be the thing that stops it opening.
+ */
+test('a floor written when there were two numbers still reads, and still renders', () => {
+  const md = toMarkdown(DEFAULT_WORKFLOW).replace(
+    '- hire above:',
+    '- reuse below: 50\n- hire above:'
+  )
+  const parsed = parseMarkdown(md)
+  assert.ok('workflow' in parsed, JSON.stringify(parsed))
+  if (!('workflow' in parsed)) return
+  assert.equal(parsed.workflow.hireAbovePct, DEFAULT_WORKFLOW.hireAbovePct, 'the line it knows is read')
+  assert.deepEqual(lint(parsed.workflow), [], 'and the line it no longer knows is not an error')
+
+  // A brief naming the number that is gone gets the one that is left, rather
+  // than handing a real agent the braces.
+  const w = {
+    ...DEFAULT_WORKFLOW,
+    roles: {
+      ...DEFAULT_WORKFLOW.roles,
+      ba: { ...DEFAULT_WORKFLOW.roles.ba, brief: 'reuse under {{reuseBelowPct}}%' }
+    }
+  }
+  assert.equal(renderBrief(w, 'ba', { id: 'morgan' }), `reuse under ${w.hireAbovePct}%`)
+})
+
+/**
  * Who takes work handed to a role. Every brief used to ask the agent to work
  * this out from the floor file - four steps a model does badly and silently.
+ *
+ * One question and one number. There were two of each: idle-and-under-reuse
+ * first, then anybody-under-hire. The first was written when work was typed
+ * straight at whoever took it and a second task landing mid-turn cost the
+ * first; work joins the taker's own card now, so being idle went back to
+ * being a preference rather than a threshold.
  */
-test('work handed to a role goes to whoever is free, emptiest window first', () => {
-  const w = DEFAULT_WORKFLOW // reuse below 50, hire above 70
+test('work handed to a role goes to whoever has room, idle first, emptiest first', () => {
+  const w = DEFAULT_WORKFLOW // hire above 70
 
   const busy = { id: 'a', role: 'dev', idle: false, ctxPct: 10 }
   const full = { id: 'b', role: 'dev', idle: true, ctxPct: 71 }
@@ -1341,30 +1374,23 @@ test('work handed to a role goes to whoever is free, emptiest window first', () 
   const fresh = { id: 'd', role: 'dev', idle: true, ctxPct: 5 }
   const other = { id: 'e', role: 'tester', idle: true, ctxPct: 0 }
 
-  // Emptiest of the free ones, and never somebody in another role.
+  // Emptiest of the idle ones, and never somebody in another role.
   assert.equal(pickForRole(w, 'dev', [busy, full, some, fresh, other]), 'd')
-  // Nobody eligible is not an error: it means hire, which is the caller's job.
+  // Nobody at all is not an error: it means hire, which is the caller's job.
   assert.equal(pickForRole(w, 'dev', []), null)
-  // The emptiest window on the floor belongs to somebody mid-turn. Work waits
-  // for a new pair of hands rather than being stacked on a turn in progress:
-  // a second task handed to a working agent lands as an interruption, and the
-  // first one is what pays for it.
-  assert.equal(pickForRole(w, 'dev', [busy]), null)
-  // Idle but past "give it to one under" is treated the same as busy - what is
-  // left of that window is not enough to work in.
-  assert.equal(pickForRole(w, 'dev', [busy, full, some]), null)
+  // Idle beats emptier. `busy` has the emptiest window on the floor and still
+  // loses to somebody who can start now - but it is a preference, not a bar.
+  assert.equal(pickForRole(w, 'dev', [busy, some]), 'c')
+  assert.equal(pickForRole(w, 'dev', [busy]), 'a', 'busy is not full')
+  // Full is the one state that is not usable, idle or not. A floor of full
+  // developers is the floor that gets a new one.
+  assert.equal(pickForRole(w, 'dev', [full]), null)
+  assert.equal(pickForRole(w, 'dev', [{ id: 'z', role: 'dev', idle: false, ctxPct: 90 }]), null)
   // A fresh hire has no reading yet. That is empty, not full.
   assert.equal(pickForRole(w, 'dev', [{ id: 'new', role: 'dev', idle: true }]), 'new')
   // At the threshold, not under it.
-  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 50 }]), null)
-  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 49 }]), 'x')
-
-  // A floor may ship without `thresholds-ordered`, so the two numbers can be
-  // the wrong way round. The lower one decides either way - reuse 90 must not
-  // hand work to an agent that hire 10 calls unavailable.
-  const inverted = { ...w, reuseBelowPct: 90, hireAbovePct: 10 }
-  assert.equal(pickForRole(inverted, 'dev', [{ id: 'y', role: 'dev', idle: true, ctxPct: 20 }]), null)
-  assert.equal(pickForRole(inverted, 'dev', [{ id: 'y', role: 'dev', idle: true, ctxPct: 5 }]), 'y')
+  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 70 }]), null)
+  assert.equal(pickForRole(w, 'dev', [{ id: 'x', role: 'dev', idle: true, ctxPct: 69 }]), 'x')
 })
 
 /**

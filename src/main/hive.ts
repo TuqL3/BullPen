@@ -40,6 +40,20 @@ export type Message = {
    * is what looks it up.
    */
   task?: string
+  /**
+   * The card this message's work was put on the reader's board as, when the app
+   * opened one for them rather than handing the work straight over.
+   *
+   * Set by main on the way through, never written by an agent. A role is one
+   * pair of hands and work arrives faster than hands finish: typed at a CLI
+   * mid-turn, three hand-offs land as three interruptions of one turn and come
+   * back as one confused answer. So the card is the queue, and this is what
+   * tells the delivery it is already in a line rather than owed a prompt.
+   *
+   * The message is still written to the inbox either way - the queue decides
+   * when somebody is *told*, not whether the mail exists.
+   */
+  queued?: string
 }
 
 export type Delivery = { to: string; msg: Message }
@@ -114,7 +128,23 @@ export class Hive extends EventEmitter {
    * the sender can decline to follow. Unset means the old behaviour - anyone
    * may write to anyone.
    */
-  gate: ((from: string, to: string) => string | null) | null = null
+  gate: ((from: string, to: string, msg: Message) => string | null) | null = null
+
+  /**
+   * Whether an id is an agent that is up right now, rather than a folder.
+   *
+   * A mailbox outlives its agent on purpose - `forget` empties it and leaves
+   * the directory standing, because the directory is what `list()` walks. So
+   * `agents` is a list of everyone who has ever been here, and reading it as
+   * "is this an id" is what broke a floor that later named a role after a dead
+   * agent: `ba` was a leftover folder, so mail to the analyst was delivered
+   * into it instead of reaching `staff`, no card was opened, nobody read it,
+   * and the sender was told off for writing to its own role.
+   *
+   * Unset means the old behaviour - a router with no app behind it has no
+   * better answer than the directory listing.
+   */
+  live: ((id: string) => boolean) | null = null
 
   /**
    * Turn an address that is not an agent id into one.
@@ -281,7 +311,7 @@ export class Hive extends EventEmitter {
         ).find(([name]) => name === msg.to)
         if (reserved) {
           const [, event] = reserved
-          const why = event === 'board' ? null : (this.gate?.(msg.from, msg.to) ?? null)
+          const why = event === 'board' ? null : (this.gate?.(msg.from, msg.to, msg) ?? null)
           if (why) {
             refuse(why)
             continue
@@ -291,10 +321,12 @@ export class Hive extends EventEmitter {
         }
 
         // An id if it is one, otherwise whoever the app puts in that role.
+        // "Is one" is a running process where the app can say - see `live`. A
+        // bare directory is not somebody, and reading it as one is what silently
+        // ate every message addressed to a role whose name a dead agent had.
+        const isAgent = this.live ? this.live(msg.to) : agents.includes(msg.to)
         const named =
-          msg.to === '*' || agents.includes(msg.to)
-            ? msg.to
-            : (this.staff?.(msg.to, from, msg) ?? msg.to)
+          msg.to === '*' || isAgent ? msg.to : (this.staff?.(msg.to, from, msg) ?? msg.to)
         // `agents` is the snapshot this sweep opened with, and `staff` is
         // allowed to hire - so the one name it is most likely to return is the
         // one name that snapshot cannot contain. Asking it anyway is what made
@@ -310,7 +342,7 @@ export class Hive extends EventEmitter {
         // Per target, so a broadcast reaches the part of the floor it is
         // allowed to reach rather than being refused whole.
         const blocked = addressed
-          .map((to) => [to, this.gate?.(msg.from, to) ?? null] as const)
+          .map((to) => [to, this.gate?.(msg.from, to, msg) ?? null] as const)
           .filter((pair): pair is readonly [string, string] => pair[1] !== null)
         const targets = addressed.filter((to) => !blocked.some(([id]) => id === to))
         if (targets.length === 0 && blocked.length > 0) {

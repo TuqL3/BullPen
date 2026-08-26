@@ -293,3 +293,35 @@ test('the message that causes a hire reaches the agent it hired', () => {
   assert.equal(readdirSync(join(root, 'dead')).length, 0, 'and nothing is dead')
   rmSync(root, { recursive: true, force: true })
 })
+
+/**
+ * A mailbox outlives its agent, and `list()` is what the router reads as "who
+ * is an id". So a floor that later names a role after somebody who has left -
+ * `ba` here, an agent id on the floor before it - had every message to that
+ * role delivered into a folder nobody reads: `staff` was never asked, no card
+ * was opened, and the sender was told off for writing to its own role.
+ */
+test('a dead agent\'s leftover mailbox does not shadow a role of the same name', () => {
+  const { hive, root } = fresh()
+  hive.register('avery')
+  // The one who left. Emptied, as `forget` leaves it: the directory stays.
+  hive.register('ba')
+  hive.live = (id) => id === 'avery' || id === 'morgan'
+  let staffed = 0
+  hive.staff = (to) => {
+    if (to !== 'ba') return null
+    staffed++
+    hive.register('morgan')
+    return 'morgan'
+  }
+
+  hive.send({ from: 'avery', to: 'ba', subject: 'done: the bundle', body: 'passed' })
+  hive.route()
+
+  assert.equal(staffed, 1, 'the role is staffed rather than read as an id')
+  assert.equal(hive.peekInbox('ba').length, 0, 'nothing goes to the empty folder')
+  const got = hive.drainInbox('morgan')
+  assert.equal(got.length, 1, 'the analyst who is actually here gets it')
+  assert.equal(got[0].to, 'morgan')
+  rmSync(root, { recursive: true, force: true })
+})

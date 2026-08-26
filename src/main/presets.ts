@@ -58,7 +58,6 @@ const DEFAULT_FLOOR: Workflow = {
   summary: "Work arrives from the human at the boss, who is the only role that speaks to them. He reads it first - is this a question this floor can answer, is the source named, is there enough in it to start - and either tells the human it stops here or hands it to the data analyst, hiring one when nobody idle is left. The analyst pulls from the named sources, cleans on a copy, does the statistics the question needs, and when a piece of the work is legwork rather than analysis - cutting a report into segments, counting a campaign, reformatting an export - hands that one piece to the marketing & sale worker and waits for it back. Nothing on this floor decides whether work passed, so a card goes from pulling straight to written up, or sideways into stalled when the sources are unreachable or the records will not carry the question. The boss then puts the finding to the human in his own words - answered, blocked, or a decision that is theirs to make.",
   dispatch: "boss",
   entry: "boss",
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   human: "you",
   hire: "hire",
@@ -104,7 +103,7 @@ const DEFAULT_FLOOR: Workflow = {
       brief: [
         "You are Michael, and you stand in for the person running this floor. Work\nreaches you from them, and you are the only one here who answers to them.",
         "Read it before you pass it on: can it be done here at all, is this the floor\nfor it, and is there enough in it to start? When the answer is no, say so to the\nhuman and stop there. Handing out work nobody can finish, or hiring somebody to\nfind that out, costs an agent and a window and answers nothing.",
-        "When it holds up, it goes to the data analyst - \"data_analyst\" is the only agent\nyou may put on work, and she decides what she does herself and what she hands to\nthe marketing & sale worker. Do not assign that worker yourself; a message to\n\"marketing_sale\" is refused by the router and handed back to you. Hire when the\nfloor is full enough to need it.",
+        "When it holds up, it goes to the data analyst - \"data_analyst\" is the only agent\nyou may put on work, and she decides what she does herself and what she hands to\nthe marketing & sale worker. Do not assign that worker yourself; a message to\n\"marketing_sale\" is refused by the router and handed back to you. Address it to\nthe role rather than to a person: Bullpen picks who, and hires when everybody in\nthat role is too full to take it.",
         "{\"from\": \"{{self.id}}\", \"to\": \"data_analyst\", \"subject\": \"<the request in a few words>\", \"body\": \"<what was asked, in the words it was asked in>\"}",
         "When she reports back, pass it on to the human in your own words. A task is\nfinished when she says it is - not when somebody says they built it.",
         "{\"from\": \"{{self.id}}\", \"to\": \"you\", \"subject\": \"done: <the task>\", \"body\": \"<what happened>\"}",
@@ -171,7 +170,6 @@ export const DEFAULT_WORKFLOW = DEFAULT_FLOOR
 export const STARTER = `# «name this workflow»
 «one line: how work moves on this floor»
 
-- reuse below: 50
 - hire above: 70
 
 ## capabilities
@@ -213,10 +211,10 @@ export const STARTER = `# «name this workflow»
 You are {{self.name}}, and you stand in for the person running this floor.
 «what this one does, and what it must not do»
 
-Read $BULLPEN_FLOOR to see who is here and how full their context is. Reuse an
-idle agent under {{reuseBelowPct}}%; at or over that, treat them as busy. An
-agent that is working takes nothing new - hire rather than wait for it.
-Hire when nobody fits:
+Read $BULLPEN_FLOOR to see who is here and how full their context is. Reuse
+anybody under {{hireAbovePct}}% - one mid-turn takes work too, it joins their
+board and goes out when that turn ends. At or over that number their window has
+too little room left to work in. Hire when nobody fits:
 
 {"from": "{{self.id}}", "to": "hire", "subject": "<project>", "role": "builder", "body": "<the task>"}
 
@@ -257,7 +255,6 @@ nobody can act on.
 export const NEW_FLOOR = `# a new floor
 How work moves here.
 
-- reuse below: 50
 - hire above: 70
 
 ## capabilities

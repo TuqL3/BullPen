@@ -79,8 +79,8 @@ test('a floor carries its own defaults, said once', () => {
   const by = (n: string) => floor.find((f) => f.name === n)!
   assert.equal(by('human address').fallback, 'you')
   assert.equal(by('hire address').fallback, 'hire')
-  assert.equal(by('reuse below').fallback, '50')
-  assert.deepEqual(by('reuse below').type, { kind: 'percent' })
+  assert.equal(by('hire above').fallback, '70')
+  assert.deepEqual(by('hire above').type, { kind: 'percent' })
   assert.equal(by('dispatch').required, true)
   assert.deepEqual(by('dispatch').type, { kind: 'ref', to: ['role'] })
 })
@@ -142,14 +142,13 @@ test('a rules file that will not parse is empty, not an exception', () => {
 test('a law that is not in the rules is a check that does not run', () => {
   const w = structuredClone(DEFAULT_WORKFLOW)
   // Break two different things at once.
-  w.reuseBelowPct = 90
-  w.hireAbovePct = 10
+  w.hireAbovePct = 0
   w.cardRules = w.cardRules.filter((r) => r.status !== 'open')
 
   // Neither law ships switched on, so nothing is said about either. Filtered
   // to those two: taking the `open` rules off leaves lines with no rule, which
   // is a law that does ship and is right to complain.
-  const about = (p: string): boolean => p.includes('thresholds') || p.includes('reach the board')
+  const about = (p: string): boolean => p.includes('threshold') || p.includes('reach the board')
   assert.deepEqual(lint(w, RULES).filter(about), [])
 
   // Write the two laws in and the same floor is refused on both counts.
@@ -157,20 +156,20 @@ test('a law that is not in the rules is a check that does not run', () => {
     w,
     readRules(
       RULES.text +
-        '\n- `thresholds-ordered` — 0 < reuse below <= hire above <= 100\n' +
+        '\n- `thresholds-ordered` — 0 < hire above <= 100\n' +
         '- `must-open` — at least one card rule must open a card\n'
     )
   )
-  assert.ok(full.some((p) => p.includes('thresholds')), full.join(' | '))
+  assert.ok(full.some((p) => p.includes('threshold')), full.join(' | '))
   assert.ok(full.some((p) => p.includes('reach the board')), full.join(' | '))
 
   const quiet = lint(w, RULES)
-  assert.ok(!quiet.some((p) => p.includes('thresholds')), quiet.join(' | '))
+  assert.ok(!quiet.some((p) => p.includes('threshold')), quiet.join(' | '))
   assert.ok(!quiet.some((p) => p.includes('reach the board')), quiet.join(' | '))
 
   // And with no rules at all everything runs: a missing rulebook is not
   // permission.
-  assert.ok(lint(w).some((p) => p.includes('thresholds')))
+  assert.ok(lint(w).some((p) => p.includes('threshold')))
 })
 
 /**

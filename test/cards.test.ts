@@ -343,3 +343,41 @@ test('a rule somebody wrote beats what the floor would have done', () => {
   const move = routeCard(w, { from: 'god', to: 'dev', subject: 'x', body: '' }, (id) => id, HUMAN)
   assert.deepEqual(move, { kind: 'move', agent: 'god', status: 'blocked' })
 })
+
+/**
+ * Everything two agents say to each other goes down the same line the hand-off
+ * did, and every one of those opened a card. One task came to fifty-four of
+ * them - `re:`, `answer:`, `correction:`, `question:`, `done:` - so the board,
+ * which is the one screen that says what the floor is doing, was mostly a
+ * transcript of a conversation about a single job.
+ */
+test('answering about a card does not open another one', () => {
+  // Work being handed over still opens one. Nothing here changes that.
+  assert.equal(move(CHAIN, 'michael', 'ba', 'ship the parser')?.kind, 'open')
+
+  // Real subjects, off a floor this happened on.
+  for (const subject of [
+    're: f3b546c9 — parked attempt failed, card still reads as work',
+    'answer: FAL-658 T1 — take shopController.js:164-165',
+    'correction: send `done` on f3b546c9 - my earlier reasoning was wrong',
+    'question: FAL-658 T1 blast radius',
+    'status: nothing moved since this morning',
+    'update: four more production-endpoint sites',
+    'note: the docs page is already written'
+  ]) {
+    assert.equal(move(CHAIN, 'michael', 'ba', subject), null, subject)
+  }
+
+  // A report down a line drawn as `open` returns nothing rather than a move:
+  // the caller's fallback is what reads `done:` and `fail:`, and it needs the
+  // sender's own card, not a new one for the reader.
+  assert.equal(move(CHAIN, 'michael', 'ba', 'done: the parser shipped'), null)
+  assert.equal(move(CHAIN, 'michael', 'ba', 'fail: the parser will not build'), null)
+
+  // The colon is what people type, and it is what this reads. Without it an
+  // imperative that happens to start with a status word - which is most of
+  // them - would be work that never appeared on the board at all.
+  assert.equal(move(CHAIN, 'michael', 'ba', 'update the pricing page')?.kind, 'open')
+  assert.equal(move(CHAIN, 'michael', 'ba', 'note every endpoint that writes')?.kind, 'open')
+  assert.equal(move(CHAIN, 'michael', 'ba', 'pass the export through the linter')?.kind, 'open')
+})

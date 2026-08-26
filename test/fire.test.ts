@@ -13,7 +13,6 @@ const FLOOR = {
   description: '',
   dispatch: 'god',
   entry: 'ba',
-  reuseBelowPct: 50,
   hireAbovePct: 70,
   roles: {
     god: { can: ['speaksToHuman'], label: 'the boss', fixed: { id: 'michael', name: 'Michael' }, brief: '' },

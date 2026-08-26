@@ -82,8 +82,7 @@ and how full an agent may be before it is left alone.
 - hire address · text · default hire
 - reports to you · role
 - hires · role
-- reuse below · percent · default 50
-- hire above · percent · default 70
+- hire above · percent · default 70 · at or over this much of its context window an agent is too full to take the next piece of work, and a new one is hired for that role. Below it anybody takes work - idle first, and one mid-turn joins their board and starts it when that turn ends
 - «your own» · text · any other line becomes {{that name}} in every brief
 
 ## placeholders
@@ -97,7 +96,6 @@ rather than quietly blank.
 - `{{reportTo}}` — whoever the work comes back to
 - `{{role.<name>.id}}` — another role's agent, by role name
 - `{{role.<name>.name}}` — the same, as a name
-- `{{reuseBelowPct}}` — the reuse threshold
 - `{{hireAbovePct}}` — the hire threshold
 - `{{your own}}` — anything declared on the role or the floor
 

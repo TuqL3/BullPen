@@ -36,7 +36,7 @@ import {
   type FloorAgent
 } from './god.ts'
 import { execFile, execFileSync } from 'node:child_process'
-import { routeCard } from './cards.ts'
+import { isReply, routeCard } from './cards.ts'
 import { dryRun } from './dryrun.ts'
 import { DEFAULT_WORKFLOW, NEW_FLOOR, PRESETS, STARTER } from './presets.ts'
 import {
@@ -702,16 +702,13 @@ const relayRules = (): string => {
  */
 const assignRules = (): string =>
   'Do not do the work yourself. Read $BULLPEN_FLOOR and pick an agent on ' +
-  'that project whose status is running and whose activity is idle - a ' +
-  'stopped agent cannot be given anything, and neither can one mid-turn: ' +
-  'a second task handed to a working agent lands as an interruption, and the ' +
-  'task it is already on is what pays for it. Never wait for one to finish ' +
-  'either - hire instead. ' +
-  `Of those, take one whose ctxPct is under ${wf.reuseBelowPct}; at or over ` +
-  `that, treat them as not free even when idle, because what is left of ` +
-  'their window is not enough to work in and everything they still carry is ' +
-  'charged again every turn. Missing ctxPct means a fresh agent, not a full ' +
-  'one. ' +
+  'that project whose status is running - a stopped agent cannot be given ' +
+  'anything. Prefer one that is idle, but one mid-turn takes work too: it ' +
+  'joins their board and goes out when the turn they are on ends. ' +
+  `Of those, take one whose ctxPct is under ${wf.hireAbovePct}; at or over ` +
+  'that, treat them as unavailable, because what is left of their window is ' +
+  'not enough to work in and everything they still carry is charged again ' +
+  'every turn. Missing ctxPct means a fresh agent, not a full one. ' +
   'Send them the task through $BULLPEN_MAILBOX/outbox, and say in it that ' +
   'they must mail you a report when they are done or blocked. ' +
   'If the project has nobody free by that rule, hire one: write a message to ' +
@@ -1149,11 +1146,31 @@ function pump(id: string): void {
   handovers.set(next.id, tries)
   board.setTaskStatus(next.id, column('working'))
   pushTasks()
+  /**
+   * Whoever put the card there, by name, quoting the card.
+   *
+   * "Whoever is waiting on it" was the old wording, and it named nobody the
+   * agent could look up: it guessed whoever last wrote to it, which on a busy
+   * floor is somebody else entirely. The card already records who handed it
+   * over - an agent for work handed down, dispatch for a card the operator
+   * typed - so that is the answer, and it is the same answer either way.
+   *
+   * `hive.gate` lets a report on a dispatch-owned card past the chain, because
+   * nobody in the chain handed that one over.
+   */
+  const back = next.by && next.by !== id ? next.by : dispatchId()
+  const noSender =
+    back === dispatchId()
+      ? 'This card came off the board rather than from another agent, so nobody here is waiting on it - '
+      : ''
   submitPrompt(
     id,
-    `[bullpen] From your board: ${next.text}. Work it now. When it is finished, mail a report ` +
-      'with the subject starting "done: " - "fail: " if it is not - to whoever is waiting on it. ' +
-      'That report is what closes the card.'
+    `[bullpen] From your board: ${next.text}. Work it now. ${noSender}when it is finished, report ` +
+      `straight to "${back}" and to nobody else:\n\n` +
+      // Escaped, not interpolated: a card whose text has a quote in it wrote a
+      // broken example, and the example is the only JSON some agents copy.
+      `{"from": "${id}", "to": "${back}", "task": "${next.id}", "subject": ${JSON.stringify(`done: ${what}`)}, "body": "<what happened>"}\n\n` +
+      `"fail: " instead of "done: " when it is not finished. That report is what closes the card.`
   )
   activity.push('task', id, `started "${what}" from the board`)
 }
@@ -1585,7 +1602,7 @@ function wire(): void {
     // A halted agent used to swallow its mail: deliver() returned early and
     // nothing said so, so the sender believed the task was assigned and the
     // work simply never happened.
-    if (!ptys.deliver(to, msg.from, msg.subject, msg.body)) {
+    if (!ptys.isRunning(to)) {
       activity.push('dead', msg.from, `${to} is not running — "${msg.subject}" was not delivered`)
       send('hive:dead', msg)
       if (ptys.isRunning(msg.from)) {
@@ -1611,8 +1628,10 @@ function wire(): void {
     // One place decides what a message does to the board, and it is testable:
     // see cards.ts for why every branch in it exists.
     const move = routeCard(wf, { ...msg, to }, roleOf, wf.human)
+    /** The card this message put in front of the reader, if it put one there. */
+    let line = msg.queued ?? null
     if (move?.kind === 'open') {
-      cardFor(move.agent, move.text, move.by, { role: roleOf(move.agent) })
+      line = cardFor(move.agent, move.text, move.by, { role: roleOf(move.agent) }) ?? line
       // And the one who handed it over is now waiting on it. Nothing else ever
       // wrote the working column on a floor with nobody to check work - a card
       // opened in `todo` and jumped to `done`, and the column in between was a
@@ -1625,6 +1644,34 @@ function wire(): void {
     else if (move?.kind === 'move') cardTo(move.agent, move.status, msg.task)
     else if (move?.kind === 'checked') testerReported(move.agent, move.subject, msg.task)
     else said(msg.from, msg.subject, msg.task)
+
+    /**
+     * Work joins the line. Talk is said now.
+     *
+     * A role is one pair of hands, and work arrives at it faster than hands
+     * finish. Typed straight into a working CLI, three hand-offs land inside
+     * one turn and come back as one answer that half-did all three - which is
+     * what hiring a fourth agent used to be the answer to. The card is the
+     * queue, `pump` is the one server, and it takes the next only when the
+     * turn before it ends.
+     *
+     * `pump` is a no-op while they are mid-turn or already holding one, so the
+     * common case here is: card added, nothing typed, and it goes out later.
+     * Talk - `re:`, `answer:`, a report - never opened a card and is handed
+     * over now: an answer that waits for the turn it is about to end is an
+     * answer nobody can use.
+     */
+    if (line) {
+      released.add(line)
+      activity.push('task', msg.from, `${msg.from} → ${to}: queued "${msg.subject.slice(0, 60)}"`)
+      pump(to)
+    } else if (!ptys.deliver(to, msg.from, msg.subject, msg.body)) {
+      // Between `isRunning` above and here it can have exited. Rare, and the
+      // sender is still owed the truth about it.
+      activity.push('dead', msg.from, `${to} is not running — "${msg.subject}" was not delivered`)
+      send('hive:dead', msg)
+      return
+    }
 
     send('hive:deliver', { to, msg })
   })
@@ -1650,9 +1697,29 @@ function wire(): void {
    */
   const staffFor = (role: string, from: string, brief = ''): string | null => {
     if (!wf.roles[role]) return null
+    /**
+     * The asker's project, and nobody else's.
+     *
+     * A project is a working directory, and a role is not: "the tester" on a
+     * floor running three repos is three people, and the pool never said so. So
+     * a developer in `blogs` handing a build over got whichever tester happened
+     * to be idle - one standing in `seo`, in a checkout that does not contain
+     * the code it was asked to run. It reads from every angle as a tester that
+     * does not work, which is exactly what it was reported as.
+     *
+     * Only when both sides are known. An agent with no project recorded is one
+     * this has not been told about - dispatch, an assistant, a hire mid-flight -
+     * and treating unknown as "somewhere else" would hire beside every one of
+     * them. Dispatch itself has no project, and its asks stay floor-wide.
+     */
+    const project = projectOf(from)
+    const elsewhere = (id: string): boolean => {
+      const theirs = projectOf(id)
+      return Boolean(project && theirs && theirs !== project)
+    }
     const staff: Candidate[] = ptys
       .list()
-      .filter((a) => a.status === 'running' && a.id !== from)
+      .filter((a) => a.status === 'running' && a.id !== from && !elsewhere(a.id))
       .map((a) => ({
         id: a.id,
         role: roleOf(a.id),
@@ -1660,6 +1727,9 @@ function wire(): void {
         ctxPct: currentCtx(a.id)?.pct
       }))
 
+    // Busy is not full: work joins the taker's queue rather than interrupting
+    // its turn, so only the context ceiling makes a hire. Hiring on busyness
+    // was what turned one task into thirteen agents.
     const free = pickForRole(wf, role, staff)
     if (free) return free
     if (wf.roles[role].hireable !== true) return null
@@ -1684,11 +1754,11 @@ function wire(): void {
      * one for anybody core, and he is never in `hires` - so there is nothing to
      * fall back to between the asker and the floor's own name.
      */
-    const project = projectOf(from) || slug(wf.name)
+    const hireInto = project || slug(wf.name)
     const cwd =
-      projectCwd(project) ?? ptys.list().find((a) => a.id === from)?.cwd ?? currentGodCwd()
+      projectCwd(hireInto) ?? ptys.list().find((a) => a.id === from)?.cwd ?? currentGodCwd()
     mkdirSync(cwd, { recursive: true })
-    const name = nextHireName(project)
+    const name = nextHireName(hireInto)
     try {
       const state = spawnAgent({
         id: nameId(name),
@@ -1701,7 +1771,7 @@ function wire(): void {
         // Michael and answering to Michael are not the same thing.
         reportTo: from
       })
-      hires.set(state.id, { name, project })
+      hires.set(state.id, { name, project: hireInto })
       forgetAgent(state.id)
       reportDue = true
       // Logged against Michael, because he is who hired: the line used to read
@@ -1715,7 +1785,7 @@ function wire(): void {
       // `brief` with it: the roster shows a new hire with what it was hired to
       // do, and dropping it left an agent appearing on the floor with no sign
       // of why. The explicit hire path has always sent it.
-      send('agent:hired', { ...state, name, project, role, ...(brief ? { brief } : {}) })
+      send('agent:hired', { ...state, name, project: hireInto, role, ...(brief ? { brief } : {}) })
       return state.id
     } catch (err) {
       console.error(`[bullpen] could not hire a ${role}:`, err)
@@ -1821,7 +1891,16 @@ function wire(): void {
         ? build.id
         : undefined
 
-    const opened = cardFor(who, what, from, { role, checks })
+    // A card only for work being handed over. Mail to a role is also how one
+    // agent answers another - `re:`, `answer:`, `correction:` - and opening a
+    // card for each of those is what turned one task into fifty-four of them.
+    // The message still goes; only the board stays out of it.
+    const opened = isReply(msg.subject) ? null : cardFor(who, what, from, { role, checks })
+    // Work joins their line rather than being typed at them. A role is one pair
+    // of hands, and work arrives faster than hands finish - see `Message.queued`
+    // and `pump`. Talk is not queued: an answer that waits for the turn it is
+    // about to end is an answer nobody can use.
+    if (opened) msg.queued = opened
     // Never over the top of one the sender already quoted. `task` means "the
     // card this message is about", and on a report that is the sender's own -
     // stamping the card just opened for the reader clobbered it, so a report
@@ -1868,11 +1947,26 @@ function wire(): void {
 
   hive.staff = (to: string, from: string, msg: Message): string | null => assignTo(to, from, msg)
 
-  hive.gate = (from: string, to: string): string | null => {
+  // Somebody, not a folder. A mailbox outlives its agent, so the router's own
+  // directory listing says `ba` is an id long after that agent is gone - and a
+  // floor that then calls a role `ba` had every message to its analyst dropped
+  // into it. Only main knows which of those names is a process.
+  hive.live = (id: string): boolean => ptys.isRunning(id)
+
+  hive.gate = (from: string, to: string, msg: Message): string | null => {
     // Bullpen's own replies, the human's answers and inbound work are not part
     // of the chain; refusing them would strand the thing they answer.
     if (from === 'bullpen' || from === wf.human || from === 'webhook') return null
     if (to === 'bullpen') return null
+    // A card the operator started from the board is the operator's own, and
+    // dispatch is who stands in for them. Nobody on the floor handed this work
+    // over, so there is nobody in the chain waiting on it: the report goes
+    // straight back to the desk that pressed start, whatever the drawing says
+    // this role may write to. Without this the chain refused the one report
+    // that had been asked for by hand, and the card never closed.
+    // Read off the card rather than off `released`, which is in memory: the app
+    // reopening is not a reason for a report to be refused.
+    if (to === dispatchId() && msg.task && board.task(msg.task)?.by === dispatchId()) return null
     // A fixed agent is a process like any other and can be killed. With the
     // one who assigns gone, the floor falls back to dispatch assigning directly
     // and these rules would only leave the work with nowhere to go.
@@ -2884,7 +2978,6 @@ function wire(): void {
   const patched = (patch: Partial<Workflow>): Workflow => ({
     ...wf,
     ...patch,
-    reuseBelowPct: pctOr(patch.reuseBelowPct ?? wf.reuseBelowPct, wf.reuseBelowPct),
     hireAbovePct: pctOr(patch.hireAbovePct ?? wf.hireAbovePct, wf.hireAbovePct)
   })
 
@@ -3593,7 +3686,11 @@ function wire(): void {
     // longer has one: the floor Bullpen ships starts at `asked`, so every
     // hand-added card landed in a column the board cannot draw and nothing
     // could move it out of.
-    const t = board.addTask(id, text, column('start'))
+    // Stamped with dispatch, because dispatch is who stands in for the operator
+    // and the operator is who typed this. It is what tells the report where to
+    // go when the card is started: nobody handed this work over, so without a
+    // name on it the agent has nobody to report to and guesses.
+    const t = board.addTask(id, text, column('start'), { by: dispatchId() })
     pushTasks()
     return t
   })

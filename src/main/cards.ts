@@ -22,6 +22,28 @@ import {
  * a floor of writers say `drafts → edits: in review` and have it mean something,
  * rather than having to call its editor a tester to get the card to move.
  */
+/**
+ * A subject that is about work already handed over, rather than work being
+ * handed over.
+ *
+ * Everything two agents say to each other goes down the same wire as the
+ * hand-off did, and every one of those used to open a card. One task came to
+ * fifty-four of them: `re:`, `answer:`, `correction:`, `question:`, `done:` -
+ * a conversation, drawn on the board as if each turn of it were a new job, on
+ * the one screen the operator reads to know what the floor is doing.
+ *
+ * Anchored on the colon rather than the word. Every brief on every floor here
+ * writes `done: <what>` and `re: <what>`, so the colon is what people actually
+ * type - and without it "update the pricing page" is a piece of work that
+ * reads as a status line. A false negative is a card too many, which is what
+ * this has always been; a false positive is work that never appears at all.
+ */
+export const REPLY =
+  /^\s*(re|reply|answer|answered|correction|corrected|clarification|question|note|fyi|ack|update|status|done|pass|passed|fail|failed|blocked|stuck|error|finished|shipped|delivered|confirmed)\s*:/i
+
+/** Whether this subject is talk about a card rather than a new one. */
+export const isReply = (subject: string): boolean => REPLY.test(subject)
+
 export type CardMove =
   /** Give `agent` a new card, unless it already has that exact one. */
   | { kind: 'open'; agent: string; text: string; by: string }
@@ -97,6 +119,12 @@ export function routeCard(
       // Handing work to yourself is not a hand-off; it is the same agent still
       // holding it, and opening a second card for it says otherwise.
       if (fromRole === toRole) continue
+      // Neither is answering one. The rule is about a pair, and a pair that
+      // hands work over also talks about it - so the same line carried
+      // "build this" and "re: your question about it", and drew both.
+      // Nothing rather than a move: a `done:` or a `fail:` down this line is
+      // still worth reading, and that is what the caller's fallback is for.
+      if (isReply(msg.subject)) return null
       return {
         kind: 'open',
         agent: msg.to,

@@ -206,7 +206,6 @@ test('what needs the floor written again, and what does not', () => {
     hire: 'hire',
     dispatch: 'boss',
     entry: 'boss',
-    reuseBelowPct: 50,
     hireAbovePct: 70,
     capabilities: [{ name: 'builds' }],
     columns: [
@@ -238,7 +237,7 @@ test('what needs the floor written again, and what does not', () => {
   )
 
   // And what says nothing about how it works.
-  assert.ok(!moved({ reuseBelowPct: 40 }), 'a threshold')
+  assert.ok(!moved({ hireAbovePct: 40 }), 'a threshold')
   assert.ok(!moved({ hireAbovePct: 90 }), 'the other threshold')
   assert.ok(
     !moved({ columns: [{ ...floor.columns[0], bar: '#123456' }, floor.columns[1]] }),
