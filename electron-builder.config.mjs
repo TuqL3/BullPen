@@ -118,6 +118,17 @@ export default {
   mac: {
     category: 'public.app-category.developer-tools',
     /**
+     * Pinned to a hand-built .icns. Left to convert `build/icon.png` itself,
+     * electron-builder writes the 256px (`ic13`) and 512px (`ic14`) retina
+     * slots with images twice their declared size, and macOS renders those
+     * slots as RGB noise in Launchpad and the Dock. Regenerate with:
+     *   for s in 16 32 128 256 512; do \
+     *     sips -z $s $s build/icon.png --out /tmp/bp.iconset/icon_${s}x${s}.png; \
+     *     sips -z $((s*2)) $((s*2)) build/icon.png --out /tmp/bp.iconset/icon_${s}x${s}@2x.png; \
+     *   done && iconutil -c icns /tmp/bp.iconset -o build/icon.icns
+     */
+    icon: 'build/icon.icns',
+    /**
      * No Developer ID certificate. Left unset, electron-builder goes looking in
      * the keychain and signs with whatever it finds, which on a build machine
      * is not a decision anybody made. The bundle is ad-hoc signed in

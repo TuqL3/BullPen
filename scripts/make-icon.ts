@@ -8,7 +8,10 @@
  *   node --experimental-strip-types scripts/make-icon.ts
  *
  * electron-builder picks up build/icon.png on its own (buildResources: build)
- * and derives the .icns and .ico from it.
+ * and derives the .ico from it. The .icns is NOT derived - it is committed as
+ * build/icon.icns and pinned in electron-builder.config.mjs, because the
+ * converter fills two of the retina slots wrong. Regenerate it alongside this
+ * file with the iconutil recipe in that config's `mac.icon` comment.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
