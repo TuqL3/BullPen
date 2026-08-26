@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { bootMain, keychain, type Main } from './main-harness.ts'
 import { PRESETS as SHIPPED } from '../src/main/presets.ts'
+import { SHELL_ID } from '../src/names.ts'
 import { columnFor, toMarkdown } from '../src/main/workflow.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'bullpen-ipc-'))
@@ -503,4 +504,27 @@ after(async () => {
   await main?.stop()
   rmSync(home, { recursive: true, force: true })
   rmSync(work, { recursive: true, force: true })
+})
+
+test('the shell tab spawns one shell, and pty writes on its id reach it', async () => {
+  const state = await main.invoke<{ id: string; pid: number }>('shell:open', 100, 30)
+  assert.equal(state.id, SHELL_ID)
+  const shell = main.pty(SHELL_ID)
+  // Not the CLI. The whole point of the tab is a shell, and `resolveCli` passes
+  // an explicit cmd through untouched - a regression there would spawn claude.
+  assert.notEqual(shell.cmd, 'claude')
+
+  // Idempotent: the renderer calls this on every visit to the tab, and a second
+  // process per visit is exactly what `spawn` refuses with a thrown duplicate.
+  const again = await main.invoke<{ pid: number }>('shell:open', 100, 30)
+  assert.equal(again.pid, state.pid, 'a second open must not spawn a second shell')
+
+  // The routing: SHELL_ID goes to the shell manager, an agent id does not.
+  main.send('pty:write', SHELL_ID, 'ls\r')
+  assert.deepEqual(shell.written, ['ls\r'])
+
+  // And its output rides the same channel the agents use, so the renderer needs
+  // nothing new to paint it.
+  shell.say('bullpen\n')
+  assert.deepEqual(main.last('pty:data'), [SHELL_ID, 'bullpen\n'])
 })

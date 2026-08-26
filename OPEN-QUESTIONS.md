@@ -2291,3 +2291,32 @@ directories are exactly the ones that land there.
 spaces (it quotes any argument containing one, and doubles backslashes only
 before a quote). Nothing here has a quote in it. If that is wrong, a CLI under
 `C:\Program Files\...` fails to spawn while one under a space-free path works.
+
+## 69. A shell tab beside the terminal, and the four defaults in it
+
+The tab is one plain shell, not a deck of them. Four things were decided rather
+than asked, and each is one line to change:
+
+**It runs `$SHELL` (`$COMSPEC` on Windows), with no `-l`.** Main already merges
+the login shell's PATH into its own environment at startup, so a non-login
+shell here inherits it. If it turns out an rc file the operator depends on is
+only read by a login shell, this comes up as "my aliases are missing" and the
+fix is `args: ['-l']`.
+
+**It opens in `currentGodCwd()`** — the boss's directory, not the selected
+agent's. Selecting an agent does not move a shell that is already running, so
+the alternative would have the directory change under a command someone was
+half way through typing. If per-agent shells are wanted, the id has to stop
+being a constant.
+
+**There is exactly one.** SHELL_ID is a single reserved id. A second shell needs
+an id per tab and a deck, the way the agent terminals already work.
+
+**It is spawned by opening the tab, and killed with the app.** A shell nobody
+opened is a process nobody asked for. `exit` inside it prints a line and the
+next visit to the tab spawns a fresh one; nothing restarts it in the background.
+
+What does *not* break: the shell cannot be mistaken for an agent. It lives in a
+second `PtyManager`, so `ptys.list()` — which the roster, the floor file, the
+reaper and stand-down all read — never sees it, and `slug()` cannot produce
+`~shell`, so no hire can take its id (asserted in `test/names.test.ts`).

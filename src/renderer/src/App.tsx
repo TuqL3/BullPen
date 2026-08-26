@@ -26,9 +26,11 @@ import {
   setTerminalTheme,
   disposeTerminal,
   TerminalDeck,
+  TerminalHost,
   termPane,
   writeToTerminal
 } from './Terminal'
+import { SHELL_ID } from '../../names.ts'
 import { getPrefs, setPrefs, type Prefs } from './prefs'
 import { FilePanel, Review, WorkTree } from './Code'
 // Not in `Code`: a module that exports anything but components loses React Fast
@@ -62,6 +64,7 @@ import {
 
 const TABS = [
   'terminal',
+  'shell',
   'monitor',
   'tasks',
   'ask me',
@@ -411,6 +414,24 @@ export default function App() {
     void window.bullpen.update().then(setUpdate)
     return window.bullpen.onUpdate(setUpdate)
   }, [])
+
+  /**
+   * The shell is spawned by opening its tab, and never before.
+   *
+   * A shell nobody has looked at is a process nobody asked for. `shell:open` is
+   * idempotent, so running this on every visit rather than once also covers
+   * coming back to a tab whose shell was `exit`ed - without anything here
+   * having to track whether the process behind it is still alive.
+   *
+   * Sized from the pane before the spawn, like an agent's pty is: a shell that
+   * starts at 80 columns and is told the truth a beat later has already drawn
+   * its prompt - and whatever the rc file prints above it - at the wrong width.
+   */
+  useEffect(() => {
+    if (tab !== 'shell') return
+    const { cols, rows } = paneSize(termPane())
+    void window.bullpen.shellOpen(cols, rows)
+  }, [tab])
 
   /**
    * "Open With - Bullpen" on a folder, from Finder.
@@ -1012,6 +1033,11 @@ export default function App() {
             <div style={{ height: '100%', display: tab === 'terminal' ? 'block' : 'none' }}>
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
+            </div>
+            {/* Kept mounted for the same reason, and it is one terminal rather
+                than a deck: there is one shell, not one per agent. */}
+            <div style={{ height: '100%', display: tab === 'shell' ? 'block' : 'none' }}>
+              <TerminalHost id={SHELL_ID} visible={tab === 'shell'} />
             </div>
             {tab === 'monitor' && (
               <Monitor

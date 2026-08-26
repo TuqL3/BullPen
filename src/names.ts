@@ -67,3 +67,14 @@ export function slug(name: string): string {
       .slice(0, 32) || 'agent'
   )
 }
+
+/**
+ * The pty id of the plain shell in the window, which is not an agent.
+ *
+ * Here rather than written twice because both sides of the wire have to agree
+ * on it and neither can import the other's modules: main routes `pty:*` on
+ * this id to a second PtyManager, and the renderer opens a terminal on it.
+ * `slug` above strips everything but `[a-z0-9-]`, so no hire can ever produce
+ * this id and take the shell's place.
+ */
+export const SHELL_ID = '~shell'

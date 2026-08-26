@@ -98,7 +98,7 @@ const generatorPrompt = (): string => generatorBrief(format().text, STARTER)
 import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
-import { hireName, slug as nameId } from '../names.ts'
+import { hireName, slug as nameId, SHELL_ID } from '../names.ts'
 
 // Unpackaged, Electron names itself and the dock says "Electron" with the
 // default icon. The packaged app gets both from electron-builder; this is only
@@ -116,6 +116,17 @@ const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
 const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
+
+/**
+ * The plain shell that sits in the tab beside the agents.
+ *
+ * Its own manager rather than a reserved id inside `ptys`, because everything
+ * that reads `ptys.list()` - the roster, the floor file, the reaper, stand-down
+ * on a workflow change - would otherwise have to learn to skip it, and the one
+ * that forgot would show a row nobody hired and stop it on the next sweep.
+ * Separate maps cannot leak, and the class is reused whole.
+ */
+const shells = new PtyManager()
 const board = new Board(boardPath(BULLPEN_HOME))
 const activity = new ActivityLog()
 
@@ -1561,6 +1572,15 @@ const pushCtxSoon = (id: string): void => {
 
 function wire(): void {
   ptys.on('data', (id: string, chunk: string) => send('pty:data', id, chunk))
+  // Same channel as the agents': the renderer keys terminals by id and does not
+  // care which manager on this side the bytes came from.
+  shells.on('data', (id: string, chunk: string) => send('pty:data', id, chunk))
+  // `exit` at the shell is a thing the operator typed, not a failure, and there
+  // is no roster row to grey out - so it is said in the terminal itself. The
+  // next visit to the tab spawns a fresh one.
+  shells.on('exit', (id: string) =>
+    send('pty:data', id, '\r\n\u001b[2m[shell exited - switch back to this tab for a new one]\u001b[0m\r\n')
+  )
   // Auto-confirming anything must leave a trace the human can find later.
   ptys.on('trust', (id: string, sandbox: string) => {
     console.log(`[bullpen] auto-accepted workspace trust for ${id} at ${sandbox}`)
@@ -3528,9 +3548,34 @@ function wire(): void {
   // floor reloads the window and leaves the agents that have a place on the new
   // one running, so the renderer comes back with an empty xterm attached to a
   // pty that has already printed everything it is going to.
-  ipcMain.handle('pty:backlog', (_e, id: string) => ptys.backlog(id))
-  ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.write(id, data))
-  ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => ptys.resize(id, cols, rows))
+  // One id belongs to the shell and the rest to agents - see `shells` above.
+  const ptyFor = (id: string): PtyManager => (id === SHELL_ID ? shells : ptys)
+  ipcMain.handle('pty:backlog', (_e, id: string) => ptyFor(id).backlog(id))
+  ipcMain.on('pty:write', (_e, id: string, data: string) => ptyFor(id).write(id, data))
+  ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) =>
+    ptyFor(id).resize(id, cols, rows)
+  )
+
+  /**
+   * Open the shell tab. Idempotent, and the only way the shell is ever spawned.
+   *
+   * Called on every switch to the tab rather than once at startup: a shell
+   * nobody opens is a process nobody asked for, and a shell somebody exited has
+   * to be able to come back without a restart of the app.
+   *
+   * `SHELL`/`COMSPEC` rather than a hard-coded path - the operator's login shell
+   * is the one their rc files configure, and guessing zsh on a machine running
+   * fish drops them somewhere they do not recognise.
+   */
+  ipcMain.handle('shell:open', (_e, cols: number, rows: number) => {
+    const existing = shells.list().find((s) => s.id === SHELL_ID)
+    if (existing && shells.isRunning(SHELL_ID)) return existing
+    const cmd =
+      process.platform === 'win32'
+        ? (process.env.COMSPEC ?? 'powershell.exe')
+        : (process.env.SHELL ?? '/bin/sh')
+    return shells.spawn({ id: SHELL_ID, cwd: currentGodCwd(), cmd, args: [], cols, rows })
+  })
 
   // Triggers only fire at an idle agent. Injecting a scheduled prompt into a
   // turn in progress would corrupt whatever it was doing.
@@ -3954,6 +3999,7 @@ app.whenReady().then(async () => {
 const shutdown = (): void => {
   updates.stop()
   ptys.killAll()
+  shells.killAll()
   approvals.stop()
   hive.stop()
   board.stop()

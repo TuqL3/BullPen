@@ -238,6 +238,16 @@ const api = {
   /** Type a prompt and submit it - see submitPrompt in main for why not write(). */
   submit: (id: string, text: string) => ipcRenderer.invoke('agent:submit', id, text),
   resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
+  /**
+   * Open the plain shell tab, spawning it if it is not up.
+   *
+   * Idempotent, so the renderer can call it every time the tab is shown rather
+   * than tracking whether the process behind it is still alive. Everything
+   * after this - keystrokes, output, resizes - rides the same `pty:*` channels
+   * the agents use, keyed by SHELL_ID.
+   */
+  shellOpen: (cols: number, rows: number): Promise<unknown> =>
+    ipcRenderer.invoke('shell:open', cols, rows),
   onData: (fn: (id: string, chunk: string) => void) => on('pty:data', fn),
   /** What this agent already printed, for a terminal buffer that has just opened. */
   backlog: (id: string): Promise<string> => ipcRenderer.invoke('pty:backlog', id),

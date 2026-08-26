@@ -142,7 +142,28 @@ export function setTerminalTheme(next: Mode): void {
   for (const { term } of terms.values()) term.options.theme = THEMES[next]
 }
 
-const FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+/**
+ * The stack every terminal is drawn in, agents and the shell alike.
+ *
+ * The Nerd Font entries are first because of what runs inside these panes: the
+ * CLI draws its chrome in box glyphs, and anything a human starts in the shell
+ * - nvim, lazygit, eza - draws icons out of the private use area. None of the
+ * system monospace faces have those codepoints, and a missing codepoint is a
+ * tofu box, not a fallback.
+ *
+ * `Symbols Nerd Font Mono` is last on purpose. Fallback in CSS is per glyph, so
+ * it never supplies a letter - it only catches the icons when the faces above
+ * it have none, which is the case on a machine with only the symbols font
+ * installed. A machine with no Nerd Font at all falls through to exactly the
+ * stack this had before, tofu included; there is nothing here to break.
+ *
+ * The `Mono` variants, not the bare families: the others are proportional or
+ * `Propo`-spaced, and a double-width glyph in a grid xterm measured from one
+ * cell smears the line it is on.
+ */
+const FONT =
+  "'JetBrainsMono Nerd Font Mono', 'Hack Nerd Font Mono', ui-monospace, SFMono-Regular, " +
+  "Menlo, Consolas, 'Symbols Nerd Font Mono', monospace"
 
 /**
  * The size text is set at, in every terminal at once.
@@ -290,7 +311,11 @@ export function TerminalDeck({ ids, selected }: { ids: string[]; selected: strin
   )
 }
 
-function TerminalHost({ id, visible }: { id: string; visible: boolean }) {
+/**
+ * One terminal bound to one pty id. Exported for the shell tab, which is a
+ * single terminal rather than a deck of them.
+ */
+export function TerminalHost({ id, visible }: { id: string; visible: boolean }) {
   const host = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
