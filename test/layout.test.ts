@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   DEFAULT_LAYOUT,
+  type Layout,
   moveTo,
   moveToNewColumn,
   normalise,
@@ -124,4 +125,34 @@ test('hiding a panel drops its column but not its place in the layout', () => {
   assert.deepEqual(toggle(off, 'command').hidden, [])
   // Hiding one of a stack leaves the column, holding the rest.
   assert.deepEqual(visible(toggle(DEFAULT_LAYOUT, 'floor')).at(-1)?.panels, ['tree'])
+})
+
+test('the visible columns always grow by at least one between them', () => {
+  // `weight` is a `flex-grow` factor and flexbox reads a total below one
+  // literally: items summing to 0.89 absorb 89% of the free space and leave the
+  // rest of the row empty. Dragging dividers leaves whatever ratios it leaves -
+  // this config is one that shipped - so hiding two columns left the third
+  // growing by 0.89 and a 208px dead strip down the right of the window.
+  const dragged: Layout = {
+    ...DEFAULT_LAYOUT,
+    hidden: ['roster', 'tree', 'floor'],
+    colWeight: [0.16883142469278725, 0.8908460827304588, 0.2805211244522837]
+  }
+  const one = visible(dragged)
+  assert.deepEqual(one.map((c) => c.panels), [['command']])
+  assert.equal(one[0].weight, 1, 'the only column on screen takes the whole row')
+
+  // Two columns keep their ratio to each other, and still sum to their count.
+  const two = visible({ ...dragged, hidden: ['tree', 'floor'] })
+  const sum = two.reduce((n, c) => n + c.weight, 0)
+  assert.ok(Math.abs(sum - two.length) < 1e-9, `weights must sum to ${two.length}, got ${sum}`)
+  const before = 0.16883142469278725 / 0.8908460827304588
+  assert.ok(Math.abs(two[0].weight / two[1].weight - before) < 1e-9, 'the ratio is unchanged')
+
+  // And every stored layout, whatever it holds, grows by at least one.
+  for (const hidden of [[], ['roster'], ['tree'], ['roster', 'floor'], ['roster', 'tree', 'floor']]) {
+    const shown = visible({ ...dragged, hidden: hidden as typeof dragged.hidden })
+    const grow = shown.reduce((n, c) => n + c.weight, 0)
+    assert.ok(grow >= 1 - 1e-9, `hidden=${hidden.join()} grows by ${grow}`)
+  }
 })

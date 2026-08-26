@@ -2358,3 +2358,29 @@ without its agent — an "all" view, or an owner who is a role rather than a pid
 **Untouched, on purpose:** triggers, rules, workflows, config, activity, the
 mailbox. Those are setup, not work in flight. `board.clearTasks()` was already
 there for the floor-change path and empties only `tasks`.
+
+## 71. Flexbox reads a grow total below one literally
+
+Hiding the work tree and the office floor left a 208px dead strip down the
+right of the window. The command centre had every panel to itself and still
+stopped short of the edge.
+
+`visible()` handed each column its stored `colWeight` straight through as a
+`flex-grow` factor, and the stored weights are whatever dragging a divider left
+behind. One config on disk held `[0.169, 0.891, 0.281]`. With two columns
+hidden the only item in the row grew by 0.891 — and the spec is explicit that a
+grow total below one absorbs only that fraction of the free space. 0.891 × 1899
+= 1691, which is where the pane ended.
+
+Nothing looked wrong reading the file, and a default layout cannot reproduce it:
+`DEFAULT_LAYOUT.colWeight` is `[0.59, 3.48, 1.15]`, and every subset of that
+sums past one. It took measuring the real DOM over CDP against the config that
+was actually on disk.
+
+Fixed by rescaling in `visible()` so the weights average one — ratios are all
+that was ever used from them, and `index`, which is what writes back to the
+stored numbers, is untouched. Rows never had the bug: `Pane` already divides by
+its column's total.
+
+**Dead, found while looking:** `S.bodyWithFloor` and `S.floorPane` in `App.tsx`
+have no reader. Left alone rather than widen this diff.

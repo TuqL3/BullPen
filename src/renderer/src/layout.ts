@@ -128,7 +128,17 @@ export function visible(l: Layout): { panels: PanelId[]; weight: number; index: 
     const panels = col.filter((p) => !l.hidden.includes(p))
     if (panels.length) out.push({ panels, weight: l.colWeight[i] ?? 1, index: i })
   })
-  return out
+  // Rescaled so the weights average one, because these are `flex-grow` factors
+  // and flexbox reads a total below one literally: items whose grow factors sum
+  // to 0.89 absorb 89% of the free space and leave the rest of the row empty.
+  // Stored weights are whatever dragging a divider left behind - one config had
+  // [0.17, 0.89, 0.28] - so hiding two columns left the third growing by 0.89
+  // and a 208px dead strip down the right of the window. The stored numbers are
+  // ratios and only their ratio is used here; `index` is what writes back to
+  // them, and it is untouched.
+  const total = out.reduce((n, c) => n + c.weight, 0)
+  if (total <= 0) return out.map((c) => ({ ...c, weight: 1 }))
+  return out.map((c) => ({ ...c, weight: (c.weight / total) * out.length }))
 }
 
 const without = (columns: PanelId[][], id: PanelId): PanelId[][] =>
