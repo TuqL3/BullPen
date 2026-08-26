@@ -34,13 +34,18 @@ export type Ask = {
  * Bounded, and the oldest answered go first: a question still waiting is never
  * dropped to make room, because dropping it is dropping an agent that is
  * blocked on it.
+ *
+ * ponytail: the cap is a file-size backstop, not a policy. 300 was low enough
+ * that a floor left running for a week lost what it had been asked on Monday,
+ * which is the whole reason this list is on disk. Raise it further, or page the
+ * file, if a floor ever gets near 5000 questions in a session.
  */
 export class Asks {
   private file: string
   private cap: number
   private data: Ask[] = []
 
-  constructor(file: string, cap = 300) {
+  constructor(file: string, cap = 5000) {
     this.file = file
     this.cap = cap
     try {
