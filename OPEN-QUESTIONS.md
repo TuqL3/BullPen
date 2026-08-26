@@ -2383,4 +2383,5 @@ stored numbers, is untouched. Rows never had the bug: `Pane` already divides by
 its column's total.
 
 **Dead, found while looking:** `S.bodyWithFloor` and `S.floorPane` in `App.tsx`
-have no reader. Left alone rather than widen this diff.
+had no reader - a fixed three-column grid from before the layout was one the
+operator arranges. Deleted.

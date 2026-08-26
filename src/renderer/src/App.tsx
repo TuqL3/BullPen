@@ -2159,9 +2159,6 @@ const S: Record<string, React.CSSProperties> = {
   // The gap repeats the title bar's, so nothing moves by wrapping the three.
   winCtl: { display: 'flex', alignItems: 'center', gap: 8 },
   body: { display: 'flex', minHeight: 0, overflow: 'hidden' },
-  // Floor on the left, command centre on the right - the windowed layout.
-  bodyWithFloor: { display: 'grid', gridTemplateColumns: '204px 1.35fr 1fr', minHeight: 0 },
-  floorPane: { minWidth: 0, minHeight: 0, borderRight: '1px solid var(--line)', overflow: 'hidden' },
   roster: {
     borderRight: '1px solid var(--line)',
     background: 'var(--panel)',
