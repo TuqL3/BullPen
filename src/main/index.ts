@@ -98,7 +98,7 @@ const generatorPrompt = (): string => generatorBrief(format().text, STARTER)
 import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
-import { hireName, slug as nameId, SHELL_ID } from '../names.ts'
+import { hireName, slug as nameId, isShellId, shellId } from '../names.ts'
 
 // Unpackaged, Electron names itself and the dock says "Electron" with the
 // default icon. The packaged app gets both from electron-builder; this is only
@@ -118,12 +118,13 @@ const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
 const ptys = new PtyManager()
 
 /**
- * The plain shell that sits in the tab beside the agents.
+ * The plain shells that sit in the tab beside the agent terminals - one per
+ * agent, in that agent's directory.
  *
- * Its own manager rather than a reserved id inside `ptys`, because everything
+ * Their own manager rather than reserved ids inside `ptys`, because everything
  * that reads `ptys.list()` - the roster, the floor file, the reaper, stand-down
- * on a workflow change - would otherwise have to learn to skip it, and the one
- * that forgot would show a row nobody hired and stop it on the next sweep.
+ * on a workflow change - would otherwise have to learn to skip them, and the
+ * one that forgot would show a row nobody hired and stop it on the next sweep.
  * Separate maps cannot leak, and the class is reused whole.
  */
 const shells = new PtyManager()
@@ -136,12 +137,39 @@ const waiting = new Map<string, string>()
 /**
  * Questions agents have addressed to the human, and what was said back.
  *
- * On disk rather than in a `Map`: answering used to delete the entry, so the
- * question and the answer both went the moment they were dealt with, and what
- * had already been decided was unknowable an hour later.
+ * On disk rather than in a `Map` so that answering does not delete the entry:
+ * within a run, what has already been decided is still readable an hour later.
+ * The file does not outlive the run - see below.
  */
 const asks = new Asks(asksPath(BULLPEN_HOME))
 let questionSeq = Date.now()
+
+/**
+ * The board and the ask-me queue belong to one run of the app, and are emptied
+ * here rather than carried over.
+ *
+ * Both are keyed to agents, and no agent survives a quit: a card is shown one
+ * agent at a time, so a card whose agent did not come back is on disk with
+ * nothing on screen that can reach it, and a question is something an agent is
+ * stopped on, which nothing is any more. Thirty-four of fifty-four cards were
+ * in that state on the machine this was written on, and unreachable-on-disk is
+ * indistinguishable from deleted - so they are deleted, at a moment somebody
+ * can point at, instead of accumulating in a file that only ever grows.
+ *
+ * Both write through, so this is also what the files hold from here on.
+ * Triggers, rules, workflows and config are untouched: those are setup, not
+ * work in flight.
+ *
+ * Module scope, before anything reads either of them - `wire()` answers
+ * `board:tasks` and `ask:list`, and the renderer asks for both on first paint.
+ */
+const droppedCards = board.clearTasks()
+const droppedAsks = asks.clear()
+if (droppedCards || droppedAsks) {
+  console.log(
+    `[bullpen] new run: dropped ${droppedCards} card(s) and ${droppedAsks} question(s) from the last one`
+  )
+}
 
 
 /**
@@ -3541,6 +3569,10 @@ function wire(): void {
   ipcMain.handle('agent:forget', (_e, id: string) => {
     approvals.clearSteers(id)
     approvals.clearPending(id)
+    // The row is gone, so nothing will ever open this shell again. Left alone
+    // it is a shell in a directory nobody is working in, alive until the app
+    // quits - once per agent ever fired.
+    shells.kill(shellId(id))
     forgetAgent(id)
     return true
   })
@@ -3548,8 +3580,9 @@ function wire(): void {
   // floor reloads the window and leaves the agents that have a place on the new
   // one running, so the renderer comes back with an empty xterm attached to a
   // pty that has already printed everything it is going to.
-  // One id belongs to the shell and the rest to agents - see `shells` above.
-  const ptyFor = (id: string): PtyManager => (id === SHELL_ID ? shells : ptys)
+  // A `~shell:` id belongs to a shell and everything else to an agent - see
+  // `shells` above.
+  const ptyFor = (id: string): PtyManager => (isShellId(id) ? shells : ptys)
   ipcMain.handle('pty:backlog', (_e, id: string) => ptyFor(id).backlog(id))
   ipcMain.on('pty:write', (_e, id: string, data: string) => ptyFor(id).write(id, data))
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) =>
@@ -3557,24 +3590,29 @@ function wire(): void {
   )
 
   /**
-   * Open the shell tab. Idempotent, and the only way the shell is ever spawned.
+   * Open one agent's shell. Idempotent, and the only way a shell is spawned.
    *
-   * Called on every switch to the tab rather than once at startup: a shell
-   * nobody opens is a process nobody asked for, and a shell somebody exited has
-   * to be able to come back without a restart of the app.
+   * Called on every switch to the tab and every change of selection, rather
+   * than once at startup: a shell nobody opened is a process nobody asked for,
+   * and a shell somebody exited has to come back without restarting the app.
    *
    * `SHELL`/`COMSPEC` rather than a hard-coded path - the operator's login shell
    * is the one their rc files configure, and guessing zsh on a machine running
    * fish drops them somewhere they do not recognise.
    */
-  ipcMain.handle('shell:open', (_e, cols: number, rows: number) => {
-    const existing = shells.list().find((s) => s.id === SHELL_ID)
-    if (existing && shells.isRunning(SHELL_ID)) return existing
+  ipcMain.handle('shell:open', (_e, agentId: string, cols: number, rows: number) => {
+    const id = shellId(agentId)
+    const existing = shells.list().find((s) => s.id === id)
+    if (existing && shells.isRunning(id)) return existing
     const cmd =
       process.platform === 'win32'
         ? (process.env.COMSPEC ?? 'powershell.exe')
         : (process.env.SHELL ?? '/bin/sh')
-    return shells.spawn({ id: SHELL_ID, cwd: currentGodCwd(), cmd, args: [], cols, rows })
+    // The agent's directory, not the boss's: the shell beside an agent is for
+    // looking at what that agent is working on. An agent that has gone leaves
+    // its shell nowhere to open, so that falls back rather than throwing.
+    const cwd = ptys.list().find((a) => a.id === agentId)?.cwd ?? currentGodCwd()
+    return shells.spawn({ id, cwd, cmd, args: [], cols, rows })
   })
 
   // Triggers only fire at an idle agent. Injecting a scheduled prompt into a

@@ -139,3 +139,22 @@ test('a work report goes to the monitor and a question stays in the queue', () =
   // `redis or postgres` is the trap - it starts with "re".
   assert.ok(!REPORTING.test('redis or postgres'), 'a word beginning with "re" is not "re:"')
 })
+
+test('a new run starts with an empty queue, on disk as well as in memory', () => {
+  // The board and the ask-me queue belong to one run: every agent dies with the
+  // app, so on the next one the whole list is questions nobody is waiting on an
+  // answer to. Main calls this once, at module scope, before anything reads it.
+  const { asks, root } = fresh()
+  asks.add(ask('q1', 'go?'))
+  asks.add(ask('q2', 'this one is answered'))
+  asks.answer('q2', 'yes')
+
+  assert.equal(asks.clear(), 2)
+  assert.deepEqual(asks.all(), [])
+  assert.deepEqual(asks.pending(), [])
+  // Written through, not just emptied in memory - the next run reads the file.
+  assert.deepEqual(new Asks(asksPath(root)).all(), [])
+  // An already-empty queue clears to nothing.
+  assert.equal(asks.clear(), 0)
+  rmSync(root, { recursive: true, force: true })
+})

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PRESETS, SHELL_ID, hireName, slug } from '../src/names.ts'
+import { PRESETS, SHELL_PREFIX, hireName, isShellId, shellId, slug } from '../src/names.ts'
 
 test('a hire gets a name off the roster, not a numbered slug', () => {
   assert.equal(hireName('seo', () => false), PRESETS[0])
@@ -71,13 +71,14 @@ test('every name a hire can get is already the id it will be spawned under', () 
 })
 
 
-test('no hire can ever be given the shell\'s pty id', () => {
-  // main routes `pty:write`/`pty:resize`/`pty:backlog` on SHELL_ID to a second
-  // PtyManager. An agent that could be slugged to the same id would have its
-  // keystrokes delivered to the shell instead of to its own CLI, silently.
-  assert.equal(slug(SHELL_ID), 'shell')
-  assert.notEqual(slug(SHELL_ID), SHELL_ID)
-  for (const name of [...PRESETS, 'shell', '~shell', 'Shell', '~', '  ~shell  ']) {
-    assert.notEqual(slug(name), SHELL_ID, `${name} slugs onto the shell`)
+test('no hire can ever be given a shell pty id', () => {
+  // main routes `pty:write`/`pty:resize`/`pty:backlog` on a `~shell:` id to a
+  // second PtyManager. An agent that could be slugged onto one would have its
+  // keystrokes delivered to a shell instead of to its own CLI, silently.
+  assert.equal(shellId('morgan'), '~shell:morgan')
+  assert.ok(isShellId(shellId('morgan')))
+  assert.equal(isShellId('morgan'), false)
+  for (const name of [...PRESETS, 'shell', '~shell', 'Shell', '~shell:morgan', SHELL_PREFIX]) {
+    assert.equal(isShellId(slug(name)), false, `${name} slugs onto a shell`)
   }
 })

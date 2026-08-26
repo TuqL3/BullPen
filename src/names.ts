@@ -69,12 +69,20 @@ export function slug(name: string): string {
 }
 
 /**
- * The pty id of the plain shell in the window, which is not an agent.
+ * The pty ids of the plain shells, which are not agents.
+ *
+ * One shell per agent, in that agent's directory: the tab follows the roster
+ * selection the same way the terminal does, and a shell that stayed in the
+ * boss's directory while the row below it changed was a shell in the wrong
+ * repository - which is the kind of wrong that is only noticed after the
+ * command has run.
  *
  * Here rather than written twice because both sides of the wire have to agree
- * on it and neither can import the other's modules: main routes `pty:*` on
- * this id to a second PtyManager, and the renderer opens a terminal on it.
- * `slug` above strips everything but `[a-z0-9-]`, so no hire can ever produce
- * this id and take the shell's place.
+ * on them and neither can import the other's modules: main routes `pty:*` on
+ * these ids to a second PtyManager, and the renderer opens terminals on them.
+ * `slug` above strips everything but `[a-z0-9-]`, so no hire can produce an id
+ * with a `~` or a `:` in it and take a shell's place.
  */
-export const SHELL_ID = '~shell'
+export const SHELL_PREFIX = '~shell:'
+export const shellId = (agentId: string): string => `${SHELL_PREFIX}${agentId}`
+export const isShellId = (id: string): boolean => id.startsWith(SHELL_PREFIX)

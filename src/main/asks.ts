@@ -92,6 +92,25 @@ export class Asks {
     return ask
   }
 
+  /**
+   * Empty the queue. Called once, at startup, and nowhere else.
+   *
+   * A question is something an agent is stopped on, and every agent dies with
+   * the app - so on the next run the whole list is questions nobody is waiting
+   * on an answer to any more, above answers to questions whose asker is gone.
+   * It goes with the session that produced it, the way the board does.
+   *
+   * Returns how many it dropped, the way `Board.clearTasks` does. A silent
+   * delete is not one anybody can check afterwards.
+   */
+  clear(): number {
+    const gone = this.data.length
+    if (!gone) return 0
+    this.data = []
+    this.save()
+    return gone
+  }
+
   /** Still waiting on a human. What the tab's badge counts. */
   pending(): Ask[] {
     return this.data.filter((a) => !a.answeredAt && !a.dismissedAt)

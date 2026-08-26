@@ -30,7 +30,7 @@ import {
   termPane,
   writeToTerminal
 } from './Terminal'
-import { SHELL_ID } from '../../names.ts'
+import { shellId } from '../../names.ts'
 import { getPrefs, setPrefs, type Prefs } from './prefs'
 import { FilePanel, Review, WorkTree } from './Code'
 // Not in `Code`: a module that exports anything but components loses React Fast
@@ -416,7 +416,8 @@ export default function App() {
   }, [])
 
   /**
-   * The shell is spawned by opening its tab, and never before.
+   * A shell is spawned by opening the tab on the agent it belongs to, and never
+   * before. Selecting a different agent below opens that one's.
    *
    * A shell nobody has looked at is a process nobody asked for. `shell:open` is
    * idempotent, so running this on every visit rather than once also covers
@@ -426,12 +427,20 @@ export default function App() {
    * Sized from the pane before the spawn, like an agent's pty is: a shell that
    * starts at 80 columns and is told the truth a beat later has already drawn
    * its prompt - and whatever the rc file prints above it - at the wrong width.
+   *
+   * And fitted again once the spawn has answered. The two measurements are not
+   * the same one - `paneSize` divides the pane by a probe glyph, xterm's fit
+   * divides its own element by its own - and the resize that would have settled
+   * the difference is sent while the pty is still being spawned, where it lands
+   * on nothing. That was the dead strip down the right of the pane: the process
+   * was drawing to a narrower terminal than the one on screen.
    */
   useEffect(() => {
-    if (tab !== 'shell') return
+    if (tab !== 'shell' || !selected) return
+    const id = selected
     const { cols, rows } = paneSize(termPane())
-    void window.bullpen.shellOpen(cols, rows)
-  }, [tab])
+    void window.bullpen.shellOpen(id, cols, rows).then(() => refit(shellId(id)))
+  }, [tab, selected])
 
   /**
    * "Open With - Bullpen" on a folder, from Finder.
@@ -735,6 +744,8 @@ export default function App() {
     // this the xterm instance and its 10k lines of scrollback stay alive for
     // the life of the window, once per agent ever fired.
     disposeTerminal(a.id)
+    // Its shell went with it in main; this is the buffer on this side.
+    disposeTerminal(shellId(a.id))
   }
 
   /**
@@ -1034,10 +1045,14 @@ export default function App() {
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
               <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
             </div>
-            {/* Kept mounted for the same reason, and it is one terminal rather
-                than a deck: there is one shell, not one per agent. */}
+            {/* A deck, like the terminals above: one shell per agent, and the
+                selected row decides which of them is on screen. Kept mounted
+                for the same reason - unmounting drops the scrollback. */}
             <div style={{ height: '100%', display: tab === 'shell' ? 'block' : 'none' }}>
-              <TerminalHost id={SHELL_ID} visible={tab === 'shell'} />
+              {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
+              {agents.map((a) => (
+                <TerminalHost key={a.id} id={shellId(a.id)} visible={a.id === selected} />
+              ))}
             </div>
             {tab === 'monitor' && (
               <Monitor

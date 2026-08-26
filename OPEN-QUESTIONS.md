@@ -2303,20 +2303,58 @@ shell here inherits it. If it turns out an rc file the operator depends on is
 only read by a login shell, this comes up as "my aliases are missing" and the
 fix is `args: ['-l']`.
 
-**It opens in `currentGodCwd()`** — the boss's directory, not the selected
-agent's. Selecting an agent does not move a shell that is already running, so
-the alternative would have the directory change under a command someone was
-half way through typing. If per-agent shells are wanted, the id has to stop
-being a constant.
+**One shell per agent, in that agent's directory** — the tab follows the roster
+selection the way the terminal tab does. It was one shared shell in the boss's
+directory for one commit, and that is worse than it sounds: the row underneath
+said `morgan` while the prompt was in the boss's checkout, so the directory a
+command ran in was not the one the window said it was in. Shells are keyed
+`~shell:<agentId>`, spawned on first view of that agent's tab and killed with
+the agent when it is fired.
 
-**There is exactly one.** SHELL_ID is a single reserved id. A second shell needs
-an id per tab and a deck, the way the agent terminals already work.
+**Nothing re-opens a shell in the background.** Its directory is read once, at
+spawn. An agent restarted into a different directory keeps the shell it had -
+the alternative moves the ground under a command someone is half way through
+typing. `cd` is the fix, or fire and re-hire.
 
 **It is spawned by opening the tab, and killed with the app.** A shell nobody
 opened is a process nobody asked for. `exit` inside it prints a line and the
 next visit to the tab spawns a fresh one; nothing restarts it in the background.
 
+**The pane is fitted twice, and the second one is not redundant.** `paneSize`
+divides the pane by a probe glyph and xterm's `fit` divides its own element by
+its own measurement; they disagree by a few columns. The spawn is sized from
+the first, and the resize that would settle the difference is sent while the
+pty is still being created, where it lands on nothing - so the process drew to
+a narrower terminal than the one on screen and left a dead strip down the right
+of the pane. `refit` after the spawn answers is what closes it.
+
 What does *not* break: the shell cannot be mistaken for an agent. It lives in a
 second `PtyManager`, so `ptys.list()` — which the roster, the floor file, the
 reaper and stand-down all read — never sees it, and `slug()` cannot produce
 `~shell`, so no hire can take its id (asserted in `test/names.test.ts`).
+
+## 70. The board and the ask-me queue are one run's, not a record
+
+Both files persisted across quits and neither could be fully read after one.
+
+A card is keyed to an agent id and the tab shows one agent's cards at a time,
+so a card whose agent did not come back is on disk with nothing on screen that
+can reach it. On the machine this was found on: 54 cards, 13 owners, 3 agents
+on the floor — 34 cards unreachable. A question is something an agent is
+stopped on, and no agent survives a quit, so the whole queue came back as
+questions nobody was waiting on an answer to.
+
+Unreachable-on-disk is indistinguishable from deleted, and it was reported as
+"the app deleted my tasks". So they are deleted, at a moment somebody can point
+at: `board.clearTasks()` and `asks.clear()` at module scope in main, before
+`wire()` answers `board:tasks` or `ask:list`, with a line in the log saying how
+many went.
+
+**What this assumes:** that nothing on the board is worth carrying between
+runs. If a card ever needs to outlive the session, this is the line that has to
+go, and the thing that has to be built instead is a card that can be reached
+without its agent — an "all" view, or an owner who is a role rather than a pid.
+
+**Untouched, on purpose:** triggers, rules, workflows, config, activity, the
+mailbox. Those are setup, not work in flight. `board.clearTasks()` was already
+there for the floor-change path and empties only `tasks`.
