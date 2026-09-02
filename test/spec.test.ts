@@ -163,3 +163,46 @@ test('the shipped floors satisfy the spec they are shipped beside', () => {
     assert.deepEqual(left, [], `"${w.name}" contradicts its own reference`)
   }
 })
+
+/**
+ * The language is the app's answer, not the machine's standing preference.
+ *
+ * `ask` shells out to the operator's own `claude`, which reads their
+ * `~/.claude/CLAUDE.md` before it reads a word of this brief - so an operator
+ * who has told Claude Code to always answer in their own language had told the
+ * floor writer too. A floor drawn from an English repo, against an English
+ * format doc, came out in another language: nothing in the prompt asked for
+ * that, and nothing in it outranked the standing instruction either.
+ */
+test('the generator is told which language to write, and told last', () => {
+  const said = generatorBrief(REFERENCE, '', 'English')
+
+  // Both places: where the rule is explained, and again at the end, because a
+  // specific instruction at the end is what outranks a general one.
+  const named = said.split('\n').filter((l) => /a person reads in English\b/.test(l))
+  assert.equal(named.length, 2, `said once and said again: ${named.length}`)
+  assert.match(
+    said.slice(said.lastIndexOf('THE LANGUAGE, ONCE MORE')),
+    /standing instruction/i,
+    'and says out loud what it is overriding'
+  )
+  assert.ok(
+    said.lastIndexOf('THE LANGUAGE, ONCE MORE') > said.length - 1200,
+    'the reminder is at the end, where it can win'
+  )
+
+  // Whatever the language, the words matched as text are never translated.
+  for (const wire of ['`done:`', '`fail:`', 'column keys', '`opens a card`', '`closes it`']) {
+    assert.ok(said.includes(wire), `${wire} is named as a wire word`)
+  }
+
+  // The other caller passes a phrase rather than a language, and it reads.
+  assert.match(
+    generatorBrief(REFERENCE, '', 'the same language this description is written in'),
+    /a person reads in the same language this description is written in\./
+  )
+
+  // Nothing passed keeps what it did before, so an older caller is not silently
+  // switched to a language nobody chose.
+  assert.match(generatorBrief(REFERENCE), /a person reads in the language the request came in\./)
+})

@@ -39,10 +39,53 @@ import {
  * this has always been; a false positive is work that never appears at all.
  */
 export const REPLY =
-  /^\s*(re|reply|answer|answered|correction|corrected|clarification|question|note|fyi|ack|update|status|done|pass|passed|fail|failed|blocked|stuck|error|finished|shipped|delivered|confirmed)\s*:/i
+  /^\s*(re|reply|answer|answered|correction|corrected|clarification|question|note|fyi|ack|update|status|done|pass|passed|fail|failed|bug|bugs|blocked|stuck|error|finished|shipped|delivered|confirmed)\s*:/i
 
 /** Whether this subject is talk about a card rather than a new one. */
 export const isReply = (subject: string): boolean => REPLY.test(subject)
+
+/**
+ * The two words a report starts with, as the board reads them.
+ *
+ * Every brief on every floor is handed the same sentence - start a report with
+ * `done: ` when it is finished and `fail: ` when it is not - and these are what
+ * that sentence is worth. `said` reads them when no rule matched, and
+ * `isReport` reads them to tell an outcome from a progress line.
+ *
+ * Every word is spelled out with the endings people actually type. `\b` binds
+ * to the end of the word it follows, so `pass\b` never matched "passed" and
+ * `bug\b` never matched "bugs" - and "bugs: ..." is the subject the shipped
+ * tester brief tells a tester to send its bug list under. Read as neither
+ * outcome, a whole round of bugs was taken for a pass and closed the build it
+ * was reporting against.
+ */
+export const DONE_SAID = /^\s*(done|pass|passes|passed|finished|shipped|ok)\b/i
+export const FAILED_SAID =
+  /^\s*(fail|fails|failed|bug|bugs|broke|broken|block|blocked|stuck|error|errors)\b/i
+
+/**
+ * Whether a subject reports an outcome at all, rather than progress.
+ *
+ * `report`, `update` and `status` are a floor saying where it stands, and the
+ * app asks for one by name every time the floor goes quiet. Moving a card on
+ * those closes work that is still being done - so a rule about a pair is
+ * honoured only once somebody says which way it went.
+ */
+export const isReport = (subject: string): boolean =>
+  DONE_SAID.test(subject) || FAILED_SAID.test(subject)
+
+/**
+ * A subject that reports a failure, as opposed to describing one.
+ *
+ * The same words, anchored on the colon. `said` and `testerReported` read a
+ * report that has already been identified as one, and there the bare word is
+ * the safer reading. `stuckInstead` is asked about *every* message a rule
+ * matches - the work being handed over as well as the news coming back - and
+ * "error handling for the parser" is a task somebody was given, not a task that
+ * broke. The colon is what every brief on every floor actually writes.
+ */
+export const REPORTED_FAIL =
+  /^\s*(fail|fails|failed|bug|bugs|broke|broken|block|blocked|stuck|error|errors)\s*:/i
 
 export type CardMove =
   /** Give `agent` a new card, unless it already has that exact one. */
@@ -85,13 +128,27 @@ export function routeCard(
    * last one: reporting to the human returns before the loop body gets this
    * far, so a boss writing "blocked: the human has to decide this" closed its
    * own card as shipped - on the one hand-off the operator actually reads.
+   *
+   * Any column, not only the finished one. It asked `status === done` first,
+   * which reads as "a failure must not be mistaken for delivery" and is only
+   * half of it: a floor whose builder reports to its boss on a line drawn to
+   * `in review` had a build that failed verify three times sitting in the
+   * column that means somebody is about to check it. A `fail:` never moves a
+   * card *forward*, whichever column forward happens to be called.
+   *
+   * Two things pay for the wider reach. The colon, because without it every
+   * line also carries the work itself and "error handling for the parser" is a
+   * task, not a report - the same call `isReply` makes, for the same reason.
+   * And `whose`, because "checks → builds: doing (their card)" moves the card
+   * of the agent being written *to*, and the sender's bad news is not a
+   * statement about the reader: the developer a bug list goes back to is not
+   * the one who is stuck.
    */
-  const stuckInstead = (status: string): string | null =>
-    status === columnFor(w, 'done') &&
-    hasColumn(w, 'stuck') &&
-    /^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(msg.subject)
-      ? columnFor(w, 'stuck')
-      : null
+  const stuckInstead = (status: string, whose?: 'from' | 'to'): string | null => {
+    if (whose === 'to' || !hasColumn(w, 'stuck')) return null
+    if (status === columnFor(w, 'stuck')) return null
+    return REPORTED_FAIL.test(msg.subject) ? columnFor(w, 'stuck') : null
+  }
 
   // What the floor wrote, or - when it wrote nothing - what the roles and the
   // board already imply. A drawing with boxes and arrows on it moves cards
@@ -108,7 +165,16 @@ export function routeCard(
     // human is not an agent - no role to match, and no card of their own.
     if (rule.to === human) {
       if (msg.to !== human) continue
-      const where = stuckInstead(rule.status) ?? rule.status
+      // A pass told to the human is still a pass. `closes it` was read only on
+      // the way to another agent, so a floor whose reviewer is the one that
+      // decides - and reports that to the operator, because the operator is who
+      // commits - wrote the rule that says so and it never fired: the reviewer's
+      // own card closed on the `done:` fallback and the build it had just passed
+      // stayed open forever.
+      if (rule.status === 'closes') {
+        return { kind: 'checked', agent: msg.from, subject: msg.subject }
+      }
+      const where = stuckInstead(rule.status, rule.whose) ?? rule.status
       if (!w.columns.some((c) => c.key === where)) continue
       return { kind: 'move', agent: msg.from, status: where }
     }
@@ -136,7 +202,7 @@ export function routeCard(
     // Whose card the line moves: the sender's, or the one being written to.
     const agent = rule.whose === 'to' ? msg.to : msg.from
 
-    const held = stuckInstead(rule.status)
+    const held = stuckInstead(rule.status, rule.whose)
     if (held) return { kind: 'move', agent, status: held }
     // The one place a rule is overruled: the column work waits in to be
     // checked is not somewhere to leave a card on a floor where nobody checks.

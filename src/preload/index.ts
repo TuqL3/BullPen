@@ -346,6 +346,26 @@ const api = {
     description: string
   ): Promise<{ markdown?: string; problems?: string[]; error?: string }> =>
     ipcRenderer.invoke('workflow:generate', description),
+  /**
+   * The same, drawn from a repo that already holds how the operator works.
+   *
+   * Public GitHub repos only so far. Slower than the sentence - a read of the
+   * repo, then the same model turn - and it stops at a preview: what comes back
+   * is a model's reading of somebody's files, and it becomes the system prompt
+   * of every agent on the floor, so a person looks at it before it is applied.
+   *
+   * `read` is which files it actually took, so the preview can say what it was
+   * drawn from rather than leaving that to be guessed.
+   */
+  workflowFromRepo: (
+    url: string
+  ): Promise<{
+    markdown?: string
+    problems?: string[]
+    error?: string
+    source?: string
+    read?: string[]
+  }> => ipcRenderer.invoke('workflow:fromRepo', url),
   /** An annotated empty floor, for a first workflow. */
   /** A new chart: you, the boss you dispatch to, a worker under them, and the rules between. */
   workflowBlank: (): Promise<string> => ipcRenderer.invoke('workflow:blank'),

@@ -99,18 +99,37 @@ rather than quietly blank.
 - `{{hireAbovePct}}` — the hire threshold
 - `{{your own}}` — anything declared on the role or the floor
 
+Declare the floor's own under a `## words` section, one per line, and every
+brief may then use it:
+
+```
+## words
+- {{workdir}} — .claude/work/<slug>
+- {{rules}} — rules/engineering.md
+```
+
+A brace nothing declares reaches the agent as the brace itself, which is what
+`brief-placeholders` is for.
+
 ## law
 
-Each line here is a check that runs against every floor. There are two: a floor
-is otherwise whatever you drew, and nothing else is refused for being
+Each line here is a check that runs against every floor. There are seven: a
+floor is otherwise whatever you drew, and nothing else is refused for being
 half-finished or for not looking like the one Bullpen ships.
 
 - `dispatch-hands-off` — the role a task is typed at must be able to write to at least one other role. It decides who does the work; it is not the one who does it.
 - `lines-have-rules` — on a floor that writes its own card rules, every line between two roles must be covered by one, or work handed along it moves nothing and the board says nobody is working.
+- `brief-placeholders` — every `{{...}}` a brief writes must be one the app fills in or one this floor declares under `## words`, or the agent is handed the braces themselves in its own system prompt.
+- `dispatch-reports` — on a floor that writes its own card rules, one of them must say what the dispatch role telling the human does to the board, or the card opened when a task is typed at the floor never closes.
+- `closes-is-a-check` — only a role holding a capability marked `(checks)` may write `closes it`. Closing finishes the sender's card and the work being checked, so writing it anywhere else makes that role a checker without saying so.
+- `cards-open-and-close` — on a floor that writes its own card rules, a rule may only move a card for somebody another rule opens one for, and every role given a card must have a rule that finishes it. A card that was never opened cannot move, and one nothing closes is left on the board after every task.
+- `capabilities-have-kinds` — every role holds at least one capability that says in brackets which of the four it behaves like. The name is the floor's own; the bracket is what answers "who hands work out", "who does it", "who decides it passed" and "who answers the human", and a role with no bracket anywhere is classified by whatever is left over. A word named for one of the four says which it is by saying it, and an unbracketed one beside a bracketed one is a name for the card rules to match on.
 
 Add another by writing its id and what it should say - the ids the app knows are
 `names-exist`, `one-voice`, `voice-is-told`, `must-open`, `must-finish`,
 `dispatch-has-agent`, `dispatch-hands-off`, `lines-have-rules`, `builds-exist`,
 `can-hire`, `reachable`, `brief-obeys-talks-to`, `thresholds-ordered`,
-`no-blanks`, `unique-keys`, `roles-are-complete` and `addresses-are-not-roles`. An id nothing
-knows is ignored. Take a line out and that check stops running.
+`no-blanks`, `unique-keys`, `roles-are-complete`, `brief-placeholders`,
+`dispatch-reports`, `closes-is-a-check`, `cards-open-and-close`,
+`capabilities-have-kinds` and `addresses-are-not-roles`. An id nothing knows is
+ignored. Take a line out and that check stops running.

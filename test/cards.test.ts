@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { routeCard, type CardMove } from '../src/main/cards.ts'
+import { DONE_SAID, FAILED_SAID, isReport, routeCard, type CardMove } from '../src/main/cards.ts'
 import { DEFAULT_WORKFLOW, PRESETS } from './floors.ts'
 import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 import type { Workflow } from '../src/main/workflow.ts'
@@ -380,4 +380,113 @@ test('answering about a card does not open another one', () => {
   assert.equal(move(CHAIN, 'michael', 'ba', 'update the pricing page')?.kind, 'open')
   assert.equal(move(CHAIN, 'michael', 'ba', 'note every endpoint that writes')?.kind, 'open')
   assert.equal(move(CHAIN, 'michael', 'ba', 'pass the export through the linter')?.kind, 'open')
+})
+
+/**
+ * The words a report starts with, spelled the way people type them.
+ *
+ * `\b` binds to the end of the word in front of it, so `pass\b` never matched
+ * "passed" and `bug\b` never matched "bugs" - and both of those are what the
+ * shipped tester brief tells a tester to write. A bug list read as neither
+ * outcome, which on a floor whose rule is `closes it` meant a whole round of
+ * bugs closed the build it was reporting against.
+ */
+test('a bug list is a failure and a pass is a pass, however they are spelled', () => {
+  for (const said of ['done: it', 'pass: it', 'passed: it', 'finished: it', 'shipped: it', 'ok: it']) {
+    assert.ok(DONE_SAID.test(said), `"${said}" says the work finished`)
+    assert.ok(!FAILED_SAID.test(said), `"${said}" does not say it failed`)
+    assert.ok(isReport(said), `"${said}" is an outcome`)
+  }
+  for (const said of ['fail: it', 'failed: it', 'bug: one', 'bugs: three of them', 'blocked: it', 'stuck: it', 'error: it']) {
+    assert.ok(FAILED_SAID.test(said), `"${said}" says it did not`)
+    assert.ok(!DONE_SAID.test(said), `"${said}" is not a pass`)
+    assert.ok(isReport(said), `"${said}" is an outcome`)
+  }
+
+  // Progress is not an outcome. The app asks the dispatch agent for one of
+  // these by name every time the floor goes quiet, and a rule that fired on it
+  // would close work still being done.
+  for (const said of ['report', 'report: where it stands', 'update: four more', 'status: nothing moved', 'question: which db']) {
+    assert.ok(!isReport(said), `"${said}" is progress, not an outcome`)
+  }
+})
+
+/** And the same words, read through a rule that lands on the finished column. */
+test('a rule that finishes work does not finish it when the report says it broke', () => {
+  const up = { ...CHAIN, cardRules: [{ from: 'ba', to: 'god', status: 'done' }] } as Workflow
+  assert.deepEqual(move(up, 'ba', 'michael', 'done: the parser shipped'), {
+    kind: 'move',
+    agent: 'ba',
+    status: 'done'
+  })
+  for (const said of ['bugs: three of them', 'failed: it will not build', 'blocked: your call']) {
+    assert.equal(
+      (move(up, 'ba', 'michael', said) as { status: string }).status,
+      'blocked',
+      `"${said}" is not work delivered`
+    )
+  }
+})
+
+/**
+ * A failure never moves a card forward, whatever forward is called here.
+ *
+ * This asked `status === done` first, which reads as "delivery and failure must
+ * not be confused" and is only half of it. A pair gets one rule and the same
+ * line carries both, so a floor whose builder reports on a line drawn to `in
+ * test` had a build that failed verify three times sitting in the column that
+ * means somebody is about to check it - the board saying work was ready while
+ * the agent behind it was waiting to be told what to do.
+ */
+test('a fail: is sent to stuck from any column, not only from the finished one', () => {
+  // `builds → checks: wait_test` - the middle of the board, not the end of it.
+  assert.equal((move(CHAIN, 'dave', 'quinn', 'done: built it') as { status: string }).status, 'wait_test')
+  for (const said of ['fail: verify is red', 'bugs: three of them', 'blocked: need a decision']) {
+    assert.equal(
+      (move(CHAIN, 'dave', 'quinn', said) as { status: string }).status,
+      'blocked',
+      `"${said}" is not a build going for a check`
+    )
+  }
+
+  // The colon is what pays for the wider reach. Every line also carries the
+  // work itself, and a task called "error handling for the parser" is a job
+  // somebody was given rather than a job that broke.
+  assert.equal(
+    (move(CHAIN, 'dave', 'quinn', 'error handling for the parser') as { status: string }).status,
+    'wait_test',
+    'a task that opens with a status word is still a task'
+  )
+
+  // And not when the card being moved is the reader's. `checks → builds: doing
+  // (their card)` is a bug list going back, and the developer it goes back to
+  // is not the one who is stuck - they have just been given work.
+  const back = move(CHAIN, 'quinn', 'dave', 'bugs: three of them') as { agent: string; status: string }
+  assert.deepEqual(back, { kind: 'move', agent: 'dave', status: 'doing' } as never)
+})
+
+/**
+ * A pass told to the human is still a pass.
+ *
+ * `closes it` was read only on the way to another agent. A floor that puts the
+ * one who decides at the end of the chain - reporting to the operator, because
+ * on that floor the operator is who commits - wrote the rule that says so and
+ * it never fired: the rule was skipped for not naming a column, the reviewer's
+ * own card closed on the `done:` fallback, and the build it had just passed
+ * stayed open for good.
+ */
+test('a checker that reports its pass to the human still closes the work', () => {
+  const w = { ...CHAIN, cardRules: [{ from: 'checks', to: HUMAN, status: 'closes' }] } as Workflow
+  assert.deepEqual(move(w, 'quinn', HUMAN, 'done: it passed'), {
+    kind: 'checked',
+    agent: 'quinn',
+    subject: 'done: it passed'
+  })
+  // A fail down the same line is the checker saying it did not pass, and
+  // `testerReported` is what tells those two apart - the rule cannot.
+  assert.deepEqual(move(w, 'quinn', HUMAN, 'fail: it did not'), {
+    kind: 'checked',
+    agent: 'quinn',
+    subject: 'fail: it did not'
+  })
 })

@@ -2027,12 +2027,14 @@ function FloorsPanel({
   /**
    * Which way a new floor is being made, if one is.
    *
-   * `pick` is the two ways offered; `ai` is the box you say it in. Both were
-   * one step - a textarea with `a blank one` beside it - and a blank floor,
-   * which is the faster of the two and the one that needs nothing typed, sat
-   * behind a box asking you to type.
+   * `pick` is the ways offered; `ai` is the box you say it in and `repo` is the
+   * box you paste a link into. They were one step - a textarea with `a blank
+   * one` beside it - and a blank floor, which is the faster of the two and the
+   * one that needs nothing typed, sat behind a box asking you to type.
    */
-  const [making, setMaking] = useState<'' | 'pick' | 'ai'>('')
+  const [making, setMaking] = useState<'' | 'pick' | 'ai' | 'repo'>('')
+  /** The repo a floor is being read out of, while that is being typed. */
+  const [repoUrl, setRepoUrl] = useState('')
   /** Which way is under the pointer. Inline styles have no `:hover`. */
   const [hover, setHover] = useState('')
 
@@ -2090,7 +2092,46 @@ function FloorsPanel({
       setSaid('')
       setMaking('')
       list()
-      if (res.problems?.length) setError(`Drawn, with something left: ${res.problems[0]}`)
+      if (res.problems?.length) setError(`Drawn, with something left: ${left(res.problems)}`)
+    }
+  }
+
+  /**
+   * Read a repo that already holds how the work goes, and draw that.
+   *
+   * The same ending as `describe` on purpose: drawn onto the canvas, not
+   * applied. What comes back is a model's reading of somebody else's files, on
+   * its way to being the system prompt of every agent this app spawns - so it
+   * lands where a person is already looking at it and has to press save.
+   */
+  /**
+   * The first thing wrong with a drawn floor, and how much else there is.
+   *
+   * One line was all this said, and a floor read off a repo comes back with one
+   * problem per brief - four roles told to run a skill their own repo will not
+   * let an agent start, of which the operator saw the first and had no reason to
+   * think there were three more.
+   */
+  const left = (problems: string[]): string =>
+    problems.length > 1 ? `${problems[0]} (+${problems.length - 1} more)` : problems[0]
+
+  const fromRepo = async (): Promise<void> => {
+    const url = repoUrl.trim()
+    if (!url) return
+    setBusy('repo')
+    setError('')
+    const res = await window.bullpen.workflowFromRepo(url)
+    setBusy('')
+    if (res.error) return setError(res.error)
+    if (res.markdown) {
+      await run(res.markdown, false)
+      // Which files, not just how many: a floor drawn from a repo that turned
+      // out to hold one README is a floor worth looking at twice.
+      setNote(`drawn from ${res.source ?? url} — read ${(res.read ?? []).join(', ') || 'nothing'}`)
+      setRepoUrl('')
+      setMaking('')
+      list()
+      if (res.problems?.length) setError(`Drawn, with something left: ${left(res.problems)}`)
     }
   }
 
@@ -2120,6 +2161,11 @@ function FloorsPanel({
                 true,
                 () => setMaking('ai')
               ],
+              // ponytail: 'from a repo' is hidden, not deleted - the panel below
+              // and its handler still stand, so putting the entry back is the
+              // whole of turning it on again. A floor drawn from a repo can
+              // still name a command the repo will not let an agent start, and
+              // it reads as a working floor right up until nothing moves.
               [
                 'new',
                 'a blank floor',
@@ -2160,6 +2206,39 @@ function FloorsPanel({
             <span style={{ flex: 1 }} />
             <button style={S.btn} disabled={busy !== ''} onClick={() => setMaking('')}>
               cancel
+            </button>
+          </div>
+        </div>
+      ) : making === 'repo' ? (
+        <div style={{ margin: '0 0 10px' }}>
+          <div style={{ ...LABEL, marginBottom: 4 }}>the repo that holds how you work</div>
+          <input
+            style={{ ...S.area, height: 'auto', fontSize: 12.5 }}
+            value={repoUrl}
+            autoFocus
+            spellCheck={false}
+            placeholder="https://github.com/you/claude-config"
+            onChange={(e) => setRepoUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && repoUrl.trim() && busy === '') void fromRepo()
+            }}
+          />
+          <div style={{ color: 'var(--faint)', lineHeight: 1.6, marginTop: 6 }}>
+            Public GitHub repos, read-only: its README, rules, skills and agents. What comes
+            back is drawn onto the canvas for you to read - nothing is applied until you save
+            it.
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+            <button
+              style={{ ...S.btn, ...(repoUrl.trim() ? S.btnGo : S.btnOff) }}
+              disabled={!repoUrl.trim() || busy !== ''}
+              onClick={fromRepo}
+            >
+              {busy === 'repo' ? 'reading it…' : 'read it'}
+            </button>
+            <span style={{ flex: 1 }} />
+            <button style={S.btn} disabled={busy !== ''} onClick={() => setMaking('pick')}>
+              back
             </button>
           </div>
         </div>

@@ -651,6 +651,42 @@ test('applying a floor by patch does what applying it by text does', async () =>
   )
 })
 
+/**
+ * Dispatch has to say what this floor's own chain says.
+ *
+ * The rules typed at the dispatch agent were chosen by `assistId`, which only
+ * ever named a role carrying a fixed `- agent:`. A floor whose analyst is
+ * `- hireable` has none, so every dispatch came back with the rules for a floor
+ * with nobody in between: read the roster, pick somebody, hire somebody - which
+ * that agent's own brief forbids, and which the gate then refuses. The work
+ * bounced before it reached anyone.
+ */
+test('dispatch relays down the chain whether the seat is filled or has to be hired into', async () => {
+  const hireable = {
+    ...CHAIN,
+    roles: { ...CHAIN.roles, ba: { ...CHAIN.roles.ba, fixed: undefined, hireable: true } }
+  }
+  const set = await main.invoke<{ error?: string }>('workflow:set', toMarkdown(hireable))
+  assert.equal(set.error, undefined, `a floor may hire its analyst: ${set.error}`)
+  const god = await main.invoke<{ id: string }>('god:ensure', { cols: 80, rows: 24 })
+
+  // Nobody in the seat: hire into it, by name, and nothing else.
+  main.pty(god.id).written.length = 0
+  await main.invoke('agent:dispatch', 'ship the thing', 'decide', '')
+  const cold = main.pty(god.id).written.join('')
+  assert.match(cold, /"hire"/, 'an empty seat is filled by hiring')
+  assert.match(cold, /"ba"/, 'into the role that hands work out')
+  assert.doesNotMatch(cold, /pick an agent/i, 'never the staff-it-yourself rules')
+
+  // Somebody in it: hand it to them, by id.
+  await hire('nadia', 'ba')
+  main.pty(god.id).written.length = 0
+  await main.invoke('agent:dispatch', 'ship the other thing', 'decide', '')
+  const warm = main.pty(god.id).written.join('')
+  assert.match(warm, /"nadia"/, 'a hired analyst is as much in the seat as a fixed one')
+  assert.doesNotMatch(warm, /pick an agent/i, 'and still never the old rules')
+})
+
 after(async () => {
   await main?.stop()
   rmSync(home, { recursive: true, force: true })

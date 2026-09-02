@@ -322,6 +322,42 @@ test('a confirmed card is worked through, an unconfirmed one only sits there', a
   assert.ok(!typed().includes('rewrite the world'), 'what was never confirmed is never handed over')
 })
 
+/**
+ * The human is a party to the floor, and mail to them moves the card.
+ *
+ * `you` is a reserved address, so it leaves the router by the ask queue rather
+ * than by `deliver` - and `routeCard` was never called on that path. Every
+ * `→ you` rule an operator wrote was a rule that never fired: the dispatch
+ * agent's own card sat in the first column forever while the dry run drew it
+ * closing, and one dispatched task left an open card behind it every time.
+ */
+test('the card closes when the floor tells the human it is done, and not before', async () => {
+  // An earlier test leaves another floor running, and `DONE` is this one's.
+  await main.invoke('workflow:set', toMarkdown(FLOOR))
+  await main.invoke('god:ensure', { cols: 80, rows: 24 })
+  await settle(400)
+  type Card = { id: string; status: string; agent: string; text: string }
+  const held = (): Card | undefined =>
+    (tasksFile().tasks as unknown as Card[]).find(
+      (t) => t.agent === 'michael' && t.text.includes('the sitemap route')
+    )
+
+  await main.invoke('agent:dispatch', 'add the sitemap route', 'decide', '')
+  await settle()
+  assert.ok(held(), 'dispatch opens a card for the one who takes it')
+  assert.notEqual(held()?.status, DONE, 'and it is not finished the moment it is handed over')
+
+  // Progress, which the app asks for by name every time the floor goes quiet.
+  mail('michael', { to: 'you', subject: 'report', body: 'still with the analyst' })
+  await settle()
+  assert.notEqual(held()?.status, DONE, 'a progress report closes nothing')
+
+  // The outcome.
+  mail('michael', { to: 'you', subject: 'done: add the sitemap route', body: 'shipped' })
+  await settle()
+  assert.equal(held()?.status, DONE, 'saying it is done is what takes it off the board')
+})
+
 after(async () => {
   await main?.stop()
   rmSync(home, { recursive: true, force: true })

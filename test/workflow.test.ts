@@ -10,6 +10,7 @@ import {
   can,
   columnFor,
   coreRoles,
+  declares,
   deleteWorkflow,
   fixedId,
   formatDoc,
@@ -32,6 +33,7 @@ import {
   toMarkdown,
   trimmed,
   withoutCardRules,
+  withoutSummary,
   type CardRule,
   type Workflow,
   workCwd,
@@ -485,6 +487,39 @@ test('the rules a model sends back are gone before the file is read', () => {
   assert.ok(!withoutCardRules(last).includes('x → y'))
   const none = '# f\n\n## board\n- a: a #fff (start)\n'
   assert.equal(withoutCardRules(none), none)
+})
+
+/**
+ * The prose a redraft is about, kept out of what a redraft is shown.
+ *
+ * A floor drawn over another one came back with the first one's `## how it
+ * works` word for word - six roles of a delivery team described as a data
+ * analyst and a marketing worker. The model copied what it was handed.
+ */
+test('the summary comes out of the text a model is shown', () => {
+  const middle = [
+    '# f',
+    'one line',
+    '',
+    '- hire above: 70',
+    '',
+    '## how it works',
+    '',
+    'the analyst pulls from the named sources.',
+    '',
+    '## board',
+    '- a: a #fff (start)',
+    ''
+  ].join('\n')
+  assert.ok(!withoutSummary(middle).includes('analyst'))
+  assert.ok(withoutSummary(middle).includes('## board'), 'and what follows it stays')
+  assert.ok(withoutSummary(middle).includes('- hire above: 70'), 'and what precedes it')
+
+  // Both spellings the parser reads, last section, and a file that never had one.
+  const other = '# f\n\n## how this floor works\n\nprose.\n'
+  assert.ok(!withoutSummary(other).includes('prose'))
+  const none = '# f\n\n## board\n- a: a #fff (start)\n'
+  assert.equal(withoutSummary(none), none)
 })
 
 /** A board is a board when it has keys of its own, a start and an end. */
@@ -1745,5 +1780,370 @@ test('a role may not be called by the name of a reserved address', () => {
   assert.ok(
     lint(w).some((p) => p.includes('board') && p.includes('reserved address')),
     `a role called board must be refused: ${lint(w).join(' | ')}`
+  )
+})
+
+/**
+ * The two things a floor can leave out that nothing else notices.
+ *
+ * Both were found on a floor drawn from somebody's config repo, and neither
+ * showed up anywhere: the app took the file, the drawing looked right, the
+ * agents spawned. One shipped `{{workdir}}` into five real system prompts; the
+ * other left the card the operator watches sitting in the first column through
+ * the whole job and after it.
+ */
+test('a brief may not invent a placeholder nothing fills in', () => {
+  const w = DEFAULT_WORKFLOW
+  const said = (floor: Workflow): string[] => lint(floor).filter((p) => p.includes('braces'))
+
+  assert.deepEqual(said(w), [], 'the shipped chain fills in everything it says')
+
+  const invented = {
+    ...w,
+    roles: { ...w.roles, dev: { ...w.roles.dev, brief: `${w.roles.dev.brief}\nWrite it to {{workdir}}/spec.md, following {{rules}}.` } }
+  } as Workflow
+  const caught = said(invented)
+  assert.equal(caught.length, 1, `one role, one line: ${JSON.stringify(caught)}`)
+  assert.match(caught[0], /\{\{workdir\}\}/)
+  assert.match(caught[0], /\{\{rules\}\}/)
+  assert.match(caught[0], /## words/, 'and says where to declare them')
+
+  // Declared, and it is legal - which is the whole point of saying so.
+  assert.deepEqual(
+    said({ ...invented, words: { workdir: '.claude/work/<slug>', rules: 'rules/engineering.md' } } as Workflow),
+    []
+  )
+  // A role may hold its own, and the narrower one is enough on its own.
+  assert.deepEqual(
+    said({
+      ...invented,
+      roles: {
+        ...invented.roles,
+        dev: { ...invented.roles.dev, attrs: { workdir: 'x', rules: 'y' } }
+      }
+    } as Workflow),
+    []
+  )
+  // A placeholder naming a role that is not on this floor is the same failure.
+  assert.equal(
+    said({
+      ...w,
+      roles: { ...w.roles, dev: { ...w.roles.dev, brief: `${w.roles.dev.brief}\nAsk {{role.qa.id}}.` } }
+    } as Workflow).length,
+    1
+  )
+})
+
+test('the card a task is typed onto has a rule that closes it', () => {
+  const w = DEFAULT_WORKFLOW
+  const said = (floor: Workflow): string[] => lint(floor).filter((p) => p.includes('never leaves the board'))
+
+  assert.deepEqual(said(w), [], 'the shipped chain reports to the human')
+
+  // `lines-have-rules` cannot see this one: it is deliberately about lines
+  // between two roles, and this is the line to the operator.
+  const mute = { ...w, cardRules: w.cardRules.filter((r) => r.to !== w.human) } as Workflow
+  assert.equal(said(mute).length, 1)
+  assert.match(said(mute)[0], new RegExp(`"${w.dispatch}"`))
+
+  // A floor that writes no rules of its own is read through `defaultCardRules`,
+  // and is not being asked to have written this one.
+  assert.deepEqual(said({ ...w, cardRules: [] } as Workflow), [])
+})
+
+/**
+ * A board's own key is a key its rules may use.
+ *
+ * `columnKey` folded the spaces and hyphens out of the word a rule wrote and
+ * compared the result against the key as written, so `- cho-mo-xe: chờ mở xe`
+ * and `- dev → boss: cho-mo-xe` did not match: the file named its own column,
+ * by the key it had just given it, and was told that is not a column on this
+ * board. Nothing in the message hinted the two were the same word, and the only
+ * way out was to go back and pick a key with no hyphen in it.
+ */
+test('a column key with a hyphen in it can be named by a card rule', () => {
+  const floor = (rule: string): string => `# hyphen board
+
+A floor whose board keys are not one word.
+
+## capabilities
+- speaksToHuman (speaksToHuman) — writes to the operator
+- assigns (assigns) — hands work out
+- xay (builds) — does the work
+
+## roles
+
+### boss · the boss
+- agent: michael · Michael
+- can: speaksToHuman, assigns
+- does: hands work out.
+- talks to: dev, you, hire
+- dispatch
+
+### dev · the developer
+- can: xay
+- does: builds it.
+- talks to: boss
+- hireable
+
+## board
+- todo: chờ giao #7fc7e8 (start)
+- cho-mo-xe: chờ mở xe #e8cf6a (working)
+- blocked: tắc #e8917f (stuck)
+- done: xong #7fd8a0 (done)
+
+## card rules
+- boss → dev: opens a card
+- dev → boss: ${rule}
+- boss → you: done
+
+## briefs
+
+### boss
+You are {{self.name}}. Hand it to {{role.dev.id}}, then write to "you".
+
+### dev
+You are "{{self.id}}". Report to {{reportTo}} with "done:" or "fail:".
+`
+
+  const ok = parseMarkdown(floor('cho-mo-xe · when the batch is built'))
+  assert.ok(!('error' in ok), `the board's own key must be usable: ${'error' in ok ? ok.error : ''}`)
+  const rule = ok.workflow.cardRules.find((r) => r.from === 'dev')
+  assert.equal(rule?.status, 'cho-mo-xe', 'and it resolves to the key as written')
+  assert.equal(rule?.when, 'the batch is built', 'the note after the dot survives')
+
+  // The label works the same way, hyphen or not.
+  assert.equal(
+    (parseMarkdown(floor('chờ mở xe')) as { workflow: Workflow }).workflow.cardRules.find(
+      (r) => r.from === 'dev'
+    )?.status,
+    'cho-mo-xe'
+  )
+
+  // A key that really is not there still fails - and now says what to use.
+  const bad = parseMarkdown(floor('khong-co-cot-nay · when nothing'))
+  assert.ok('error' in bad)
+  assert.match(bad.error, /"khong-co-cot-nay"/, 'the status alone, not the whole cell')
+  assert.doesNotMatch(bad.error, /when nothing/, 'the note is not part of what was refused')
+  assert.match(bad.error, /todo, cho-mo-xe, blocked, done/, 'and the board is spelled out')
+})
+
+/**
+ * Closing a card is the checker's act, and the file has to say who checks.
+ *
+ * `rolesWith` reads the card rules as well as the capability table, so a floor
+ * that writes `closes it` from a role holding no `(checks)` word has made that
+ * role a checker without saying so - and what it hands them is not a label:
+ * `closes` runs `testerReported`, which finishes the sender's card and the work
+ * it was checking, and with no check ever linked that is every card sitting in
+ * the waiting column. A spec being handed in closed every build queued for
+ * review, on a floor whose own summary said only its reviewer could finish
+ * anything.
+ */
+test('only a role the floor calls a checker may close a card', () => {
+  const w = DEFAULT_WORKFLOW
+  const said = (floor: Workflow): string[] => lint(floor).filter((p) => p.includes('closes a card'))
+
+  assert.deepEqual(said(w), [], 'the shipped chain closes with the role that checks')
+
+  // An analyst handing a finished spec back up is a step ending, not a check.
+  const loose = {
+    ...w,
+    cardRules: [...w.cardRules, { from: 'ba', to: 'god', status: 'closes' }]
+  } as Workflow
+  const caught = said(loose)
+  assert.equal(caught.length, 1, JSON.stringify(caught))
+  assert.match(caught[0], /"ba"/, 'named, so it is clear which role was handed the power')
+  assert.match(caught[0], /\(checks\)/, 'and what to write instead')
+
+  // A crowd is not a role being named, and flagging every role for one line
+  // would be noise rather than a finding.
+  assert.deepEqual(
+    said({ ...w, cardRules: [...w.cardRules, { from: 'anyone', to: 'god', status: 'closes' }] } as Workflow),
+    []
+  )
+})
+
+/**
+ * What the file says, against what its rules imply.
+ *
+ * Two different questions, and reading the second for the first is what sent
+ * every dispatched request to the role that writes the debrief: it opened one
+ * card for its reviewer, which made it - to `can` - somebody work is handed to.
+ */
+test('a role that opens a card is not thereby a role the floor assigns through', () => {
+  const w = DEFAULT_WORKFLOW
+  assert.equal(can(w, 'god', 'assigns'), true, 'the boss opens cards, so the router counts it')
+  assert.equal(declares(w, 'god', 'assigns'), false, 'and the file never gave it that word')
+  assert.equal(declares(w, 'ba', 'assigns'), true, 'the analyst is who the file says hands work out')
+  assert.equal(declares(w, 'tester', 'checks'), true)
+  assert.equal(declares(w, 'dev', 'checks'), false)
+})
+
+/**
+ * A card that moves was opened, and a card that opens gets closed.
+ *
+ * `cardTo` returns on the spot when the agent it names holds no open card, so
+ * a rule moving a card nobody was ever given is not an error anywhere - it is a
+ * line in the file, an arrow on the chart, and nothing at all on the board. One
+ * floor came back with twelve of its thirteen rules like that, its only `opens
+ * a card` going to the role that writes the spec: six of its eight columns were
+ * unreachable, the one marked (working) among them, and the single card it did
+ * open had nothing that ever finished it, so every request left one parked in
+ * "writing the spec" for good.
+ */
+test('a card rule may only move a card somebody was given, and every card given can close', () => {
+  const said = (floor: Workflow): string[] =>
+    lint(floor).filter((p) => p.includes('opens one') || p.includes('ever finishes it'))
+
+  for (const floor of [...PRESETS, ...SHIPPED]) {
+    assert.deepEqual(said(floor), [], `${floor.name} moves cards that exist`)
+  }
+
+  const floor = (rules: string): Workflow => {
+    const parsed = parseMarkdown(`# tiny
+
+One boss, one worker.
+
+- reports to you: boss
+
+## capabilities
+- speaksToHuman (speaksToHuman) — writes to "you"
+- assigns (assigns) — hands the work out
+- builds (builds) — does the work
+
+## roles
+
+### boss · the boss
+- agent: michael · Michael
+- can: speaksToHuman, assigns
+- does: Hands it out and reports back.
+- talks to: worker, you, hire
+- dispatch
+
+### worker · the worker
+- can: builds
+- does: Does the work and reports it.
+- talks to: boss
+- hireable
+
+## board
+- todo: todo #a3e3ff (start)
+- doing: doing #e8cf6a (working)
+- blocked: blocked #e8917f (stuck)
+- done: done #7fd8a0 (done)
+
+## card rules
+${rules}
+
+## briefs
+
+### boss
+
+Report to "you" when it is finished.
+
+### worker
+
+Do the one task and report it.
+`)
+    if ('error' in parsed) throw new Error(parsed.error)
+    return parsed.workflow
+  }
+
+  const HANDS_OFF = '- boss → worker: opens a card'
+  const REPORTS = '- worker → boss: done'
+  const TELLS = '- boss → you: done'
+
+  assert.deepEqual(said(floor([HANDS_OFF, REPORTS, TELLS].join('\n'))), [], 'a floor that works')
+
+  // The report comes back along a line that moves a card the worker never had.
+  const dead = said(floor([REPORTS, TELLS].join('\n')))
+  assert.equal(dead.length, 1, JSON.stringify(dead))
+  assert.match(dead[0], /"worker"/, 'named, so it is clear whose card was never opened')
+  assert.match(dead[0], /their card/, 'and what the other way of writing it is')
+
+  // The same rule read backwards: the card opens and nothing takes it off the
+  // board again.
+  const forever = said(floor([HANDS_OFF, TELLS].join('\n')))
+  assert.equal(forever.length, 1, JSON.stringify(forever))
+  assert.match(forever[0], /"worker"/)
+  assert.match(forever[0], /leaves one behind/)
+
+  // "(their card)" moves the card of the role being written to, so that is the
+  // one that has to have been opened.
+  assert.deepEqual(
+    said(floor([HANDS_OFF, '- boss → worker: done (their card)', TELLS].join('\n'))),
+    [],
+    'the boss finishing the worker\'s card is the worker\'s card closing'
+  )
+
+  // Dispatch is handed one the moment a task is typed at the floor, so a rule
+  // moving it needs nothing to open it - but one still has to close it.
+  assert.ok(
+    said(floor([HANDS_OFF, REPORTS].join('\n'))).some((p) => p.includes('"boss"')),
+    'the card the operator is watching is a card like any other'
+  )
+})
+
+/**
+ * A role the app can place.
+ *
+ * The name of a capability is the floor's own and the bracket is what answers
+ * the four questions asked of every floor there is. A floor came back having
+ * bracketed one capability of six, and `rolesWith` fell through to the role it
+ * hires by default: the coordinator was counted as the builder, and the three
+ * roles that spec, plan and build counted as nothing. The board still moved -
+ * the card rules name roles outright - so nothing said the rest of the file had
+ * stopped meaning anything.
+ */
+test('a role holds at least one capability the app can read', () => {
+  const said = (floor: Workflow): string[] =>
+    lint(floor).filter((p) => p.includes('which of the four'))
+
+  for (const floor of [...PRESETS, ...SHIPPED]) {
+    assert.deepEqual(said(floor), [], `${floor.name} places every role`)
+  }
+
+  const w = DEFAULT_WORKFLOW
+  // Named for the work rather than for the machine, which is what every floor
+  // drawn from a description does - and then left without its bracket.
+  const named = 'viet-code'
+  const was = w.roles['dev'].can[0]
+  const loose = {
+    ...w,
+    capabilities: w.capabilities.map((c) => (c.name === was ? { name: named, what: c.what } : c)),
+    roles: { ...w.roles, dev: { ...w.roles['dev'], can: [named] } }
+  } as Workflow
+  const caught = said(loose)
+  assert.equal(caught.length, 1, JSON.stringify(caught))
+  assert.match(caught[0], /"dev"/, 'the role, since that is what cannot be placed')
+  assert.match(caught[0], new RegExp(`"${named}"`), 'and the word it was holding')
+
+  // A word named for one of the four says which it is by saying it - a floor
+  // written by hand uses the bare four and is legal.
+  assert.deepEqual(
+    said({
+      ...loose,
+      capabilities: loose.capabilities.map((c) =>
+        c.name === named ? { name: 'builds', what: c.what } : c
+      ),
+      roles: { ...loose.roles, dev: { ...loose.roles['dev'], can: ['builds'] } }
+    } as Workflow),
+    []
+  )
+
+  // And one with no bracket beside one that has it is a name for the rules to
+  // match on, not a role nothing can place.
+  assert.deepEqual(
+    said({
+      ...loose,
+      capabilities: [...w.capabilities, { name: 'cites', what: 'used by the rules' }],
+      roles: {
+        ...loose.roles,
+        dev: { ...loose.roles['dev'], can: [was, 'cites'] }
+      }
+    } as Workflow),
+    [],
+    'the developer still holds its own bracketed word'
   )
 })

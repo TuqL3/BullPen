@@ -91,11 +91,22 @@ test('a floor carries its own defaults, said once', () => {
  * which is the difference between a rule and a description of one.
  */
 test('laws are listed with an id and the sentence a person is shown', () => {
-  // One ships: the boss has to be able to hand work to somebody. A floor is
-  // otherwise whatever was drawn, and the mechanism is what is tested here.
+  // Five ship, and they are the five whose absence is silent: the boss can
+  // hand work on, every line drawn moves a card, every brace in a brief is
+  // filled in, the card the operator watches has a way of closing, and nobody
+  // closes work who was never made a checker. A floor is otherwise whatever was
+  // drawn, and the mechanism is what is tested here.
   assert.deepEqual(
     RULES.laws.map((l) => l.id),
-    ['dispatch-hands-off', 'lines-have-rules']
+    [
+      'dispatch-hands-off',
+      'lines-have-rules',
+      'brief-placeholders',
+      'dispatch-reports',
+      'closes-is-a-check',
+      'cards-open-and-close',
+      'capabilities-have-kinds'
+    ]
   )
   const mine = readRules(
     RULES.text + '\n- `must-open` — at least one card rule must open a card\n'

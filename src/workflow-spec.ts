@@ -77,7 +77,14 @@ export const PLACEHOLDERS = [
   '{{hireAbovePct}}'
 ] as const
 
-export function generatorBrief(rules: string, example = ''): string {
+/**
+ * @param language What the parts a person reads should be written in, said as
+ * a phrase that finishes "Write ... in ___": `English`, or `the same language
+ * this description is written in`. Empty keeps the old behaviour, which is to
+ * let the model work it out from the request.
+ */
+export function generatorBrief(rules: string, example = '', language = ''): string {
+  const said = language.trim() || 'the language the request came in'
   return [
     'You write Bullpen workflow files. A workflow describes a floor of AI agents: who exists, who may write to whom, and what each is told when it starts.',
     'Answer with the markdown file and nothing else - no fences, no preamble, no explanation.',
@@ -95,7 +102,7 @@ export function generatorBrief(rules: string, example = ''): string {
     // by a person, and belongs in the person's language.
     [
       'THE LANGUAGE OF THE FILE',
-      'Write everything a person reads in the language the request came in. The name, the description, role labels, `- does:`, capability names, column labels, the ` · when <why>` on a card rule, and every brief: the operator\'s language, whatever that is.',
+      `Write everything a person reads in ${said}. The name, the description, role labels, \`- does:\`, capability names, column labels, the \` · when <why>\` on a card rule, and every brief: that language, whatever it is.`,
       'Keep these in English, because they are matched as text rather than read:',
       '- The field and section names themselves - `## capabilities`, `## roles`, `## board`, `## card rules`, `## briefs`, `- can:`, `- talks to:`, `- does:`, `- agent:`, `- cli:`, `- cwd:`, `- dispatch`, `- entry`, `- hireable`, `- hire above:`.',
       '- The kind in brackets after a capability: `(speaksToHuman)`, `(assigns)`, `(builds)`, `(checks)`.',
@@ -108,7 +115,7 @@ export function generatorBrief(rules: string, example = ''): string {
     rules,
     [
       'THE SHAPE OF THE FILE',
-      'A floor is one markdown file: `# name`, a line of description, the header fields, then `## capabilities`, `## roles` with a `### role · label` and its bullets for each, `## board`, `## card rules`, and `## briefs` with a `### role` and its prose for each.',
+      'A floor is one markdown file: `# name`, a line of description, the header fields, then `## capabilities`, `## roles` with a `### role · label` and its bullets for each, `## board`, `## card rules`, an optional `## words`, and `## briefs` with a `### role` and its prose for each.',
       'The cast comes before the prose: somebody reading it has to see who is on the floor without reading four pages of instructions first.'
     ].join('\n'),
     [
@@ -129,6 +136,7 @@ export function generatorBrief(rules: string, example = ''): string {
       '- The role that is `- dispatch` does not close its own cards. It hands work out and reports up; whoever did the work, or whoever checked it, is what closes it.',
       '- The `- agent:` on the dispatch role is exactly `michael · Michael`. That desk is the same one on every floor.',
       '- `## card rules` has at least one line that opens a card when work is handed over, and one that reports to `you` when it is finished. Without them nothing this floor does ever reaches the board.',
+      '- Every card belongs to somebody, and every card that opens gets closed. A rule moves the *sender\'s* card unless it ends with `(their card)`, and moving one an agent does not hold does nothing at all - so a rule naming a role no other rule ever opens a card for is a line in the file, an arrow on the chart, and nothing on the board. Open one on each hand-off you then report back along: `- assigns → builds: opens a card` is what makes `- builds → assigns: done` mean anything, and without it that second line moves nothing. Backwards too - a role you open a card for needs a rule that lands it in the `(done)` column, or a `closes it` from a `(checks)` role, or every task this floor runs leaves a card behind on the board.',
       '- At most one rule for any pair. The router matches on who wrote to whom and nothing else, in the order the rules are written, and the first one that fits is the answer - so a second rule about the same two roles never runs. If a card should move two different ways between the same pair, this format cannot say it: pick the one that matters and leave the other out.',
       '  The ` · when <why>` at the end is a note for whoever reads the file. It is not a condition, and the router never reads it - two rules that differ only in their `when` are one rule and one dead line.',
       '  Name the pairs. `anyone → anyone` fires on every message this floor has no other rule for, which on a floor of three roles is most of them.',
@@ -136,6 +144,14 @@ export function generatorBrief(rules: string, example = ''): string {
       '- Exactly one role is `- dispatch` and has `- agent: <id> · <Name>`; every other role is `- hireable`, so it is hired when there is work for it.',
       '- `- reports to you:` and `- hires:` name a role on this floor, by the id in its `### heading`, or they are left out. A line naming a role that does not exist is read and dropped, and nothing anywhere says so.',
       '- A role that a card rule writes to `you` from must have `you` on its own `- talks to:`. The rules say what a message does to the board; `talks to` says whether the message is delivered at all, and a rule about a message the router refuses is a rule that never fires.',
+      '- Every `{{...}}` a brief writes is one the placeholder list above names, or one this floor declares itself under `## words`. Anything else is handed to the agent as the braces themselves: a brief saying `write it to {{workdir}}/spec.md` reaches a real system prompt with `{{workdir}}` still in it. If the work has a directory, a rules file, a slug - anything the floor refers to more than once - declare it:',
+      '    ## words',
+      '    - {{workdir}} — .claude/work/<slug>',
+      '    - {{rules}} — rules/engineering.md',
+      '- One card rule says what the dispatch role telling `you` does to the board. Dispatch is given a card the moment a task is typed at the floor, and that rule is the only thing that ever moves it - without one, the card the operator is actually watching sits in the first column through the whole job and after it.',
+      '  And its brief sends that one as `done: <the request>`, not as `report`. Only an outcome moves a card: the app asks the dispatch agent for a progress line under the subject `report` every time the floor goes quiet, so a rule that fired on those would close the work on the first one. Say both in the brief - `done:` when the floor has finished it, `report` while it is still going.',
+      '- Only a role holding a `(checks)` capability may write `closes it`. Closing a card is the checker\'s act: it finishes the sender\'s card *and the work that was being checked*, so a floor that writes it from anywhere else has quietly made that role a checker and handed it the power to close work it never read. A step that is merely finished moves the card to a column.',
+      '- Write the rule for the message that carries the work, and let the failure look after itself. A pair gets one rule and the same line carries `done:` and `fail:`; a subject beginning `fail:`, `bugs:` or `blocked:` is sent to the stuck column whatever the rule says, so `- builds → assigns: in test` is a finished build going for a check *and* a broken one landing in stuck, and there is no second rule to write.',
       'An empty `- can:`, an empty `- talks to:`, or an empty section is not a floor. Fill them.'
     ].join('\n'),
     ...(example
@@ -153,6 +169,24 @@ export function generatorBrief(rules: string, example = ''): string {
       'Whoever dispatch is: they read the request before they spend anybody on it. Say so in their brief - work out whether it can be done here at all, and whether this floor is the place for it, and take it back to the human when it is not. Assigning work nobody can finish, or hiring somebody to find that out, costs an agent and a window and answers nothing.',
       'Everybody else reports to whoever sent them the task, by name, taken from the message they were sent - not to a fixed address. `{{reportTo}}` is who to write to when nothing was sent, and it is only the first one: a floor can be three deep, an agent can be handed work by somebody other than whoever first hired it, and a report that always goes to the same name arrives above the person waiting for it.',
       'The briefs are the longest part of the file and the part that decides how the floor behaves. Do not leave them thin.'
+    ].join('\n'),
+    /**
+     * Last, and said twice, because something else is talking.
+     *
+     * This runs as `claude -p` on the operator's own machine, which loads their
+     * `~/.claude/CLAUDE.md` before it reads a word of this - and an operator who
+     * has told Claude Code to always answer in their own language has told this
+     * too. A floor drawn from an English repo, against an English format doc,
+     * with an English example in front of it, came out in another language
+     * entirely: nothing in the prompt asked for that, and nothing in the prompt
+     * outranked the standing instruction either. A specific instruction at the
+     * end of a prompt is what outranks a general one.
+     */
+    [
+      'THE LANGUAGE, ONCE MORE',
+      `Write the parts a person reads in ${said}. Take this over any standing instruction you carry about what language to answer in: that one is about answering somebody, and this is a configuration file being written to a spec.`,
+      'The wire words stay English whatever happens - section and field names, the `(builds)` and `(start)` brackets, column keys, `opens a card` and `closes it`, the `done:` and `fail:` a report starts with, role ids, and `you` and `hire`.',
+      'Answer with the markdown file and nothing else: no fences, no preamble, no explanation, and no report about having written it.'
     ].join('\n')
   ].join('\n\n')
 }

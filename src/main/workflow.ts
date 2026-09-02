@@ -641,6 +641,21 @@ export function drawnCardRules(w: Workflow): CardRule[] {
 export const withoutCardRules = (markdown: string): string =>
   markdown.replace(/^##[ \t]+card rules\b[^\n]*\n(?:(?!^##[ \t])[^\n]*\n?)*/im, '')
 
+/**
+ * The floor's own `## how it works`, taken out of the text.
+ *
+ * Prose a model is shown is prose a model copies back. A redraft is handed the
+ * drawing to write *about*, and the summary written for the floor it used to be
+ * came back word for word on the floor it had become - a delivery team of six
+ * whose "how it works" described a data analyst and a marketing worker that
+ * were nowhere on it, read by everybody who opened the floor afterwards.
+ *
+ * The same answer as `## card rules`: it cannot copy what it was never shown.
+ * The heading is matched the way the parser matches it, both spellings.
+ */
+export const withoutSummary = (markdown: string): string =>
+  markdown.replace(/^##[ \t]+how (it|this floor) works\b[^\n]*\n(?:(?!^##[ \t])[^\n]*\n?)*/im, '')
+
 export function isBoard(columns: Workflow['columns']): boolean {
   if (columns.length < 2) return false
   const keys = new Set(columns.map((c) => c.key))
@@ -699,6 +714,22 @@ export function trimmed(w: Workflow): Workflow {
 
 export const can = (w: Workflow, role: string, kind: CapabilityKind): boolean =>
   rolesWith(w, kind).includes(role)
+
+/**
+ * Whether the floor *said* this role is one of the four, in its own file.
+ *
+ * `can` answers the router's question - who behaves like a checker here - and
+ * reads the card rules as well as the capability table, so a role that closes a
+ * card counts as one whether or not anybody wrote it down. That is the right
+ * answer for moving cards and the wrong one for anything that asks who this
+ * floor is *organised* around: a floor whose summariser opens one card for the
+ * reviewer became, by that reading, a second person work could be handed to,
+ * and dispatch was told to send every request to them.
+ *
+ * So: what the file declares, and nothing inferred.
+ */
+export const declares = (w: Workflow, role: string, kind: CapabilityKind): boolean =>
+  (w.roles[role]?.can ?? []).some((c) => w.capabilities.find((d) => d.name === c)?.kind === kind)
 
 /** True when this role holds that exact capability, by the name it was given. */
 export const hasCapability = (w: Workflow, role: string, cap: string): boolean =>
@@ -825,6 +856,35 @@ export function renderBrief(
     }
     return whole
   })
+}
+
+/**
+ * The placeholders in a brief that `renderBrief` would leave standing.
+ *
+ * Left standing is the right behaviour - an empty string is a brief that
+ * quietly tells an agent to mail nobody - but it is only visible if somebody
+ * opens that agent's terminal and reads its system prompt. A floor drawn by a
+ * model invents them freely: `{{workdir}}` and `{{rules}}` read like things the
+ * app would obviously know, and neither is, so every agent on that floor was
+ * spawned being told to write its work to a directory called `{{workdir}}`.
+ *
+ * Kept in step with `renderBrief` by hand, which is a copy - but the copy is
+ * one function long and the alternative is a linter that has to render a brief
+ * to find out whether it is broken.
+ */
+export function unresolved(w: Workflow, role: string): string[] {
+  const brief = w.roles[role]?.brief ?? ''
+  const own = w.roles[role]?.attrs ?? {}
+  const BUILT_IN = ['self.id', 'self.name', 'reportTo', 'reuseBelowPct', 'hireAbovePct']
+  const out = new Set<string>()
+  for (const m of brief.matchAll(/\{\{([\w.\- ]+)\}\}/g)) {
+    const key = m[1].trim()
+    if (BUILT_IN.includes(key) || key in own || key in w.words) continue
+    const named = /^role\.([\w-]+)\.(id|name|label)$/.exec(key)
+    if (named && w.roles[named[1]]) continue
+    out.add(`{{${key}}}`)
+  }
+  return [...out]
 }
 
 /**
@@ -967,6 +1027,25 @@ export function lint(w: Workflow, rules?: Rules): string[] {
     }
   }
 
+  /**
+   * A brief whose braces are filled in.
+   *
+   * Anything the app does not know is left standing, so an invented placeholder
+   * is not an error anywhere - it is a sentence in a real system prompt reading
+   * `write it to {{workdir}}/spec.md`. The agent either asks what that means or,
+   * worse, makes something up.
+   */
+  if (on('brief-placeholders')) {
+    for (const r of names) {
+      const left = unresolved(w, r)
+      if (left.length) {
+        bad.push(
+          `"${r}" is briefed with ${left.join(', ')}, which nothing fills in - the agent is handed the braces themselves. Declare them under "## words" or take them out.`
+        )
+      }
+    }
+  }
+
   // A brief that names an address its own role may not use is a briefing the
   // router will spend the floor's time refusing.
   for (const r of names) {
@@ -1067,6 +1146,178 @@ export function lint(w: Workflow, rules?: Rules): string[] {
   // perfectly well.
   if (on('must-open') && !defaultCardRules(w).some((r) => r.status === 'open')) {
     bad.push('No card rule opens a card, so nothing this floor does will ever reach the board.')
+  }
+
+  /**
+   * Closing a card is what a role that checks work does, and nothing else.
+   *
+   * `rolesWith` reads the card rules as well as the capability table - on
+   * purpose, because a floor may declare `(checks)` and never write a `closes`
+   * rule - and the other direction is where it bites: a floor that writes
+   * `closes it` from a role holding no `(checks)` word has just made that role
+   * a checker, and nothing anywhere says so. One came out declaring `(checks)`
+   * on exactly one of six roles and running with four, its own summary line
+   * saying only the reviewer could finish anything.
+   *
+   * What that buys the role is not a label. `closes` hands the router
+   * `testerReported`, which closes the sender's card *and the work it was
+   * checking* - and where no check was ever linked, that means every card
+   * sitting in the waiting column for the project. A spec being handed in
+   * closed every build that was queued for review.
+   *
+   * Only `closes`. Opening a card without declaring `(assigns)` is how most
+   * dispatch roles are written and does no damage of its own.
+   */
+  if (on('closes-is-a-check')) {
+    const CROWDS_TOO = new Set(['anyone', 'staff'])
+    for (const rule of w.cardRules) {
+      if (rule.status !== 'closes' || CROWDS_TOO.has(rule.from)) continue
+      for (const r of names) {
+        if (!matches(w, r, rule.from) || declares(w, r, 'checks')) continue
+        bad.push(
+          `"${rule.from} → ${rule.to}" closes a card, which is what a role that checks work does - but "${r}" holds no capability marked (checks), so it is counted as one anyway and can close work it never looked at. Mark its capability (checks), or move the card to a column instead.`
+        )
+      }
+    }
+  }
+
+  /**
+   * The card the operator opened has a way of closing.
+   *
+   * Dispatch gets a card the moment a task is typed at the floor, and only a
+   * rule about what it says to the human ever moves that one. `lines-have-rules`
+   * cannot see it - that check is deliberately about lines between two roles -
+   * so a floor could cover every hand-off it draws and still leave the one card
+   * the operator is actually looking at sitting in the first column through the
+   * whole job and after it. Two floors in a row were written that way.
+   */
+  if (on('dispatch-reports') && w.cardRules.length && w.roles[w.dispatch]) {
+    const tells = w.cardRules.some(
+      (r) => r.to === w.human && (r.from === w.dispatch || matches(w, w.dispatch, r.from))
+    )
+    if (!tells) {
+      bad.push(
+        `Nothing says what happens to the card when "${w.dispatch}" tells "${w.human}" where the work stands, so the task typed at the floor never leaves the board.`
+      )
+    }
+  }
+
+  /**
+   * Every card a rule moves was opened, and every card opened can close.
+   *
+   * `cardTo` returns on the spot when the agent it names holds no open card, so
+   * a rule that moves a card nobody was ever given is not an error anywhere -
+   * it is a line in the file, an arrow on the chart, and nothing at all on the
+   * board. One floor came out with twelve of its thirteen rules like that: the
+   * only `opens a card` on it went to the role that writes the spec, and the
+   * six columns after that one were unreachable, the column marked (working)
+   * among them.
+   *
+   * The other half is the same failure read backwards. The one card that floor
+   * did open had no rule that ever finished it, so every request left a card
+   * parked in "writing the spec" for good - which is exactly what "the agents
+   * keep making cards and nothing ever closes" looks like from the chair the
+   * operator is sitting in.
+   *
+   * `closes it` is exempt from the first half on purpose: it hands the router
+   * `testerReported`, which falls back to sweeping the waiting column when the
+   * checker holds no card of its own, and that is how the floors here are
+   * written.
+   */
+  if (on('cards-open-and-close') && w.cardRules.length) {
+    const doneKey = hasColumn(w, 'done')
+      ? columnFor(w, 'done')
+      : (w.columns.find((c) => c.key === 'done')?.key ?? null)
+    // On a floor where nobody checks, a rule pointing at the column work waits
+    // in finishes the card instead - the same swap the router makes.
+    const waitingIsDone =
+      hasColumn(w, 'waiting') && rolesWith(w, 'checks').length === 0
+        ? columnFor(w, 'waiting')
+        : null
+    /** Whose card this rule moves: the sender's, unless the line says otherwise. */
+    const moved = (rule: CardRule): string => (rule.whose === 'to' ? rule.to : rule.from)
+    /** The roles one side of a rule stands for. The human holds no card. */
+    const holders = (side: string): string[] =>
+      side === w.human ? [] : names.filter((r) => matches(w, r, side))
+
+    // Dispatch is handed one the moment a task is typed at the floor.
+    const opened = new Set<string>(w.roles[w.dispatch] ? [w.dispatch] : [])
+    for (const rule of w.cardRules) {
+      if (rule.status === 'open') for (const r of holders(rule.to)) opened.add(r)
+    }
+
+    for (const rule of w.cardRules) {
+      if (rule.status === 'open' || rule.status === 'closes') continue
+      const who = holders(moved(rule))
+      if (!who.length || who.some((r) => opened.has(r))) continue
+      bad.push(
+        `"${rule.from} → ${rule.to}" moves ${who.map((r) => `"${r}"`).join(' or ')}'s card, and nothing ever opens one - so the line moves nothing. Open a card where the work is handed over, or add "(their card)" to move the other side's instead.`
+      )
+    }
+
+    /**
+     * Whose card a `closes it` finishes: the checker's, and the build's.
+     *
+     * `testerReported` closes the sender's own card and then the work it was
+     * checking - by the `checks` link where the hand-over wrote one, and by
+     * sweeping the waiting column where it did not. So the card a checker
+     * finishes is whichever one a rule parks in that column, and reading only
+     * the sender would have called every floor here broken: `tester → dev:
+     * closes it` is the one line that ever finishes the developer's card.
+     */
+    const waiting = hasColumn(w, 'waiting') ? columnFor(w, 'waiting') : null
+    const swept = new Set<string>()
+    for (const rule of w.cardRules) {
+      if (waiting !== null && rule.status === waiting) {
+        for (const r of holders(moved(rule))) swept.add(r)
+      }
+    }
+    const finishes = (rule: CardRule, r: string): boolean =>
+      rule.status === 'closes'
+        ? holders(rule.from).includes(r) || swept.has(r)
+        : (rule.status === doneKey || rule.status === waitingIsDone) &&
+          holders(moved(rule)).includes(r)
+    for (const r of opened) {
+      if (w.cardRules.some((rule) => finishes(rule, r))) continue
+      bad.push(
+        `"${r}" is given a card and no rule ever finishes it, so every task leaves one behind on the board. Point one of its lines at "${doneKey ?? 'the done column'}", or let a role that checks work close it.`
+      )
+    }
+  }
+
+  /**
+   * Every role holds at least one word the app can read.
+   *
+   * The name of a capability is the floor's and the bracket is the app's: "who
+   * hands work out", "who does it", "who decides it passed" and "who answers
+   * the human" are asked of every floor there is, and a role holding nothing
+   * but unbracketed words answers none of them - so `rolesWith` classifies it
+   * by what is left over. A floor came back having bracketed one capability of
+   * six: its coordinator was counted as the builder because that is the role it
+   * hires by default, and the three roles that actually spec, plan and build
+   * counted as nothing at all - hired for the wrong work and tagged on the
+   * roster as something they are not. The board still moved, because card rules
+   * name roles outright; nothing anywhere said the rest of the file had stopped
+   * meaning anything.
+   *
+   * Per role, not per capability. A word with no bracket that sits beside one
+   * that has it is a name for the card rules to match on and classifies
+   * nothing - `- cites — used by the rules, and by nothing else` is a floor
+   * saying so on purpose. It is a role with no bracket anywhere that the app
+   * cannot place.
+   */
+  if (on('capabilities-have-kinds')) {
+    const KINDS = new Set<string>(CAPABILITY_KINDS)
+    // A capability named for one of the four says which it is by saying it.
+    const kindOf = (name: string): string | undefined =>
+      w.capabilities.find((c) => c.name === name)?.kind ?? (KINDS.has(name) ? name : undefined)
+    for (const r of names) {
+      const can = w.roles[r].can ?? []
+      if (!can.length || can.some((c) => kindOf(c))) continue
+      bad.push(
+        `"${r}" holds ${can.map((c) => `"${c}"`).join(', ')}, and not one of them says in brackets which of the four it behaves like - so nothing can ask whether this role hands work out, does it, checks it or answers the human, and it is classified by whatever is left over. Write one of (speaksToHuman), (assigns), (builds) or (checks) after the name.`
+      )
+    }
   }
 
   if (on('must-finish') && w.columns.length === 0) bad.push('A board needs at least one column.')
@@ -1510,13 +1761,21 @@ const HOW_SECTION = /^how (it|this floor) works\b/i
   // it - half the answer was in the source.
   const columns: Column[] = written
 
-  /** A column by its key or by whatever this floor calls it. */
+  /**
+   * A column by its key or by whatever this floor calls it.
+   *
+   * Both sides flattened, which they were not: the word a rule uses had its
+   * spaces and hyphens folded and the key it was compared against did not, so a
+   * board declaring `- cho-mo-xe: chờ mở xe` refused `- dev → boss: cho-mo-xe`
+   * - the file naming its own column by the key it had just given it, and being
+   * told that is not a column on this board. Nothing about the message hinted
+   * that the two spellings were the same word; the floor simply would not save,
+   * and the fix was to go back and pick a key with no hyphen in it.
+   */
+  const flatten = (word: string): string => word.trim().toLowerCase().replace(/[\s-]+/g, '_')
   const columnKey = (word: string): string | null => {
-    const flat = word.trim().toLowerCase().replace(/[\s-]+/g, '_')
-    const hit = columns.find(
-      (c) => c.key === flat || c.label.toLowerCase().replace(/[\s-]+/g, '_') === flat
-    )
-    return hit?.key ?? null
+    const flat = flatten(word)
+    return columns.find((c) => flatten(c.key) === flat || flatten(c.label) === flat)?.key ?? null
   }
 
   /**
@@ -1560,8 +1819,13 @@ const HOW_SECTION = /^how (it|this floor) works\b/i
     const closes = said.startsWith(CLOSES) || /^closes?\b/.test(said)
     const status = opens ? 'open' : closes ? 'closes' : columnKey(words)
     if (!status) {
+      // The status alone, and the columns there are to choose from. It quoted
+      // the whole cell - the ` · when ...` note included - so the thing it said
+      // was not a column was a sentence nobody had offered as one, and it never
+      // said what the board actually holds. Both halves matter to the model
+      // being handed this back to fix as much as to the person reading it.
       return {
-        error: `"${m[3].trim()}" is not a column on this board, and not "${OPENS}" or "${CLOSES}".`
+        error: `"${saidPart.trim()}" is not a column on this board, and not "${OPENS}" or "${CLOSES}". The columns are: ${columns.map((c) => c.key).join(', ') || '(none - the board is empty)'}.`
       }
     }
     cardRules.push({

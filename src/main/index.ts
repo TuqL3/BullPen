@@ -1,10 +1,10 @@
 import { CLIENT_ID, awaitToken, deviceCode, type DeviceCode } from './github.ts'
-import { hostname } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { createGist, findGist, readGist, whoAmI, writeGist } from './gist.ts'
 import { readToken, tokenOnDisk, writeToken } from './secret.ts'
 import { adopt, bundle, newer, readFloors, type Bundle } from './sync.ts'
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { Approvals, type Pending } from './approvals.ts'
 import { list as listDir, read as readFile, search as searchCode, write as writeFile } from './code.ts'
@@ -36,13 +36,15 @@ import {
   type FloorAgent
 } from './god.ts'
 import { execFile, execFileSync } from 'node:child_process'
-import { isReply, routeCard } from './cards.ts'
+import { DONE_SAID, FAILED_SAID, isReply, isReport, routeCard } from './cards.ts'
 import { dryRun } from './dryrun.ts'
+import { commandProblems, digest, parseRepoUrl, readRepo } from './repo.ts'
 import { DEFAULT_WORKFLOW, NEW_FLOOR, PRESETS, STARTER } from './presets.ts'
 import {
   HIRE_PARTY,
   HUMAN_PARTY,
   can,
+  declares,
   columnFor,
   deleteWorkflow,
   fixedId,
@@ -65,6 +67,7 @@ import {
   toMarkdown,
   trimmed,
   withoutCardRules,
+  withoutSummary,
   withWork,
   type Candidate,
   type ColumnKind,
@@ -94,7 +97,16 @@ const format = (): { text: string; path: string; custom: boolean } =>
 const rulebook = (): ReturnType<typeof readRules> => readRules(format().text)
 
 /** What the writer is told: the whole reference, and how to answer. */
-const generatorPrompt = (): string => generatorBrief(format().text, STARTER)
+/**
+ * What the generator is briefed with, for one language.
+ *
+ * The language is named rather than left to the model: `ask` shells out to the
+ * operator's own `claude`, which reads their `~/.claude/CLAUDE.md` first, and a
+ * standing "always answer in X" there reached the floor writer too. What the
+ * request is written in is the app's answer, not theirs.
+ */
+const generatorPrompt = (language: string): string =>
+  generatorBrief(format().text, STARTER, language)
 import { Hive, HUMAN, type Message } from './hive.ts'
 import { PtyManager, type AgentSpec } from './pty.ts'
 import { clearPid, forceKill, reapOrphans, writePid } from './reaper.ts'
@@ -212,12 +224,45 @@ const assistRoles = (): { role: string; id: string; name: string }[] =>
 const assistId = (): string | null =>
   assistRoles().find((a) => can(wf, a.role, 'assigns'))?.id ?? null
 
-/** Whoever is actually there to take work right now. */
-const assignerId = (): string | null => {
-  const helper = assistId()
-  if (helper && ptys.isRunning(helper)) return helper
-  return godId
+/**
+ * The role that hands work out, when this floor has one other than dispatch.
+ *
+ * By role, not by agent - `assistRoles` only ever names roles with a fixed
+ * `- agent:` on them, and a floor is free to write its analyst as `- hireable`
+ * instead. Delivery Floor does, so every question shaped "does anybody here
+ * assign" came back no: dispatch was handed the rules for a floor with nobody
+ * between him and the work, told to read the roster and staff it himself, and
+ * his own brief forbids exactly that. The gate then refused the messages those
+ * rules told him to send, and one dispatched task turned into a round of
+ * refusals before anything reached anybody.
+ *
+ * `declares`, not `can`. `can` reads the card rules too, so any role that opens
+ * a card for somebody counts as one that hands work out - and a floor whose
+ * summariser opens one card for its reviewer was read as having a second desk
+ * to dispatch through. Michael was told to send every request to the person who
+ * writes the debrief. Who a floor is organised around is what its file says,
+ * not what its rules imply.
+ */
+const assignerRole = (): string | null =>
+  Object.keys(wf.roles).find((r) => r !== wf.dispatch && declares(wf, r, 'assigns')) ?? null
+
+/**
+ * Somebody in that role who is up right now - hired or fixed.
+ *
+ * A hired agent is as much in the role as a fixed one; the only difference is
+ * who spawned it. `roleOf` is what the app records at spawn, so this reads the
+ * same answer for both.
+ */
+const assignerHeld = (): string | null => {
+  const role = assignerRole()
+  if (!role) return null
+  const fixed = fixedId(wf, role)
+  if (fixed && ptys.isRunning(fixed)) return fixed
+  return ptys.list().find((a) => a.status === 'running' && roleOf(a.id) === role)?.id ?? null
 }
+
+/** Whoever is actually there to take work right now. */
+const assignerId = (): string | null => assignerHeld() ?? godId
 
 /**
  * The god agent - the operator's own clone. Dispatch and answers route via it.
@@ -720,15 +765,33 @@ const updates = new Updates(app.getVersion())
  * request and nobody testing the result.
  */
 const relayRules = (): string => {
-  const to = assistId()
-  if (!to) return assignRules()
+  const role = assignerRole()
+  if (!role) return assignRules()
+  const label = wf.roles[role]?.label ?? role
+  const to = assignerHeld()
+  if (to) {
+    return (
+      'Do not do this yourself, and do not assign it yourself. Hand it to ' +
+      `${label}: write a message to "${to}" in ` +
+      '$BULLPEN_MAILBOX/outbox with the request in the body, in the words it was ' +
+      'asked in. They analyse it, assign or hire, and see it through. Then tell me ' +
+      'you have handed it over and to whom. When they report back, pass it to me ' +
+      'as a message to "you".'
+    )
+  }
+  // The desk exists and nobody is at it. Hiring into it is the one move that
+  // starts the chain - picking somebody further down is a message the router
+  // refuses, and doing it yourself is what the brief says not to.
   return (
-    'Do not do this yourself, and do not assign it yourself. Hand it to ' +
-    `${wf.roles[roleOf(to)]?.label ?? to}: write a message to "${to}" in ` +
-    '$BULLPEN_MAILBOX/outbox with the request in the body, in the words it was ' +
-    'asked in. They analyse it, assign or hire, and see it through. Then tell me ' +
-    'you have handed it over and to whom. When they report back, pass it to me ' +
-    'as a message to "you".'
+    'Do not do this yourself, and do not assign it yourself. No one is in ' +
+    `${label}'s seat yet, so hire one: write a message to "${wf.hire}" in ` +
+    `$BULLPEN_MAILBOX/outbox with the project as the subject, "${role}" as ` +
+    '"role", and the request as the body, in the words it was asked in - the ' +
+    'body is what they start on, so there is nothing more to send them. If the ' +
+    'floor has never heard of the project, it has no directory yet: ask me where ' +
+    'it lives and send the hire again with "cwd" set to that path. You get their ' +
+    'name back; tell me who has it. When they report back, pass it to me as a ' +
+    'message to "you".'
   )
 }
 
@@ -1048,7 +1111,7 @@ function cardFor(
  * developer is being mailed about it directly and is not finished.
  */
 function testerReported(testerId: string, subject: string, taskId?: string): void {
-  const failed = /^\s*(fail|bug|broken)\b/i.test(subject)
+  const failed = FAILED_SAID.test(subject)
   // The checker's own card, by name where the message said which.
   const own = cardOf(testerId, taskId)
   cardTo(testerId, failed ? column('stuck') : column('done'), taskId)
@@ -1092,10 +1155,34 @@ function testerReported(testerId: string, subject: string, taskId?: string): voi
  * this reads. Any rule the operator writes runs first and this never sees it.
  */
 function said(from: string, subject: string, taskId?: string): void {
-  if (/^\s*(done|pass|finished|shipped|ok)\b/i.test(subject)) cardTo(from, column('done'), taskId)
-  else if (/^\s*(fail|bug|broke|blocked|stuck|error)\b/i.test(subject)) {
-    cardTo(from, column('stuck'), taskId)
-  }
+  if (DONE_SAID.test(subject)) cardTo(from, column('done'), taskId)
+  else if (FAILED_SAID.test(subject)) cardTo(from, column('stuck'), taskId)
+}
+
+/**
+ * Mail to the human is mail, and it moves the card like any other message.
+ *
+ * `you` is a reserved address, so it leaves the router by its own door - the
+ * ask queue and the report feed - and that door had no board behind it.
+ * `routeCard` had three callers and none of them was this one, so every `→ you`
+ * rule an operator writes was a rule that never fired: the dispatch role's own
+ * card stayed in the first column forever, on every floor, while the dry run
+ * drew it closing. One dispatched task left three open cards behind it and the
+ * board filled up with work that was already finished.
+ *
+ * Only an outcome moves it. The app asks the dispatch agent for a progress
+ * report by name every time the floor goes quiet - subject `report` - and a
+ * rule about that pair would have closed the card on the first one.
+ */
+function toldTheHuman(msg: Message): void {
+  if (!isReport(msg.subject)) return
+  const move = routeCard(wf, msg, roleOf, wf.human)
+  if (move?.kind === 'move') cardTo(move.agent, move.status, msg.task)
+  // A floor may put the one who decides work passed at the end of the chain,
+  // reporting to the operator rather than back down it - which is the right
+  // shape when the operator is who commits. The pass still closes the build.
+  else if (move?.kind === 'checked') testerReported(move.agent, move.subject, msg.task)
+  else said(msg.from, msg.subject, msg.task)
 }
 
 /** Move an agent's open card, if it has one. */
@@ -2084,6 +2171,9 @@ function wire(): void {
     // Stamped here: an agent writes the json itself and rarely sets `ts`, so
     // without this every question reads as "— ago" wherever it is shown.
     const ts = msg.ts || Date.now()
+    // Before either queue: a report and a question both land on the board, and
+    // which of the two this is says nothing about whose card it was about.
+    toldTheHuman(msg)
     if (msg.from === godId && (reportWanted || REPORTING.test(msg.subject))) {
       reportWanted = false
       const report = { ...msg, ts }
@@ -2359,7 +2449,7 @@ function wire(): void {
             'Treat it like any other request: analyse it, assign or hire, see it ' +
             `through, and report to ${dispatchId()} when it is finished.`
           : `A task came in from ${task.from}: ${task.body}\n\n` +
-            `${where.trim()} ${assignRules()}`.trim()
+            `${where.trim()} ${relayRules()}`.trim()
       hive.send({ from: 'webhook', to, subject: task.subject, body })
       activity.push('message', 'webhook', `${task.from} → ${to}: ${task.subject}`)
       notify('work', `Work in from ${task.from}`, task.subject, { tab: 'monitor' })
@@ -3132,7 +3222,19 @@ function wire(): void {
     // asked for a whole floor is not, and with the rulebook here it was handing
     // back floors whose roles never wrote to each other and whose board never
     // moved - which passed, because nothing was switched on to catch it.
-    return 'error' in parsed ? [parsed.error] : lint(parsed.workflow)
+    if ('error' in parsed) return [parsed.error]
+    const bad = lint(parsed.workflow)
+    // The last net, and the one that would have caught it. A drawing model runs
+    // in an empty room now and a redraft is no longer shown the old prose, but
+    // both of those are doors: this reads the answer. The shipped floor's
+    // summary on a floor that is not it was copied, not written - it names a
+    // data analyst and a marketing worker, and every floor drawn while the room
+    // was Bullpen's own directory came back wearing it.
+    const shipped = DEFAULT_WORKFLOW.summary?.trim()
+    if (shipped && md.includes(shipped)) {
+      bad.push('"## how it works" is the shipped floor\'s, word for word - write one for this floor.')
+    }
+    return bad
   }
 
   /**
@@ -3193,8 +3295,22 @@ function wire(): void {
     })
   }
 
-  const ask = (prompt: string): Promise<string> =>
-    new Promise((done, fail) => {
+  const ask = (prompt: string): Promise<string> => {
+    /**
+     * An empty room, and nobody else's floor in it.
+     *
+     * This shells out to the operator's own `claude`, which reads whatever is
+     * around it. Run in the workspace it was handed Michael's `CLAUDE.md` - a
+     * file whose first instruction is that you do not do the work yourself -
+     * so it was moved to Bullpen's own directory, and that turned out to be
+     * the drawer the floors are kept in: the next floor drawn came back with
+     * `## how it works` copied word for word off `workflows/default.md`,
+     * describing a data analyst and a marketing worker that were nowhere in
+     * it. Neither place, then. `~/.claude/CLAUDE.md` is user-level and comes
+     * along wherever this runs; the prompt is what answers that one.
+     */
+    const room = mkdtempSync(join(tmpdir(), 'bullpen-draw-'))
+    return new Promise<string>((done, fail) => {
       // No shell, argv only: the description is the operator's own text and
       // must never reach a command line as anything but one argument.
       const child = execFile(
@@ -3202,11 +3318,12 @@ function wire(): void {
         ['-p', prompt],
         // Measured, not guessed: a real generation of a four-role floor took
         // over two minutes, and the repair round is a second turn on top.
-        { cwd: currentGodCwd(), maxBuffer: 4_000_000, timeout: 420_000 },
+        { cwd: room, maxBuffer: 4_000_000, timeout: 420_000 },
         (err, stdout) => (err && !stdout.trim() ? fail(err) : done(stdout))
       )
       child.stdin?.end()
-    })
+    }).finally(() => rmSync(room, { recursive: true, force: true }))
+  }
 
   const clean = (out: string): string =>
     out
@@ -3267,7 +3384,11 @@ function wire(): void {
    */
   ipcMain.handle('workflow:redraft', async (_e, floor: Workflow) => {
     if (!floor?.roles) return { error: 'No floor to write.' }
-    const drawn = toMarkdown(floor)
+    // Everything about the drawing except the prose describing it. The prose is
+    // what this call exists to write again, and a model handed the old one copies
+    // it: a floor drawn from a repo came back describing the roles of the floor it
+    // had replaced. `## card rules` is left out of the answer for the same reason.
+    const drawn = withoutSummary(toMarkdown(floor))
     const say = (extra = ''): string =>
       `This is a Bullpen floor. The drawing is settled and is not yours to change: the roles, ` +
       `their ids, who each may write to, which one is dispatch and which is entry all stay ` +
@@ -3320,7 +3441,9 @@ function wire(): void {
       const next: Workflow = {
         ...shape,
         description: w.description || floor.description,
-        summary: w.summary ?? floor.summary,
+        // Not `?? floor.summary`. Falling back kept the sentence that was already
+        // wrong - the one case this call was made to fix - and said nothing.
+        summary: w.summary,
         // Worked out, not asked for. What a message does to a card follows from
         // the drawing - who hands work out, who does it, who decides it passed -
         // and a model asked to write those lines wrote a floor where handing
@@ -3330,7 +3453,12 @@ function wire(): void {
         // visible three days later as a board that does not move.
         cardRules: drawnCardRules(withWork({ ...shape, cardRules: [] }))
       }
-      return { markdown: toMarkdown(trimmed(next)), problems: lint(trimmed(next)) }
+      const done = trimmed(next)
+      const problems = lint(done)
+      if (!done.summary?.trim()) {
+        problems.push('There is no "## how it works" - write one for this drawing.')
+      }
+      return { markdown: toMarkdown(done), problems }
     }
 
     try {
@@ -3358,27 +3486,98 @@ function wire(): void {
     }
   })
 
+  /**
+   * The two rounds, from whatever `want` says the floor is.
+   *
+   * A sentence typed into the box and a repo read off GitHub are the same
+   * question by the time they reach here - "this is how the work goes, draw it"
+   * - and the repair round is the half worth not having twice.
+   */
+  const draw = async (
+    want: string,
+    language: string
+  ): Promise<{ markdown: string; problems: string[] }> => {
+    const brief = generatorPrompt(language)
+    let md = clean(await ask(`${brief}\n\nWrite the workflow for this floor:\n\n${want}`))
+    let problems = check(md)
+    if (problems.length) {
+      md = clean(
+        await ask(
+          `${brief}\n\nWrite the workflow for this floor:\n\n${want}\n\n` +
+            `You wrote this, and it was rejected:\n\n${md}\n\n` +
+            `Fix exactly these and answer with the whole file again:\n${problems.map((p) => `- ${p}`).join('\n')}`
+        )
+      )
+      problems = check(md)
+    }
+    return { markdown: tidy(md), problems }
+  }
+
+  const cliGone = (err: unknown): { error: string } => ({
+    error: `Could not reach the claude CLI: ${err instanceof Error ? err.message : String(err)}`
+  })
+
   ipcMain.handle('workflow:generate', async (_e, description: string) => {
     const want = description.trim()
     if (!want) return { error: 'Say what the floor should do first.' }
-
     try {
-      const brief = generatorPrompt()
-      let md = clean(await ask(`${brief}\n\nWrite the workflow for this floor:\n\n${want}`))
-      let problems = check(md)
-      if (problems.length) {
-        md = clean(
-          await ask(
-            `${brief}\n\nWrite the workflow for this floor:\n\n${want}\n\n` +
-              `You wrote this, and it was rejected:\n\n${md}\n\n` +
-              `Fix exactly these and answer with the whole file again:\n${problems.map((p) => `- ${p}`).join('\n')}`
-          )
-        )
-        problems = check(md)
-      }
-      return { markdown: tidy(md), problems }
+      // Whatever they typed it in. The model can see that for itself; what it
+      // could not do was hold on to it against a standing instruction.
+      return await draw(want, 'the same language this description is written in')
     } catch (err) {
-      return { error: `Could not reach the claude CLI: ${err instanceof Error ? err.message : String(err)}` }
+      return cliGone(err)
+    }
+  })
+
+  /**
+   * The same floor, drawn from how the operator already works.
+   *
+   * Most people running a floor have written their process down somewhere
+   * already - Claude Code skills for the steps, an agent file for the one that
+   * reviews, rules every session is handed. Typing it a second time into the
+   * box is keeping two copies of one answer in step, and the second copy is
+   * always the one that goes stale.
+   *
+   * Read, drawn, and handed back for the operator to look at. Never applied:
+   * what comes out is a model's reading of somebody else's repo, and the floor
+   * it would become is the system prompt of every agent this app spawns with
+   * permission prompts suppressed. `repo.ts` frames the fetched text as data
+   * and `check` lints the result, but the thing actually standing between a
+   * repo and a floor is a person reading it, so this stops at the preview the
+   * described-floor path already stops at.
+   */
+  ipcMain.handle('workflow:fromRepo', async (_e, url: string) => {
+    const at = parseRepoUrl(String(url ?? ''))
+    if ('error' in at) return { error: at.error }
+    let got: Awaited<ReturnType<typeof readRepo>>
+    try {
+      got = await readRepo(at)
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      return { error: `Could not read ${at.owner}/${at.repo}: ${why}` }
+    }
+    if ('error' in got) return { error: got.error }
+    activity.push('message', HUMAN, `read ${at.owner}/${at.repo} — ${got.files.length} file(s)`)
+    try {
+      // The repo is the request, and a config repo is written in English -
+      // its own README, its skills, the rules it hands every session.
+      const drawn = await draw(digest(at, got.files), 'English')
+      // Checked against the repo it was drawn from, which the drawing round
+      // cannot do: it sees the files as text and has no idea which of the steps
+      // it just wrote into five briefs is a skill an agent is actually allowed
+      // to start. Reported beside the floor rather than sent back to the model -
+      // a `/spec` an agent cannot invoke is fixed in the repo, and a model told
+      // to fix it deletes the sentence instead, which is a floor that no longer
+      // says what the repo does.
+      const mismatch = commandProblems(drawn.markdown, got.files)
+      return {
+        ...drawn,
+        problems: [...drawn.problems, ...mismatch],
+        source: `${at.owner}/${at.repo}`,
+        read: got.files.map((f) => f.path)
+      }
+    } catch (err) {
+      return cliGone(err)
     }
   })
 
@@ -3714,10 +3913,10 @@ function wire(): void {
     if (!target) return 'no god agent is running'
     const task = text.replace(/\r?\n/g, ' ')
     const where = project ? ` This is for the ${project} project.` : ''
-    // With an analyst on the floor Michael relays; without one he is still the
-    // only agent who can see everyone, and falls back to assigning it himself.
-    const helper = assistId()
-    const rules = helper && ptys.isRunning(helper) ? relayRules() : assignRules()
+    // With an assigner on the floor Michael relays - hires into that seat when
+    // nobody is in it - and only a floor that has no such role at all falls
+    // back to him assigning it himself. `relayRules` is what knows which.
+    const rules = relayRules()
     const who = owner && owner !== 'decide' ? ` I suggest ${owner} takes it.` : ''
     const brief = `Dispatch: ${task} —${where}${who} ${rules}`
     submitPrompt(target, brief)
