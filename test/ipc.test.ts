@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
-import { bootMain, keychain, type Main } from './main-harness.ts'
+import { bootMain, dialogAnswer, keychain, type Main } from './main-harness.ts'
 import { PRESETS as SHIPPED } from '../src/main/presets.ts'
 import { shellId } from '../src/names.ts'
 import { columnFor, toMarkdown } from '../src/main/workflow.ts'
@@ -544,4 +544,111 @@ test('the shell tab spawns one shell per agent, in that agent\'s directory', asy
   // a directory nobody is working in for the life of the app.
   await main.invoke('agent:forget', 'shelled')
   assert.equal(shell.killed, true)
+})
+test('agent:session names the session an exited agent can be resumed into', async () => {
+  await main.invoke('agent:spawn', {
+    id: 'marlow',
+    cwd: work,
+    cmd: 'claude',
+    cols: 80,
+    rows: 24,
+    role: 'data_analyst'
+  })
+
+  // Nothing has been asked of it yet, so no hook has reported a transcript and
+  // there is no session to offer. Null rather than a guess: the button that
+  // reads this is not drawn at all when the answer is null, and a made-up id
+  // would be a `--resume` the CLI refuses after the agent is already gone.
+  assert.equal(await main.invoke('agent:session', 'marlow'), null)
+
+  // The CLI reports its transcript on every hook payload, and the file it
+  // names is `<session-id>.jsonl`.
+  const sessions = join(work, 'projects', '-tmp-work')
+  mkdirSync(sessions, { recursive: true })
+  const transcript = join(sessions, 'd4c0ffee-1234-4321-abcd-0badc0ffee11.jsonl')
+  writeFileSync(transcript, '{}\n')
+  await main.hook('marlow').event({
+    hook_event_name: 'UserPromptSubmit',
+    transcript_path: transcript
+  })
+  assert.equal(
+    await main.invoke('agent:session', 'marlow'),
+    'd4c0ffee-1234-4321-abcd-0badc0ffee11'
+  )
+
+  // And it outlives the process, which is the whole point - it is read after
+  // the agent has exited, to start the next one back into that conversation.
+  await main.invoke('agent:kill', 'marlow')
+  assert.equal(
+    await main.invoke('agent:session', 'marlow'),
+    'd4c0ffee-1234-4321-abcd-0badc0ffee11',
+    'the session has to survive the exit, or there is nothing to resume'
+  )
+
+  // A restart is a new session, and main must not go on naming the old one.
+  // This is what put an id from two sessions ago behind the resume button: the
+  // CLI answered "No conversation found with session ID" and exited, so the
+  // button meant to bring an agent back was the one that killed it again.
+  await main.invoke('agent:restart', {
+    id: 'marlow',
+    cwd: work,
+    cmd: 'claude',
+    cols: 80,
+    rows: 24,
+    role: 'data_analyst'
+  })
+  assert.equal(
+    await main.invoke('agent:session', 'marlow'),
+    null,
+    'a restarted agent is in a session nothing has reported yet'
+  )
+
+  // A transcript the CLI never wrote out is not a session anyone can go back
+  // to. Offered anyway, `--resume` takes it, fails with "No conversation found
+  // with session ID", and kills the agent it was meant to bring back.
+  rmSync(transcript)
+  assert.equal(
+    await main.invoke('agent:session', 'marlow'),
+    null,
+    'a session whose transcript is gone must not be offered'
+  )
+
+  // An id nobody has spawned has no session, rather than an error.
+  assert.equal(await main.invoke('agent:session', 'nobody'), null)
+})
+test('closing the window asks before it stands a running floor down', async () => {
+  // Everyone the tests above left standing, gone the way a real exit reports
+  // itself - this one is about a floor with nobody on it.
+  for (const p of main.ptys.values()) if (!p.killed) p.exit(0)
+  await new Promise((r) => setTimeout(r, 30))
+
+  // Nobody running: nothing to lose, so nothing to ask. A dialog on every quit
+  // is one people learn to click through, including the time it mattered.
+  const quiet = await main.winEvent('close')
+  assert.equal(quiet.prevented, false, 'an empty floor closes without a question')
+
+  await main.invoke('agent:spawn', {
+    id: 'tobin',
+    cwd: work,
+    cmd: 'claude',
+    cols: 80,
+    rows: 24,
+    role: 'data_analyst'
+  })
+
+  // "Stay" - the default, and where Escape and a second stray click land.
+  dialogAnswer.messageBox = 1
+  const stayed = await main.winEvent('close')
+  assert.equal(stayed.prevented, true, 'a running agent has to be asked about')
+  assert.equal(main.pty('tobin').killed, false, 'staying must not stand anyone down')
+
+  // "Stand them down and quit". The close it makes has to get past the guard,
+  // or the answer opens the same dialog again and the window never shuts.
+  dialogAnswer.messageBox = 0
+  const agreed = await main.winEvent('close')
+  assert.equal(agreed.prevented, true, 'the first close is still the one that asked')
+  const after = await main.winEvent('close')
+  assert.equal(after.prevented, false, 'an agreed quit is not asked about twice')
+
+  dialogAnswer.messageBox = 0
 })

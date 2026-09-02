@@ -237,6 +237,12 @@ const api = {
   write: (id: string, data: string) => ipcRenderer.send('pty:write', id, data),
   /** Type a prompt and submit it - see submitPrompt in main for why not write(). */
   submit: (id: string, text: string) => ipcRenderer.invoke('agent:submit', id, text),
+  /**
+   * The CLI session id this agent was last in, or null if this run never saw
+   * one. What `--resume` takes, so an exited agent can be brought back into
+   * the conversation it was in rather than a new one.
+   */
+  session: (id: string): Promise<string | null> => ipcRenderer.invoke('agent:session', id),
   resize: (id: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', id, cols, rows),
   /**
    * Open one agent's plain shell, spawning it in that agent's directory if it

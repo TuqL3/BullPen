@@ -185,6 +185,19 @@ export class Approvals extends EventEmitter {
     return this.transcripts.get(agentId)
   }
 
+  /**
+   * Forget the transcript, because the process that reported it is gone.
+   *
+   * Called at spawn. A restarted CLI is in a new session and says so on its
+   * first hook - but until that hook arrives the map still holds the previous
+   * one, and everything reading it is reading about a process that has exited.
+   * Left in place it is what made `--resume` offer an id the CLI then refused
+   * as "No conversation found": the session before last, named confidently.
+   */
+  forgetTranscript(agentId: string): void {
+    this.transcripts.delete(agentId)
+  }
+
   /** Every hook payload carries the transcript path; that is where the token
    *  counts live, so remember it rather than trying to guess the path. */
   private noteTranscript(agentId: string, payload: HookPayload): void {

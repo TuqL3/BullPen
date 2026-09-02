@@ -204,6 +204,32 @@ export default function App() {
    * because the dialog is React and the terminal and the canvas are not.
    */
   const [prefs, setPrefsState] = useState<Prefs>(getPrefs())
+  /**
+   * The CLI session the selected agent was last in, once it has exited.
+   *
+   * Asked for rather than pushed, and only while looking at a dead agent: it
+   * is one string read from a map in main, and a channel of its own to keep it
+   * in step would be more machinery than the answer is worth. Null means this
+   * run never saw a session for it - the agent died before its first hook, or
+   * the app has restarted since - and the resume button is not drawn at all
+   * rather than drawn over nothing.
+   */
+  const [resumeId, setResumeId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const a = agents.find((x) => x.id === selected)
+    if (!a || a.status !== 'exited') {
+      setResumeId(null)
+      return
+    }
+    let live = true
+    window.bullpen.session(a.id).then((s) => {
+      if (live) setResumeId(s)
+    })
+    return () => {
+      live = false
+    }
+  }, [selected, agents])
 
   useEffect(() => {
     window.bullpen.askList().then(setQuestions)
@@ -757,7 +783,10 @@ export default function App() {
    * agent comes back as itself; `setRole` re-states it for a worker whose role
    * only the roster knows.
    */
-  const restart = async (a: Agent, change?: { cwd?: string; args?: string[] }): Promise<void> => {
+  const restart = async (
+    a: Agent,
+    change?: { cwd?: string; args?: string[]; once?: string[] }
+  ): Promise<void> => {
     const { cols, rows } = paneSize(termPane())
     const cwd = change?.cwd?.trim() || a.cwd
     // Its own arguments unless it is being changed onto others. They used to be
@@ -765,12 +794,18 @@ export default function App() {
     // CLI defaults to, which is an agent whose answers changed for a reason
     // nobody could see from the roster.
     const args = change?.args ?? a.args ?? []
+    // Arguments for this start and no other. `--resume <id>` is the one that
+    // needs it: kept in `args` it would be replayed by every restart after
+    // this, so a button that says it starts a fresh conversation would quietly
+    // have stopped doing that, and it would name a session further and further
+    // back each time.
+    const spawnArgs = change?.once?.length ? [...args, ...change.once] : args
     try {
       const state = await window.bullpen.spawn({
         id: a.id,
         cwd,
         cmd: a.cli ?? 'claude',
-        args,
+        args: spawnArgs,
         cols,
         rows,
         role: a.role
@@ -1041,9 +1076,46 @@ export default function App() {
               several `<section>`s on screen - see `termPane`. */}
           <section data-term-pane="" style={S.panel}>
             {/* The terminal stays mounted: unmounting it would drop scrollback. */}
-            <div style={{ height: '100%', display: tab === 'terminal' ? 'block' : 'none' }}>
+            <div style={{ ...S.termTab, display: tab === 'terminal' ? 'flex' : 'none' }}>
               {agents.length === 0 && <div style={S.empty}>Hire someone to start.</div>}
-              <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
+              <div style={S.termDeck}>
+                <TerminalDeck ids={agents.map((a) => a.id)} selected={selected} />
+              </div>
+              {/* Under the dead pane rather than up in the header: the exit was
+                  printed here, this is where the eye already is, and a control
+                  for a terminal three rows above the terminal is a control most
+                  people never find. Drawn only for an exited agent, so it does
+                  not take a row off a working one.
+
+                  Ungated by role, unlike the header's `close`. Dispatch was the
+                  one agent this screen could not bring back - and it is the one
+                  whose absence stops the floor. */}
+              {current?.status === 'exited' && (
+                <div style={S.deadBar}>
+                  <span style={{ ...LABEL, color: 'var(--faint)' }}>
+                    {current.name} exited
+                    {current.exitCode !== undefined ? ` · code ${current.exitCode}` : ''}
+                  </span>
+                  <button
+                    style={S.deadBtn}
+                    title={`start ${current.name} again - a new conversation, not the old one`}
+                    onClick={() => restart(current)}
+                  >
+                    restart
+                  </button>
+                  {/* Only when main actually holds a session id for it, so the
+                      button is never an offer the CLI turns down. */}
+                  {resumeId && (
+                    <button
+                      style={{ ...S.deadBtn, ...S.deadBtnGo }}
+                      title={`start ${current.name} again in session ${resumeId}, carrying on where it stopped`}
+                      onClick={() => restart(current, { once: ['--resume', resumeId] })}
+                    >
+                      resume
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
             {/* A deck, like the terminals above: one shell per agent, and the
                 selected row decides which of them is on screen. Kept mounted
@@ -2202,6 +2274,31 @@ const S: Record<string, React.CSSProperties> = {
     border: '1px solid var(--line)',
     font: `11px ${MONO}`
   },
+  // The terminal tab is a column now: the deck takes what is left, and the
+  // bar under it is only there when the agent is gone.
+  termTab: { height: '100%', flexDirection: 'column', minHeight: 0 },
+  termDeck: { flex: 1, minHeight: 0 },
+  deadBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    flex: '0 0 auto',
+    padding: '7px 12px',
+    borderTop: '1px solid var(--line)',
+    background: 'var(--panel)'
+  },
+  deadBtn: {
+    background: 'transparent',
+    border: '1px solid var(--line)',
+    borderRadius: 3,
+    color: 'var(--ink)',
+    cursor: 'pointer',
+    font: `10px ${MONO}`,
+    letterSpacing: '0.12em',
+    padding: '4px 10px',
+    textTransform: 'uppercase'
+  },
+  deadBtnGo: { borderColor: 'var(--accent)', color: 'var(--accent-ink)' },
   linkBtn: {
     background: 'transparent',
     border: 'none',

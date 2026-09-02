@@ -127,6 +127,14 @@ const AGENTS_HOME = join(BULLPEN_HOME, 'agents')
 
 const hive = new Hive(join(BULLPEN_HOME, 'hive'))
 const approvals = new Approvals(join(BULLPEN_HOME, 'control'))
+/**
+ * Whether a quit has been agreed to, so the close guard steps aside.
+ *
+ * Module scope rather than inside `wire()`: the window is rebuilt on some
+ * paths and the answer to "was this quit confirmed" is about the app, not
+ * about whichever window object is current.
+ */
+let quitting = false
 const ptys = new PtyManager()
 
 /**
@@ -356,6 +364,10 @@ function spawnAgent(spec: AgentSpec & { role?: string }): ReturnType<PtyManager[
 
   const agentHome = join(AGENTS_HOME, spec.id)
   const settingsPath = approvals.installHook(spec.id, agentHome)
+  // The session the last process was in died with it. Held on to, it is what
+  // `agent:session` answers with until the new one's first hook arrives - an
+  // id from two sessions ago, offered as this one's.
+  approvals.forgetTranscript(spec.id)
 
   // Every agent is told what it is and who it answers to at spawn. Michael's
   // own CLAUDE.md is the operator's file once it exists, so his half of the
@@ -1577,6 +1589,47 @@ function createWindow(): void {
   // The debounce loses the last drag if the window closes inside 400ms of it.
   win.on('close', persistBounds)
 
+  /**
+   * Closing the window stands the whole floor down, so say so first.
+   *
+   * `window-all-closed` runs `shutdown`, which is `ptys.killAll()`: every agent
+   * dies with whatever it was mid-turn on, and a CLI killed mid-turn does not
+   * come back - the conversation is on disk, but the work it was doing is not.
+   * One misplaced click on a title bar was the whole of that.
+   *
+   * Only when there is something to lose. A floor with nobody running on it has
+   * nothing to confirm, and a dialog on every quit is a dialog people learn to
+   * click through - which is how the one that mattered gets clicked through too.
+   *
+   * `Stay` is the default and the cancel, so Escape, and a second stray click,
+   * both land on the answer that keeps the floor.
+   */
+  win.on('close', (e) => {
+    if (quitting || !win) return
+    const live = ptys.list().filter((a) => a.status === 'running')
+    if (!live.length) return
+    e.preventDefault()
+    const holding = live.filter((a) => openCard(a.id))
+    void dialog
+      .showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Stand them down and quit', 'Stay'],
+        defaultId: 1,
+        cancelId: 1,
+        message: `${live.length} agent${live.length === 1 ? ' is' : 's are'} still running.`,
+        detail: holding.length
+          ? `${holding.map((a) => a.id).join(', ')} ${holding.length === 1 ? 'is' : 'are'} holding work - what they are mid-turn on is lost when they are stood down.`
+          : `${live.map((a) => a.id).join(', ')} - nothing is holding a card, but each one loses whatever turn it is in.`
+      })
+      .then(({ response }) => {
+        if (response !== 0) return
+        // Past the guard for good: `win.close()` fires this listener again, and
+        // asking a second time is a dialog that cannot be answered.
+        quitting = true
+        win?.close()
+      })
+  })
+
   // Drop the reference as soon as it dies, so send() short-circuits on null
   // rather than repeatedly probing a corpse.
   win.on('closed', () => {
@@ -1724,6 +1777,17 @@ function wire(): void {
     // id next.
     waiting.delete(id)
     activity.push('exit', id, `${id} exited (code ${code})`)
+    // Said in the terminal, the same way the shell says it above. A CLI that
+    // exits - `/exit`, a crash, a kill - leaves its pane holding whatever was
+    // on screen and swallowing every keystroke after it, because the pty on
+    // the other end is gone. Nothing on screen said so: the roster greys out
+    // on a tab the operator is not looking at, and the pane they are looking
+    // at is indistinguishable from one that is merely quiet.
+    send(
+      'pty:data',
+      id,
+      `\r\n\u001b[2m[agent exited (code ${code}) - restart or resume it from the bar below]\u001b[0m\r\n`
+    )
     send('agent:exit', id, code)
     // It may have been the last one out.
     reportWhenQuiet()
@@ -3749,6 +3813,31 @@ function wire(): void {
 
   // Used for the first briefing, which has the same paste problem.
   ipcMain.handle('agent:submit', (_e, id: string, text: string) => submitPrompt(id, text))
+  /**
+   * The CLI session this agent was last in, for restarting it back into that
+   * conversation rather than a fresh one.
+   *
+   * Read off the transcript path the hook already reports, because that is the
+   * one answer that is this agent's - `claude --continue` takes the newest
+   * conversation in the working directory, and on the default floor the analyst
+   * works in the boss's directory, so "newest" is regularly somebody else's.
+   * `<session-id>.jsonl` is what the CLI names the file, and the id in it is
+   * what `--resume` takes.
+   *
+   * In memory, so it is gone after an app restart. That is the honest lifetime:
+   * nothing here has read the transcripts on disk, and offering to resume a
+   * session this run never saw would be a guess dressed as a record.
+   */
+  ipcMain.handle('agent:session', (_e, id: string) => {
+    const path = approvals.transcriptOf(id)
+    // The file has to still be there. A CLI that exited without ever writing
+    // its conversation out leaves a transcript path that names nothing, and
+    // `--resume` on it dies with "No conversation found with session ID" -
+    // after the restart, in a pane whose agent is now gone again.
+    if (!path || !existsSync(path)) return null
+    const found = /([^/\\]+)\.jsonl$/i.exec(path)
+    return found ? found[1] : null
+  })
   ipcMain.handle('agent:kill', (_e, id: string) => {
     // Halt takes the queue with it: those notes were waiting for a tool call
     // this agent is not going to make. Same for anything it was blocked on -

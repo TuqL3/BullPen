@@ -52,6 +52,11 @@ export type Main = {
   channels: string[]
   /** The hook endpoints main installed for one agent, as its CLI would use them. */
   hook(id: string): Hook
+  /**
+   * Fire a window event the way Electron would, and get back whether anything
+   * called `preventDefault` on it - which is how a close is refused.
+   */
+  winEvent(event: string): Promise<{ prevented: boolean }>
   stop(): Promise<void>
 }
 
@@ -117,6 +122,15 @@ export async function bootMain(home: string): Promise<Main> {
   let resolveReady: () => void = () => {}
   const ready = new Promise<void>((r) => (resolveReady = r))
 
+  /**
+   * What main registered on the window, so a test can fire one.
+   *
+   * `on` was a no-op, which made everything hung off the window's own lifetime
+   * - bounds persistence, the guard that asks before standing the floor down -
+   * unreachable from here. Recording them costs a Map and makes that a channel
+   * like any other.
+   */
+  const winHandlers = new Map<string, ((...a: unknown[]) => void)[]>()
   const win = {
     isDestroyed: () => false,
     isFocused: () => true,
@@ -129,7 +143,9 @@ export async function bootMain(home: string): Promise<Main> {
     isFullScreen: () => false,
     loadFile: () => {},
     loadURL: () => {},
-    on: () => {},
+    on: (event: string, fn: (...a: unknown[]) => void) => {
+      winHandlers.set(event, [...(winHandlers.get(event) ?? []), fn])
+    },
     webContents: {
       isDestroyed: () => false,
       send: (channel: string, ...args: unknown[]) => pushed.push({ channel, args }),
@@ -218,6 +234,15 @@ export async function bootMain(home: string): Promise<Main> {
       return p
     },
     channels: [...handlers.keys()],
+    winEvent: async (event) => {
+      let prevented = false
+      const e = { preventDefault: () => { prevented = true } }
+      for (const fn of winHandlers.get(event) ?? []) fn(e)
+      // The guard answers a dialog before it decides, so give the promise it is
+      // waiting on a turn to settle before reporting what happened.
+      await new Promise((r) => setTimeout(r, 20))
+      return { prevented }
+    },
     hook: (id) => {
       const settings = JSON.parse(
         readFileSync(join(home, 'agents', id, 'settings.json'), 'utf8')
